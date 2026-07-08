@@ -1,0 +1,56 @@
+# Configuration
+
+All configuration is via environment variables (12-factor; friendly to Docker). Loaded once
+by `Config::from_env()` at startup. No config file in v1.
+
+## Variables
+
+| Env var | Default | Required | Meaning |
+|---|---|---|---|
+| `WHALE_TOKEN` | — | **yes** | Static bearer token for all `/api/*` routes. Startup fails if unset/empty. |
+| `WHALE_BIND` | `0.0.0.0:8080` | no | Listen address. |
+| `WHALE_DATA_DIR` | `/data` | no | Holds `whale.db`, `archive.txt`, import files, sidecars. Mount a volume. |
+| `WHALE_DOWNLOAD_DIR` | `/downloads` | no | Output directory for finished media. Mount a volume. |
+| `WHALE_CONCURRENCY` | `2` | no | Max simultaneous downloads (semaphore permits). |
+| `WHALE_CONTAINER` | `mkv` | no | `mkv` (default) or `mp4`. See DOWNLOAD_PIPELINE.md. |
+| `WHALE_OUTPUT_TEMPLATE` | `%(uploader,channel\|Unknown)s - %(title).150B [%(id)s].%(ext)s` | no | yt-dlp `-o` template. |
+| `WHALE_FORMAT` | `bv*+ba/b` | no | yt-dlp `-f` selector. |
+| `WHALE_SUBS` | `true` | no | Download+embed all real subtitles. |
+| `WHALE_AUTO_SUBS` | `false` | no | Also fetch auto-generated captions (`--write-auto-subs`). |
+| `WHALE_SUB_LANGS` | `all,-live_chat` | no | `--sub-langs` value. |
+| `WHALE_EMBED_THUMBNAIL` | `true` | no | `--embed-thumbnail`. |
+| `WHALE_COOKIES` | — | no | Path to a cookies.txt for auth-gated sites. |
+| `WHALE_YTDLP_PATH` | `yt-dlp` | no | Path/name of the yt-dlp binary. |
+| `WHALE_FFMPEG_LOCATION` | — | no | `--ffmpeg-location` if ffmpeg isn't on PATH. |
+| `WHALE_LOG` | `info` | no | `tracing` filter (`RUST_LOG`-style also honored). |
+
+## `Config` struct (shape for `config.rs`)
+
+```rust
+pub struct Config {
+    pub token: String,
+    pub bind: SocketAddr,
+    pub data_dir: PathBuf,
+    pub download_dir: PathBuf,
+    pub concurrency: usize,
+    pub container: Container,          // enum { Mkv, Mp4 }
+    pub output_template: String,
+    pub format: String,
+    pub subs: bool,
+    pub auto_subs: bool,
+    pub sub_langs: String,
+    pub embed_thumbnail: bool,
+    pub cookies: Option<PathBuf>,
+    pub ytdlp_path: String,
+    pub ffmpeg_location: Option<PathBuf>,
+}
+```
+Derived paths (not env): `db_path = data_dir/"whale.db"`, `archive_path = data_dir/"archive.txt"`.
+
+## Validation at startup
+
+- `WHALE_TOKEN` non-empty (fail fast otherwise).
+- `data_dir` and `download_dir` exist & are writable (create if missing).
+- `yt-dlp --version` succeeds (log + expose in `/api/health`); warn if `ffmpeg` missing
+  (needed for merge/embed).
+- `container` parses to the enum; unknown value → hard error listing valid options.
