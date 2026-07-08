@@ -2,8 +2,14 @@ services:
   whale:
     image: ghcr.io/OWNER/whale:latest
     environment:
-      WHALE_TOKEN: "change-me"
+      # Access token. If unset, Whale generates a random 32-char token on startup
+      # and prints it to the container log. Set it here to keep it stable.
+      # WHALE_TOKEN: "change-me"
       WHALE_CONCURRENCY: "2"
+      # Multi-threaded download: parallel fragments per job (Seal-style, default 4).
+      WHALE_CONCURRENT_FRAGMENTS: "4"
+      # Total download-rate cap, split across concurrent jobs. "0"/"none" disables.
+      WHALE_LIMIT_RATE: "10M"
     volumes:
       - ./data:/data
       - ./downloads:/downloads

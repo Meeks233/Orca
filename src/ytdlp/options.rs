@@ -44,6 +44,18 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
         args.push(cfg.sub_langs.clone());
     }
 
+    // Multi-threaded fragment download (Seal-style).
+    if cfg.concurrent_fragments > 1 {
+        args.push("--concurrent-fragments".into());
+        args.push(cfg.concurrent_fragments.to_string());
+    }
+
+    // Rate limiting: total cap split across concurrent jobs (bytes/s).
+    if let Some(rate) = cfg.per_job_limit_rate() {
+        args.push("--limit-rate".into());
+        args.push(rate);
+    }
+
     args.push("--embed-metadata".into());
 
     if cfg.embed_thumbnail {
@@ -100,10 +112,13 @@ mod tests {
     fn test_config() -> Config {
         Config {
             token: "secret".into(),
+            token_generated: false,
             bind: "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
             data_dir: PathBuf::from("/data"),
             download_dir: PathBuf::from("/downloads"),
             concurrency: 2,
+            concurrent_fragments: 4,
+            limit_rate: Some("10M".into()),
             container: Container::Mkv,
             output_template: "%(uploader,channel|Unknown)s - %(title).150B [%(id)s].%(ext)s".into(),
             format: "bv*+ba/b".into(),
@@ -188,6 +203,14 @@ mod tests {
 
         // thumbnail on
         assert!(args.iter().any(|a| a == "--embed-thumbnail"));
+
+        // multi-threaded fragments
+        let cf = pos(&args, "--concurrent-fragments");
+        assert_eq!(args[cf + 1], "4");
+
+        // rate limit: 10M total / concurrency 2 = 5 MiB/s per job
+        let lr = pos(&args, "--limit-rate");
+        assert_eq!(args[lr + 1], (5 * 1024 * 1024).to_string());
 
         // archive present
         let ai = pos(&args, "--download-archive");
