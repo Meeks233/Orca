@@ -7,11 +7,13 @@ by `Config::from_env()` at startup. No config file in v1.
 
 | Env var | Default | Required | Meaning |
 |---|---|---|---|
-| `WHALE_TOKEN` | — | **yes** | Static bearer token for all `/api/*` routes. Startup fails if unset/empty. |
+| `WHALE_TOKEN` | *(random)* | no | Static bearer token for all `/api/*` routes. If unset, a strong random 32-char token is generated at startup and logged (set it to keep a stable token). |
 | `WHALE_BIND` | `0.0.0.0:8080` | no | Listen address. |
 | `WHALE_DATA_DIR` | `/data` | no | Holds `whale.db`, `archive.txt`, import files, sidecars. Mount a volume. |
 | `WHALE_DOWNLOAD_DIR` | `/downloads` | no | Output directory for finished media. Mount a volume. |
 | `WHALE_CONCURRENCY` | `2` | no | Max simultaneous downloads (semaphore permits). |
+| `WHALE_CONCURRENT_FRAGMENTS` | `4` | no | yt-dlp `--concurrent-fragments`: parallel fragment threads per job (Seal-style multi-threaded download). `1` disables. |
+| `WHALE_LIMIT_RATE` | `10M` | no | Total download-rate cap, split evenly across `WHALE_CONCURRENCY` jobs and passed as per-job `--limit-rate`. `0`/`none`/`off` disables. |
 | `WHALE_CONTAINER` | `mkv` | no | `mkv` (default) or `mp4`. See DOWNLOAD_PIPELINE.md. |
 | `WHALE_OUTPUT_TEMPLATE` | `%(uploader,channel\|Unknown)s - %(title).150B [%(id)s].%(ext)s` | no | yt-dlp `-o` template. |
 | `WHALE_FORMAT` | `bv*+ba/b` | no | yt-dlp `-f` selector. |
@@ -29,10 +31,13 @@ by `Config::from_env()` at startup. No config file in v1.
 ```rust
 pub struct Config {
     pub token: String,
+    pub token_generated: bool,         // true if token was auto-generated
     pub bind: SocketAddr,
     pub data_dir: PathBuf,
     pub download_dir: PathBuf,
     pub concurrency: usize,
+    pub concurrent_fragments: usize,   // yt-dlp --concurrent-fragments
+    pub limit_rate: Option<String>,    // total rate cap; None disables
     pub container: Container,          // enum { Mkv, Mp4 }
     pub output_template: String,
     pub format: String,
@@ -49,7 +54,7 @@ Derived paths (not env): `db_path = data_dir/"whale.db"`, `archive_path = data_d
 
 ## Validation at startup
 
-- `WHALE_TOKEN` non-empty (fail fast otherwise).
+- `WHALE_TOKEN`: if unset, a random 32-char token is generated and logged at `warn`.
 - `data_dir` and `download_dir` exist & are writable (create if missing).
 - `yt-dlp --version` succeeds (log + expose in `/api/health`); warn if `ffmpeg` missing
   (needed for merge/embed).

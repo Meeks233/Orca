@@ -64,6 +64,14 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.download_dir)
         .with_context(|| format!("cannot create download dir {}", cfg.download_dir.display()))?;
 
+    if cfg.token_generated {
+        tracing::warn!(
+            "WHALE_TOKEN not set — generated a random access token: {}",
+            cfg.token
+        );
+        tracing::warn!("Enter this token in the web UI to unlock it. Set WHALE_TOKEN in your environment to keep it stable across restarts.");
+    }
+
     let ytdlp_version = ytdlp::version(&cfg).await?;
     tracing::info!("yt-dlp version: {ytdlp_version}");
 
