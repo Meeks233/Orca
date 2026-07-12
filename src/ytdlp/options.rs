@@ -91,9 +91,11 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
     args.push("--no-simulate".into());
     args.push("--newline".into());
 
+    // Trailing vcodec/acodec of the format being downloaded let us label the
+    // video vs audio pass of a split `bv*+ba` download (see parse_progress_line).
     args.push("--progress-template".into());
     args.push(
-        "download:__WHALE__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
+        "download:__WHALE__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.vcodec)s|%(info.acodec)s"
             .into(),
     );
 
@@ -240,7 +242,7 @@ mod tests {
 
         // progress template present
         assert!(args.iter().any(|a| a
-            == "download:__WHALE__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"));
+            == "download:__WHALE__%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(info.vcodec)s|%(info.acodec)s"));
 
         // print-to-file sidecar path uses item id
         let pi = pos(&args, "--print-to-file");

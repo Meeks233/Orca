@@ -80,6 +80,7 @@ async fn run_job(
         percent: None,
         speed: None,
         eta: None,
+        phase: None,
     });
 
     let item = match db.get(id).await {
@@ -122,6 +123,7 @@ async fn run_job(
                 percent: Some(100.0),
                 speed: None,
                 eta: None,
+                phase: None,
             });
         }
         Err(e) => {
@@ -136,6 +138,7 @@ async fn run_job(
                 percent: None,
                 speed: None,
                 eta: None,
+                phase: None,
             });
         }
     }

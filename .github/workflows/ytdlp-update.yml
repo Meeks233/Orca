@@ -1,9 +1,17 @@
 name: yt-dlp Update
 
+# Agile release: poll yt-dlp's *stable* channel daily; when a new stable tag
+# lands, rebuild + publish the Docker image and record the version so every
+# other build (docker, Android APK) tracks the same pinned yt-dlp.
 on:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
+
+# Never let two update runs race on the YTDLP_VERSION commit/push.
+concurrency:
+  group: ytdlp-update
+  cancel-in-progress: false
 
 jobs:
   update:
@@ -60,10 +68,27 @@ jobs:
 
       - name: Commit bumped YTDLP_VERSION
         if: steps.check.outputs.changed == 'true'
+        env:
+          # Pass the tag via env (not inline ${{ }}) so it can't break out of the
+          # shell command — it's the single source of truth every build pins to.
+          LATEST: ${{ steps.check.outputs.latest }}
         run: |
-          echo "${{ steps.check.outputs.latest }}" > YTDLP_VERSION
+          printf '%s\n' "$LATEST" > YTDLP_VERSION
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add YTDLP_VERSION
-          git commit -m "chore: bump yt-dlp to ${{ steps.check.outputs.latest }}"
+          git commit -m "chore: bump yt-dlp to $LATEST"
           git push
+
+      - name: Summary
+        if: always()
+        env:
+          CURRENT: ${{ steps.check.outputs.current }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          CHANGED: ${{ steps.check.outputs.changed }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            echo "⬆️ yt-dlp **$CURRENT → $LATEST** — rebuilt & pushed Docker image." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ yt-dlp already up to date at **$CURRENT**." >> "$GITHUB_STEP_SUMMARY"
+          fi
