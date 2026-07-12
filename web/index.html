@@ -32,6 +32,17 @@
       <button id="token-save" class="btn">Save</button>
     </div>
     <p id="token-hint" class="hint hidden">Invalid token.</p>
+
+    <hr class="sep">
+    <label for="seal-archive">Import Seal / yt-dlp history</label>
+    <p class="hint-muted">
+      Paste your Seal or yt-dlp <em>download archive</em> — one <code>extractor id</code>
+      per line (e.g. <code>youtube dQw4w9WgXcQ</code>). Whale marks these as already
+      downloaded, so they won’t re-download when submitted again.
+    </p>
+    <textarea id="seal-archive" class="ta" rows="4"
+              placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..."></textarea>
+    <button id="seal-import" class="btn wide">Import archive</button>
   </section>
 
   <section id="cookies" class="settings hidden">

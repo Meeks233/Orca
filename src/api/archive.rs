@@ -19,6 +19,12 @@ pub struct KeyRequest {
     pub key: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ImportRequest {
+    /// Raw yt-dlp/Seal download-archive text: one `extractor id` key per line.
+    pub archive: String,
+}
+
 /// GET /api/archive — list all dedup keys (sorted).
 pub async fn list(State(state): State<AppState>) -> AppResult<Response> {
     Ok(Json(json!({ "keys": state.archive.keys().await })).into_response())
@@ -35,6 +41,32 @@ pub async fn add(State(state): State<AppState>, Json(req): Json<KeyRequest>) -> 
     }
     state.archive.insert(key).await.map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(json!({ "added": true, "key": key })).into_response())
+}
+
+/// POST /api/archive/import — bulk-import a Seal/yt-dlp download archive. Body
+/// `{ "archive": "youtube abc123\ntwitter 456\n…" }`. Blank/malformed lines are
+/// skipped; the rest seed "already have this" dedup state. Idempotent.
+pub async fn import(
+    State(state): State<AppState>,
+    Json(req): Json<ImportRequest>,
+) -> AppResult<Response> {
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    for line in req.archive.lines() {
+        let key = line.trim();
+        // Seal/yt-dlp keys are `extractor id`; anything without a space is junk.
+        if key.is_empty() || !key.contains(' ') {
+            skipped += 1;
+            continue;
+        }
+        state
+            .archive
+            .insert(key)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        added += 1;
+    }
+    Ok(Json(json!({ "added": added, "skipped": skipped })).into_response())
 }
 
 /// DELETE /api/archive — remove a dedup key. Body `{ "key": "youtube abc123" }`.

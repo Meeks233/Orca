@@ -12,7 +12,40 @@
   --run: #38bdf8;
 }
 
+/* Material You / system accent: use the OS accent color where the engine exposes
+   it (Android 12+ WebView surfaces the dynamic accent via CSS system colors),
+   falling back to the brand blue everywhere else. */
+@supports (color: AccentColor) {
+  :root { --accent: AccentColor; --run: AccentColor; }
+}
+
+/* Follow the system light/dark appearance. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --surface-2: #eef2f9;
+    --border: #d9e0ec;
+    --text: #16223a;
+    --muted: #5c6b86;
+    --run: #0284c7;
+  }
+  @supports (color: AccentColor) {
+    :root { --accent: AccentColor; --run: AccentColor; }
+  }
+}
+
 * { box-sizing: border-box; }
+
+/* Kill the default square tap-highlight (it ignores border-radius on pills);
+   interactive elements get their own rounded :active feedback instead. */
+a, button, summary, input, textarea, [role="button"],
+.act, .chip, .btn, .icon-btn, .ck-btn {
+  -webkit-tap-highlight-color: transparent;
+}
+.act:active, .chip:active, .btn:active, .ck-btn:active, .icon-btn:active {
+  filter: brightness(1.3);
+}
 
 html, body {
   margin: 0;
@@ -86,6 +119,20 @@ input:focus { outline: none; border-color: var(--accent); }
 .settings label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
+.hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: 4px; font-size: 11px; }
+.sep { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.ta {
+  width: 100%;
+  padding: 8px 10px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+  margin-bottom: 8px;
+}
+.ta:focus { outline: none; border-color: var(--accent); }
 
 .topbar-actions { display: flex; gap: 2px; }
 
@@ -167,11 +214,12 @@ input:focus { outline: none; border-color: var(--accent); }
 .thumb-wrap {
   position: relative;
   flex: 0 0 auto;
-  /* Don't stretch to the card's full height — stay glued to the thumbnail so the
-     duration/badges sit on the image, not floating below it. */
+  /* Don't stretch to the card's full height, and hug the image exactly (no
+     explicit height, line-height:0 kills the inline gap) so the overlays sit
+     on the thumbnail — never floating below it. */
   align-self: flex-start;
   width: 120px;
-  height: 68px;
+  line-height: 0;
   text-decoration: none;
 }
 .thumb-play { cursor: pointer; }
@@ -184,48 +232,61 @@ input:focus { outline: none; border-color: var(--accent); }
   background: var(--surface-2);
 }
 .thumb-empty { background: var(--surface-2); }
-/* Duration pill: bottom-left of the thumbnail box. */
-.dur {
+/* Thumbnail overlays share one type scale and sit a hair in from the corners. */
+.dur, .src-badge {
   position: absolute;
-  left: 4px;
-  bottom: 4px;
-  background: rgba(0,0,0,.75);
-  color: #fff;
-  font-size: 11px;
+  bottom: 5px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  font-weight: 600;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: 5px;
+  color: #fff;
+  background: rgba(0,0,0,.72);
 }
-/* Cloud-only badge: top-right corner (bottom-right is the play affordance). */
+/* Duration pill: bottom-left of the thumbnail box. */
+.dur { left: 5px; }
+/* Source badge: top-left corner, compact (see task: mark source without height). */
+.src-badge {
+  left: 5px;
+  bottom: auto;
+  top: 5px;
+  background: rgba(0,0,0,.6);
+  text-transform: capitalize;
+  letter-spacing: .2px;
+}
+/* Cloud-only badge: top-right corner. */
 .cloud-badge {
   position: absolute;
-  right: 4px;
-  top: 4px;
+  right: 5px;
+  top: 5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: rgba(0,0,0,.7);
-  border-radius: 4px;
+  background: rgba(0,0,0,.6);
+  border-radius: 5px;
   padding: 1px 3px;
 }
-/* Play affordance: bottom-right of a finished thumbnail. */
+/* Play affordance: subtle, small, bottom-right of a finished thumbnail. */
 .play-badge {
   position: absolute;
-  right: 4px;
-  bottom: 4px;
+  right: 5px;
+  bottom: 5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   color: #fff;
-  background: rgba(0,0,0,.55);
+  background: rgba(0,0,0,.42);
   border-radius: 999px;
   pointer-events: none;
   transition: background .15s ease, transform .15s ease;
 }
+.play-badge svg { width: 14px; height: 14px; margin-left: 1px; /* optical centre */ }
 .thumb-play:hover .play-badge,
-.thumb-play:focus-visible .play-badge { background: var(--accent); transform: scale(1.06); }
+.thumb-play:focus-visible .play-badge { background: var(--accent); transform: scale(1.08); }
 .thumb-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
 .act-cloud { border-style: dashed; color: var(--muted, #9aa); cursor: default; }
 
