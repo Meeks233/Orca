@@ -33,6 +33,8 @@ const els = {
   tokenHint: document.getElementById('token-hint'),
   server: document.getElementById('server'),
   serverSave: document.getElementById('server-save'),
+  sealArchive: document.getElementById('seal-archive'),
+  sealImport: document.getElementById('seal-import'),
   submitForm: document.getElementById('submit-form'),
   url: document.getElementById('url'),
   submitBtn: document.getElementById('submit-btn'),
@@ -148,15 +150,29 @@ function isPlayable(item) {
   return item.status === 'completed' && !!item.filepath;
 }
 
+// Friendly platform name from yt-dlp's extractor id (e.g. "youtube:tab" → YouTube).
+function sourceLabel(extractor) {
+  if (!extractor) return '';
+  const base = String(extractor).split(/[:_]/)[0].toLowerCase();
+  const NAMES = {
+    youtube: 'YouTube', twitter: 'X', x: 'X', bilibili: 'Bilibili', tiktok: 'TikTok',
+    instagram: 'Instagram', soundcloud: 'SoundCloud', vimeo: 'Vimeo', twitch: 'Twitch',
+    facebook: 'Facebook', reddit: 'Reddit', pornhub: 'Pornhub', generic: 'Web',
+  };
+  return NAMES[base] || (base.charAt(0).toUpperCase() + base.slice(1));
+}
+
 // Thumbnail block. Playable items become a play button (tap → fullscreen player);
-// everything else keeps the link out to the source page.
-function thumbHtml(item, thumb, dur, cloud) {
+// everything else keeps the link out to the source page. Overlays: source
+// (top-left), cloud (top-right), duration (bottom-left), play (bottom-right).
+function thumbHtml(item, thumb, dur, cloud, src) {
+  const overlays = `${thumb}${dur}${cloud}${src}`;
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
     return `<div class="thumb-wrap thumb-play" role="button" tabindex="0" aria-label="Play"
-      data-play="1" data-id="${item.id}" data-cloud="${cloudOnly}">${thumb}${dur}${cloud}${PLAY_BADGE}</div>`;
+      data-play="1" data-id="${item.id}" data-cloud="${cloudOnly}">${overlays}${PLAY_BADGE}</div>`;
   }
-  return `<a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${thumb}${dur}${cloud}</a>`;
+  return `<a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${overlays}</a>`;
 }
 
 function rowHtml(item) {
@@ -165,12 +181,14 @@ function rowHtml(item) {
     : `<div class="thumb thumb-empty"></div>`;
   const dur = item.duration ? `<span class="dur">${esc(fmtDuration(item.duration))}</span>` : '';
   const cloud = item.status === 'completed' && item.filepath && !item.local_available ? CLOUD_BADGE : '';
+  const srcLabel = sourceLabel(item.extractor);
+  const src = srcLabel ? `<span class="src-badge">${esc(srcLabel)}</span>` : '';
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
   const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
   const meta = item.error ? `<div class="err">${esc(item.error)}</div>` : '';
   return `
-    ${thumbHtml(item, thumb, dur, cloud)}
+    ${thumbHtml(item, thumb, dur, cloud, src)}
     <div class="body">
       <div class="title">${esc(item.title)}</div>
       ${uploader}
@@ -508,6 +526,31 @@ if (els.serverSave) {
   });
 }
 
+// Import a Seal / yt-dlp download archive → seed dedup "already have this" keys.
+if (els.sealImport) {
+  els.sealImport.addEventListener('click', async () => {
+    const text = (els.sealArchive.value || '').trim();
+    if (!text) { toast('Paste your Seal / yt-dlp archive first', 'error'); return; }
+    els.sealImport.disabled = true;
+    try {
+      const res = await apiFetch('/api/archive/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archive: text }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast((data && (data.message || data.error)) || 'Import failed', 'error'); return; }
+      toast(`Imported ${data.added} item(s)` + (data.skipped ? `, skipped ${data.skipped}` : ''),
+        'ok');
+      els.sealArchive.value = '';
+    } catch (e) {
+      if (!e || !e.unauthorized) toast('Network error', 'error');
+    } finally {
+      els.sealImport.disabled = false;
+    }
+  });
+}
+
 els.submitForm.addEventListener('submit', (e) => {
   e.preventDefault();
   submitUrl(els.url.value.trim());
@@ -646,13 +689,28 @@ async function drainSharedIntents() {
   } catch (_) { /* plugin absent (desktop) or nothing queued */ }
 }
 
+// Drain now, then again shortly after: a shared intent is often enqueued a beat
+// after the focus/resume event that woke us, so a single drain can miss it
+// (this was the "X share does nothing" bug).
+function drainSoon() {
+  drainSharedIntents();
+  setTimeout(drainSharedIntents, 250);
+  setTimeout(drainSharedIntents, 700);
+}
+
 function setupNativeShare() {
   const T = window.__TAURI__;
-  if (!T || !T.event || !T.event.listen) return;
-  drainSharedIntents();
-  // Android delivers a fresh share via a focus event on the existing task.
-  T.event.listen('tauri://focus', () => drainSharedIntents());
-  T.event.listen('new-intent', () => drainSharedIntents()); // iOS
+  if (!T || !T.core || !T.core.invoke) return; // desktop / plugin absent
+  drainSoon();
+  if (T.event && T.event.listen) {
+    // Android delivers a fresh share via focus/resume on the existing task.
+    T.event.listen('tauri://focus', drainSoon);
+    T.event.listen('tauri://resume', drainSoon);
+    T.event.listen('new-intent', drainSoon);
+  }
+  // Belt-and-suspenders: any time the WebView regains visibility/focus, re-drain.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) drainSoon(); });
+  window.addEventListener('focus', drainSoon);
 }
 
 // ---- Native download notifications (mobile) -------------------------------
@@ -680,12 +738,12 @@ function notifyProgress(ev) {
   const title = (titleEl && titleEl.textContent) || ('Item #' + ev.id);
   try {
     if (ev.status === 'completed') {
-      N.sendNotification({ id: ev.id, title, body: '✓ Download complete', ongoing: false, autoCancel: true });
+      N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: '✓ Download complete', ongoing: false, autoCancel: true });
       notif.last.delete(ev.id);
       return;
     }
     if (ev.status === 'failed') {
-      N.sendNotification({ id: ev.id, title, body: '✗ Download failed', ongoing: false, autoCancel: true });
+      N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: '✗ Download failed', ongoing: false, autoCancel: true });
       notif.last.delete(ev.id);
       return;
     }
@@ -699,7 +757,7 @@ function notifyProgress(ev) {
     const stage = ev.phase ? ev.phase[0].toUpperCase() + ev.phase.slice(1) + ' · ' : '';
     const pctStr = ev.percent == null ? 'Downloading' : Math.round(ev.percent) + '%';
     const spd = ev.speed ? ' · ' + ev.speed : '';
-    N.sendNotification({ id: ev.id, title, body: `${stage}${pctStr}${spd}`, ongoing: true, silent: true });
+    N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: `${stage}${pctStr}${spd}`, ongoing: true, silent: true });
     notif.last.set(ev.id, { pct, t: now, phase: ev.phase || '' });
   } catch (_) { /* plugin call failed; ignore */ }
 }
