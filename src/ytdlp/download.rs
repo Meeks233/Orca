@@ -97,13 +97,29 @@ pub(crate) fn parse_progress_line(id: i64, line: &str) -> Option<ProgressEvent> 
     let pct = parts.next().unwrap_or("");
     let speed = parts.next().unwrap_or("");
     let eta = parts.next().unwrap_or("");
+    let vcodec = parts.next().unwrap_or("");
+    let acodec = parts.next().unwrap_or("");
     Some(ProgressEvent {
         id,
         status: Status::Running,
         percent: parse_percent(pct),
         speed: clean(speed),
         eta: clean(eta),
+        phase: phase_of(vcodec, acodec),
     })
+}
+
+/// Classify the current sub-download from the format's codecs. A `bv*+ba`
+/// download runs two passes (0→100% each): the video-only stream (`vcodec` real,
+/// `acodec` "none") then the audio-only stream (`acodec` real, `vcodec` "none").
+/// A single progressive file carries both codecs → `None` (one continuous bar).
+pub(crate) fn phase_of(vcodec: &str, acodec: &str) -> Option<String> {
+    let has = |c: &str| !matches!(c.trim(), "" | "none" | "N/A" | "NA");
+    match (has(vcodec), has(acodec)) {
+        (true, false) => Some("video".to_string()),
+        (false, true) => Some("audio".to_string()),
+        _ => None,
+    }
 }
 
 /// Parse yt-dlp's `_percent_str` (e.g. `" 63.4%"`) into an f32.
@@ -126,20 +142,29 @@ mod tests {
 
     #[test]
     fn parses_full_progress_line() {
-        let ev = parse_progress_line(7, "__WHALE__ 63.4%|4.02MiB/s|00:19").unwrap();
+        let ev = parse_progress_line(7, "__WHALE__ 63.4%|4.02MiB/s|00:19|vp9|none").unwrap();
         assert_eq!(ev.id, 7);
         assert_eq!(ev.status, Status::Running);
         assert!((ev.percent.unwrap() - 63.4).abs() < 0.01);
         assert_eq!(ev.speed.as_deref(), Some("4.02MiB/s"));
         assert_eq!(ev.eta.as_deref(), Some("00:19"));
+        assert_eq!(ev.phase.as_deref(), Some("video"));
     }
 
     #[test]
     fn maps_na_and_unknown_to_none() {
-        let ev = parse_progress_line(1, "__WHALE__100.0%|N/A|Unknown").unwrap();
+        let ev = parse_progress_line(1, "__WHALE__100.0%|N/A|Unknown|none|opus").unwrap();
         assert!((ev.percent.unwrap() - 100.0).abs() < 0.01);
         assert_eq!(ev.speed, None);
         assert_eq!(ev.eta, None);
+        assert_eq!(ev.phase.as_deref(), Some("audio"));
+    }
+
+    #[test]
+    fn progressive_file_has_no_phase() {
+        // Single file carrying both codecs → no phase label (one continuous bar).
+        let ev = parse_progress_line(3, "__WHALE__ 10.0%|1MiB/s|00:05|avc1|mp4a").unwrap();
+        assert_eq!(ev.phase, None);
     }
 
     #[test]

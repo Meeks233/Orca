@@ -64,6 +64,10 @@
            title="e621-style syntax: id: user:/uploader: title: platform:/site: — prefix a term with - to exclude. Bare words match title or uploader.">
   </section>
 
+  <div id="ptr" class="ptr" aria-hidden="true">
+    <svg class="ptr-spin" viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M12 3a9 9 0 1 0 9 9"/></svg>
+  </div>
+
   <main>
     <ul id="history" class="history"></ul>
     <div id="empty" class="empty hidden">No items yet.</div>
@@ -71,6 +75,13 @@
   </main>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <!-- In-app fullscreen player. Opened by tapping a completed thumbnail; the
+       Android back button pops it (see app.js) instead of exiting the app. -->
+  <div id="player" class="player-overlay hidden" aria-hidden="true">
+    <button id="player-close" class="player-close" aria-label="Close">✕</button>
+    <video id="player-video" class="player-video" controls playsinline autoplay></video>
+  </div>
 
   <script src="/app.js"></script>
 </body>

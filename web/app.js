@@ -42,6 +42,10 @@ const els = {
   empty: document.getElementById('empty'),
   loadMore: document.getElementById('load-more'),
   toasts: document.getElementById('toasts'),
+  ptr: document.getElementById('ptr'),
+  player: document.getElementById('player'),
+  playerVideo: document.getElementById('player-video'),
+  playerClose: document.getElementById('player-close'),
 };
 
 // ---- List state -----------------------------------------------------------
@@ -121,30 +125,39 @@ function actionsHtml(item) {
   if (item.status !== 'completed' || !item.filepath) return '';
   const local = !!item.local_available;
   const pub = !!item.public;
-  // Local file present: play/download it directly, and allow public sharing.
-  // Local file gone (backed away): the <video> src is resolved on demand from
-  // upstream via /stream-url (see resolveCloudVideo); no download/share.
-  const video = local
-    ? `<video class="video" controls preload="none" playsinline src="${fileUrl(item.id)}"></video>`
-    : `<video class="video" controls preload="none" playsinline data-cloud="1" data-id="${item.id}"></video>`;
+  // Playback now lives on the thumbnail tap (see rowHtml/openPlayer); the card
+  // only carries Save + share controls. Local file present: save/share it.
+  // Local file gone (backed away): plays from upstream, no save/share.
   const localActions = local
-    ? `<a class="act" href="${fileUrl(item.id, true)}" download>⬇ Download</a>
+    ? `<a class="act" href="${fileUrl(item.id, true)}" download>⬇ Save</a>
       <button class="act ${pub ? 'act-on' : ''}" data-act="public" data-id="${item.id}" data-public="${pub ? '1' : '0'}">${pub ? '🌐 Public' : '🔒 Private'}</button>
       ${pub && item.public_slug ? `<button class="act" data-act="copy" data-slug="${item.public_slug}">🔗 Copy link</button>` : ''}`
     : `<span class="act act-cloud" title="Local copy is gone — plays from source">☁ Cloud only</span>`;
-  return `
-    <div class="actions">
-      <details class="player">
-        <summary class="act">▶ Play</summary>
-        ${video}
-      </details>
-      ${localActions}
-    </div>`;
+  return `<div class="actions">${localActions}</div>`;
 }
 
 // Cloud-file corner badge for the thumbnail: shown when an item is completed but
 // its local copy is gone, signalling playback will stream from source.
 const CLOUD_BADGE = `<span class="cloud-badge" title="Cloud only — plays from source"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M19 18H6a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 16.5 9H17a3.5 3.5 0 0 1 2 6.37V18Z"/></svg></span>`;
+// Play affordance shown on a finished thumbnail (bottom-right). Tapping the
+// thumbnail opens the in-app fullscreen player (see openPlayer).
+const PLAY_BADGE = `<span class="play-badge" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span>`;
+
+// A completed item with a file is playable in-app (local file or cloud fallback).
+function isPlayable(item) {
+  return item.status === 'completed' && !!item.filepath;
+}
+
+// Thumbnail block. Playable items become a play button (tap → fullscreen player);
+// everything else keeps the link out to the source page.
+function thumbHtml(item, thumb, dur, cloud) {
+  if (isPlayable(item)) {
+    const cloudOnly = !item.local_available ? '1' : '';
+    return `<div class="thumb-wrap thumb-play" role="button" tabindex="0" aria-label="Play"
+      data-play="1" data-id="${item.id}" data-cloud="${cloudOnly}">${thumb}${dur}${cloud}${PLAY_BADGE}</div>`;
+  }
+  return `<a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${thumb}${dur}${cloud}</a>`;
+}
 
 function rowHtml(item) {
   const thumb = item.thumbnail_url
@@ -157,12 +170,13 @@ function rowHtml(item) {
   const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
   const meta = item.error ? `<div class="err">${esc(item.error)}</div>` : '';
   return `
-    <a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${thumb}${dur}${cloud}</a>
+    ${thumbHtml(item, thumb, dur, cloud)}
     <div class="body">
       <div class="title">${esc(item.title)}</div>
       ${uploader}
       <div class="statusline">
         <span class="badge badge-${esc(item.status)}">${esc(item.status)}</span>
+        <span class="phase"></span>
         <span class="speed"></span>
         <span class="eta"></span>
       </div>
@@ -189,12 +203,20 @@ function upsertRow(item, prepend) {
 
 // Patch a row in place from a ProgressEvent (does not rebuild full row).
 function patchRow(ev) {
+  notifyProgress(ev); // native download notification (mobile only; no-op elsewhere)
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
   const badge = li.querySelector('.badge');
   if (badge) {
     badge.textContent = ev.status;
     badge.className = 'badge badge-' + ev.status;
+  }
+  const phase = li.querySelector('.phase');
+  if (phase) {
+    // Label the video/audio pass so the per-pass 0→100% reset reads as a new
+    // stage rather than the bar "jumping" backwards.
+    phase.textContent = ev.phase ? ev.phase[0].toUpperCase() + ev.phase.slice(1) : '';
+    phase.className = 'phase' + (ev.phase ? ' phase-' + ev.phase : '');
   }
   const speed = li.querySelector('.speed');
   if (speed) speed.textContent = ev.speed || '';
@@ -205,9 +227,10 @@ function patchRow(ev) {
   const terminal = !!TERMINAL[ev.status];
   if (terminal) {
     if (bar) bar.classList.add('hidden');
+    if (phase) phase.textContent = '';
     if (speed) speed.textContent = '';
     if (eta) eta.textContent = '';
-    // A just-completed item gains a file: refetch to render play/download/share.
+    // A just-completed item gains a file: refetch to render play/save/share.
     if (ev.status === 'completed') {
       apiFetch('/api/items/' + ev.id)
         .then((r) => (r.ok ? r.json() : null))
@@ -506,13 +529,10 @@ els.search.addEventListener('input', debounce(() => {
 
 els.loadMore.addEventListener('click', () => loadItems(false));
 
-// Delegated actions on cards (public toggle, copy link). <summary> play toggle
-// is native — it carries no data-act, so it falls through here untouched.
+// Delegated actions on cards: thumbnail play, public toggle, copy link.
 els.history.addEventListener('click', (e) => {
-  // Opening a cloud-only player: lazily resolve an upstream stream URL. The
-  // native <summary> toggle proceeds regardless (no data-act on it).
-  const summary = e.target.closest('.player > summary');
-  if (summary) resolveCloudVideo(summary);
+  const play = e.target.closest('.thumb-play');
+  if (play) { e.preventDefault(); openPlayer(Number(play.dataset.id), play.dataset.cloud === '1'); return; }
 
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
@@ -521,22 +541,64 @@ els.history.addEventListener('click', (e) => {
   else if (btn.dataset.act === 'copy') copyPublicLink(btn.dataset.slug);
 });
 
-// For a cloud-only item (local file gone), fetch a fresh upstream stream URL and
-// set it as the <video> source. Runs once per player; no-op if already resolved.
-function resolveCloudVideo(summary) {
-  const details = summary.closest('details.player');
-  const video = details && details.querySelector('video[data-cloud]');
-  if (!video || video.src || video.dataset.loading) return;
-  video.dataset.loading = '1';
-  apiFetch('/api/items/' + video.dataset.id + '/stream-url')
-    .then((r) => (r.ok ? r.json() : null))
-    .then((d) => {
-      if (d && d.url) { video.src = d.url; video.load(); }
-      else toast('Could not resolve stream from source', 'error');
-    })
-    .catch(() => { /* auth/network handled by apiFetch */ })
-    .finally(() => { delete video.dataset.loading; });
+// Keyboard access for the play thumbnail (it's a role="button").
+els.history.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const play = e.target.closest('.thumb-play');
+  if (!play) return;
+  e.preventDefault();
+  openPlayer(Number(play.dataset.id), play.dataset.cloud === '1');
+});
+
+// ---- Fullscreen in-app player ---------------------------------------------
+// Tapping a finished thumbnail opens a fullscreen overlay instead of navigating
+// away (a new page/tab fights the mobile app's single-task model). We push a
+// history entry so the Android back button pops the player back to the list
+// rather than exiting the app.
+function openPlayer(id, cloud) {
+  const v = els.playerVideo;
+  els.player.classList.remove('hidden');
+  els.player.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('player-open');
+  if (!(history.state && history.state.player)) history.pushState({ player: true }, '');
+  const play = () => v.play().catch(() => { /* autoplay may need a tap */ });
+  if (cloud) {
+    v.removeAttribute('src');
+    v.dataset.loading = '1';
+    apiFetch('/api/items/' + id + '/stream-url')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && d.url) { v.src = d.url; v.load(); play(); }
+        else { toast('Could not resolve stream from source', 'error'); closePlayer(true); }
+      })
+      .catch(() => { closePlayer(true); })
+      .finally(() => { delete v.dataset.loading; });
+  } else {
+    v.src = fileUrl(id);
+    v.load();
+    play();
+  }
 }
+
+// Hide the player and release the media. `pop` true rewinds the history entry
+// we pushed (used when closing via the ✕ button; the back button already popped).
+function closePlayer(pop) {
+  if (els.player.classList.contains('hidden')) return;
+  const v = els.playerVideo;
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  els.player.classList.add('hidden');
+  els.player.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('player-open');
+  if (pop && history.state && history.state.player) history.back();
+}
+
+els.playerClose.addEventListener('click', () => closePlayer(true));
+// Android hardware back / browser back: pop the player, don't leave the app.
+window.addEventListener('popstate', () => {
+  if (!els.player.classList.contains('hidden')) closePlayer(false);
+});
 
 // ---- Share target: ?url= / ?text= (browser/PWA) ---------------------------
 function handleShareParam() {
@@ -556,7 +618,13 @@ function extractUrl(text) {
 
 // Common entry for a shared URL from any source: fill the box and submit.
 function handleSharedText(shared) {
-  const url = extractUrl(shared);
+  let text = String(shared || '');
+  // Some share paths (the Android sharetarget plugin) deliver the text
+  // percent-encoded (https%3A%2F%2F…). Decode defensively before extracting.
+  if (/%[0-9A-Fa-f]{2}/.test(text)) {
+    try { text = decodeURIComponent(text); } catch (_) { /* keep raw */ }
+  }
+  const url = extractUrl(text);
   if (!url) return;
   els.url.value = url;
   if (getToken()) submitUrl(url);
@@ -587,6 +655,91 @@ function setupNativeShare() {
   T.event.listen('new-intent', () => drainSharedIntents()); // iOS
 }
 
+// ---- Native download notifications (mobile) -------------------------------
+// Seal-style: ask for the notification permission up front, then surface each
+// download's live progress as an ongoing notification that updates in place.
+const notif = { granted: false, last: new Map() };
+
+async function setupNotifications() {
+  const N = window.__TAURI__ && window.__TAURI__.notification;
+  if (!N) return; // desktop browser or plugin absent
+  try {
+    let ok = await N.isPermissionGranted();
+    if (!ok) ok = (await N.requestPermission()) === 'granted';
+    notif.granted = !!ok;
+  } catch (_) { /* plugin missing/blocked — silently skip */ }
+}
+
+// Drive a per-item notification from progress ticks. Throttled so we replace one
+// ongoing notification (by item id) instead of spamming a stack of them.
+function notifyProgress(ev) {
+  const N = window.__TAURI__ && window.__TAURI__.notification;
+  if (!N || !notif.granted) return;
+  const li = state.rows.get(ev.id);
+  const titleEl = li && li.querySelector('.title');
+  const title = (titleEl && titleEl.textContent) || ('Item #' + ev.id);
+  try {
+    if (ev.status === 'completed') {
+      N.sendNotification({ id: ev.id, title, body: '✓ Download complete', ongoing: false, autoCancel: true });
+      notif.last.delete(ev.id);
+      return;
+    }
+    if (ev.status === 'failed') {
+      N.sendNotification({ id: ev.id, title, body: '✗ Download failed', ongoing: false, autoCancel: true });
+      notif.last.delete(ev.id);
+      return;
+    }
+    if (ev.status !== 'running') return;
+    const prev = notif.last.get(ev.id) || { pct: -10, t: 0, phase: '' };
+    const now = Date.now();
+    const pct = ev.percent == null ? prev.pct : ev.percent;
+    const phaseChanged = (ev.phase || '') !== prev.phase;
+    // Update at most ~1/s and only on a ≥2% move or a stage change.
+    if (!phaseChanged && now - prev.t < 900 && Math.abs(pct - prev.pct) < 2) return;
+    const stage = ev.phase ? ev.phase[0].toUpperCase() + ev.phase.slice(1) + ' · ' : '';
+    const pctStr = ev.percent == null ? 'Downloading' : Math.round(ev.percent) + '%';
+    const spd = ev.speed ? ' · ' + ev.speed : '';
+    N.sendNotification({ id: ev.id, title, body: `${stage}${pctStr}${spd}`, ongoing: true, silent: true });
+    notif.last.set(ev.id, { pct, t: now, phase: ev.phase || '' });
+  } catch (_) { /* plugin call failed; ignore */ }
+}
+
+// ---- Pull-to-refresh ------------------------------------------------------
+// Other clients can enqueue downloads out of band; a pull-down reloads the list.
+(function setupPullToRefresh() {
+  const THRESH = 70; // px pull to trigger a refresh
+  const ptr = els.ptr;
+  let startY = 0, pulling = false, dist = 0;
+  const atTop = () => window.scrollY <= 0;
+
+  window.addEventListener('touchstart', (e) => {
+    pulling = atTop() && !state.loading && els.player.classList.contains('hidden');
+    if (pulling) { startY = e.touches[0].clientY; dist = 0; }
+  }, { passive: true });
+
+  window.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+    dist = e.touches[0].clientY - startY;
+    if (dist <= 0) { ptr.style.transform = ''; ptr.classList.remove('visible', 'ready'); return; }
+    const pull = Math.min(dist, THRESH * 1.6);
+    ptr.classList.add('visible');
+    ptr.classList.toggle('ready', dist >= THRESH);
+    ptr.style.transform = `translateX(-50%) translateY(${pull}px)`;
+  }, { passive: true });
+
+  window.addEventListener('touchend', () => {
+    if (!pulling) return;
+    const trigger = dist >= THRESH;
+    pulling = false;
+    ptr.style.transform = '';
+    ptr.classList.remove('visible', 'ready');
+    if (trigger) {
+      ptr.classList.add('spinning');
+      Promise.resolve(loadItems(true)).finally(() => ptr.classList.remove('spinning'));
+    }
+  });
+})();
+
 // ---- Service worker -------------------------------------------------------
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -600,3 +753,4 @@ connectEvents();
 loadItems(true);
 handleShareParam();
 setupNativeShare();
+setupNotifications();

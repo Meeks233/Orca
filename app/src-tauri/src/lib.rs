@@ -5,7 +5,8 @@
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default();
+    let mut builder =
+        tauri::Builder::default().plugin(tauri_plugin_notification::init());
 
     // Android/iOS: register the share-target plugin so shared URLs land in a
     // queue the frontend drains on launch/focus (see web/app.js).

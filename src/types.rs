@@ -146,6 +146,11 @@ pub struct ProgressEvent {
     pub percent: Option<f32>,
     pub speed: Option<String>,
     pub eta: Option<String>,
+    /// Which sub-download this tick belongs to: `"video"` or `"audio"` for a
+    /// split (`bv*+ba`) download, `None` for a single progressive file. Lets the
+    /// UI label the two 0→100% passes instead of showing the bar "jump" back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 /// Request body for POST /api/items.
