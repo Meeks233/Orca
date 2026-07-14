@@ -44,7 +44,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.check.outputs.changed == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: steps.check.outputs.changed == 'true'
