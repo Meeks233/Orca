@@ -20,7 +20,7 @@ jobs:
       contents: write # attach the APK to a GitHub Release on tag pushes
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Gradle 8.14 needs JDK 17-21 (it rejects JDK 25). Temurin 21 matches the
       # documented local setup in app/README.md.
