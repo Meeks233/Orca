@@ -66,7 +66,7 @@ jobs:
         run: cargo tauri android build --debug --apk --target aarch64 armv7
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: whale-android-debug
           path: app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
