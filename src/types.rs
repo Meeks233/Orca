@@ -92,6 +92,15 @@ pub struct Item {
     pub duration: Option<i64>,
     pub filepath: Option<String>,
     pub filesize: Option<i64>,
+    /// Downloaded video pixel height (e.g. 720, 1080, 2160), used to label the
+    /// item's resolution in the UI. `None` for audio-only / not-yet-completed /
+    /// imported records.
+    pub height: Option<i64>,
+    /// Highest pixel height the source offers, probed once (lazily, when the
+    /// resolution picker is first opened) and cached so the picker needn't
+    /// re-probe yt-dlp on every open. `None` until first probed.
+    #[serde(default)]
+    pub source_max_height: Option<i64>,
     pub source: Source,
     pub status: Status,
     pub error: Option<String>,
@@ -114,6 +123,18 @@ pub struct Item {
     /// a cloud badge and falls back to upstream streaming (`/stream-url`).
     #[serde(default)]
     pub local_available: bool,
+    /// Computed (not stored): total bytes across **all** downloaded resolution
+    /// variants of this item (falls back to `filesize` when no variant rows
+    /// exist). The size capsule shows this so a multi-resolution item reflects
+    /// its combined on-disk footprint, not just the primary file.
+    #[serde(default)]
+    pub total_filesize: i64,
+    /// 1-based position of this video within a multi-video post whose entries
+    /// share one `webpage_url` (e.g. a tweet with two clips). Passed to yt-dlp as
+    /// `--playlist-items` so download/stream targets only this video. `None` for a
+    /// standalone item, where the URL already identifies a single video.
+    #[serde(default)]
+    pub playlist_index: Option<i64>,
 }
 
 /// A self-registered client that authenticates with its own passphrase instead
@@ -134,6 +155,48 @@ pub struct SiteCount {
     pub count: i64,
 }
 
+/// One entry in the user-editable website registry (see migration
+/// `0014_websites`). Powers the Website Management window: per-site cookies,
+/// resolution cap, enable/disable, editable alternate domains, and merging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Website {
+    pub key: String,
+    pub name: String,
+    /// Registrable domain suffixes / aliases (a URL matches when its host equals
+    /// or is a subdomain of any of these). Deduped on save.
+    pub hosts: Vec<String>,
+    pub login_url: String,
+    pub enabled: bool,
+    /// Per-site resolution cap; `None` follows the global `max_height` setting.
+    pub max_height: Option<i64>,
+    /// Per-site stream-only default (no local downloads for this site).
+    #[serde(default)]
+    pub no_download: bool,
+    #[serde(default)]
+    pub sort: i64,
+    /// Computed (not stored): cookie presence/state for this site, merged in by
+    /// the API from the on-disk cookie jar. `None` in DB-only contexts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie: Option<CookieStatus>,
+}
+
+/// Cookie jar state for a website, surfaced to the management UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CookieStatus {
+    pub present: bool,
+    pub enabled: bool,
+    pub bytes: u64,
+    pub updated_at: i64,
+}
+
+/// One downloaded resolution variant of an item (see `item_resolutions`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemResolution {
+    pub height: i64,
+    pub filepath: String,
+    pub filesize: i64,
+}
+
 /// Request body for POST /api/clients/register (self-registration).
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -152,6 +215,15 @@ pub struct ProbeResult {
     pub thumbnail_url: Option<String>,
     pub duration: Option<i64>,
     pub webpage_url: String,
+    /// 1-based position within a multi-entry probe, when yt-dlp reported one.
+    /// Only meaningful (and only stored on the `Item`) when several entries share
+    /// the same `webpage_url`; otherwise `None`. See `Item::playlist_index`.
+    pub playlist_index: Option<i64>,
+    /// Distinct video pixel heights the source offers, highest first, parsed from
+    /// this probe's `formats` list. Captured up front (yt-dlp already enumerates
+    /// formats to pick the default) so the resolution picker needn't re-probe.
+    /// Empty when the source reported no per-format heights (e.g. audio-only).
+    pub available_heights: Vec<i64>,
 }
 
 impl ProbeResult {

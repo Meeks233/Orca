@@ -160,6 +160,22 @@ body {
   .server-status.up { animation: none; }
 }
 
+/* Total-downloaded readout: a compact "N files · X GB" pill to the right of the
+   heartbeat (the familiar storage-usage summary). Muted so it reads as ambient
+   metadata next to the brand, not a control. */
+.dl-stats {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.dl-stats svg { display: block; opacity: .8; }
+.dl-stats.hidden { display: none; }
+
 .icon-btn {
   background: none;
   border: none;
@@ -229,6 +245,21 @@ input {
 }
 input::placeholder { color: var(--muted); }
 input:focus { outline: none; border-color: var(--accent); }
+
+/* Settings <select> (e.g. max resolution): match the text-input shell. */
+.select {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.select:focus { outline: none; border-color: var(--accent); }
+.select:disabled { opacity: .5; cursor: default; }
 
 .btn {
   background: var(--accent);
@@ -398,6 +429,88 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
+/* ---- Playlist folds (multi-video posts) ----
+   A link with several videos collapses into one card: a header showing the first
+   video's thumbnail (its real orientation kept) with a stacked-card edge behind
+   it so it reads as a list at a glance (YouTube-playlist pattern), the count
+   bottom-left and a sequential-play button bottom-right. Expands into the child
+   item cards. */
+.group-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.group-head {
+  display: flex;
+  align-items: stretch; /* let the info column fill the thumb height so the
+                           bottom-right actions align with the card bottom */
+  gap: 12px;
+  padding: 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  /* Match the card's rounding so the selection highlight (a filled background)
+     follows the rounded corners instead of painting a rectangle. When expanded,
+     the header only rounds its top corners; the body owns the bottom ones. */
+  border-radius: 12px;
+}
+.group-card:not(.collapsed) .group-head {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+/* Count-independent stacked-paper cue: two offset sheets behind the first
+   thumbnail, drawn with layered box-shadows (clean edges + a soft drop shadow)
+   so it reads as a stack/list at a glance. The right margin leaves room to peek. */
+.group-thumb { margin: 4px 16px 0 2px; }
+.group-thumb .thumb {
+  box-shadow:
+    5px -5px 0 0 var(--surface-2), 5px -5px 0 1px var(--border),
+    10px -10px 0 0 color-mix(in oklab, var(--surface-2) 70%, var(--surface)), 10px -10px 0 1px var(--border),
+    9px -7px 12px -6px rgba(0,0,0,.5);
+}
+/* Video count: bottom-left pill (mirrors the .dur position). */
+.group-count {
+  position: absolute; bottom: 5px; left: 5px;
+  min-width: 16px; height: 17px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  color: #fff; background: rgba(0,0,0,.72); border-radius: 5px;
+}
+/* Whole-list play button: bottom-right, tappable (unlike the passive item badge).
+   Two-class selector so it beats the later `.play-badge { pointer-events:none }`. */
+.play-badge.group-play { pointer-events: auto; cursor: pointer; border: none; padding: 0; }
+.group-play:hover, .group-play:focus-visible { background: var(--accent); transform: scale(1.08); }
+.group-info { flex: 1 1 auto; min-width: 0; padding-top: 1px; }
+.group-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+/* Live download speed of the currently-running child, shown after the summary
+   text while the fold is downloading. */
+.group-speed { color: var(--run); font-weight: 600; margin-left: 6px; }
+/* Aggregate download progress bar (total across all children). Reuses the item
+   .progress look; capped so it doesn't run under the right-rail actions. */
+.group-progress { margin-top: 6px; max-width: 220px; }
+/* Right rail: chevron parked top-right, whole-list actions sunk to bottom-right
+   (past the info column) so share/download always land at the card's corner. */
+.group-side { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; }
+.group-side .group-actions { margin-top: auto; padding-top: 0; }
+.group-chevron { flex: 0 0 auto; color: var(--muted); transition: transform .18s ease; }
+.group-card:not(.collapsed) .group-chevron { transform: rotate(180deg); }
+/* Collapsed by default: the child list is hidden until the header is tapped. */
+.group-card.collapsed .group-body { display: none; }
+.group-body {
+  list-style: none; margin: 0;
+  padding: 0 10px 10px;
+  display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+/* Nested child cards read as a sub-level: lighter surface, no double border. */
+.group-body .item { background: var(--surface-2); }
+/* Selection state on the fold header: full = accent, partial = dashed hint. */
+.group-head.selected {
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.group-head.partial { background: color-mix(in oklab, var(--accent) 7%, var(--surface)); }
+
 /* ---- Infinite-scroll loader ---- */
 .infinite-loader {
   display: flex;
@@ -443,10 +556,18 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   text-decoration: none;
 }
 .thumb-play { cursor: pointer; }
+/* Stable thumbnail box: the height is derived from the width via `aspect-ratio`,
+   NOT from the card's content height. Previously the thumb was stretched to the
+   card height (align-self:stretch + height:100%), so when a long title wrapped
+   to more lines the 16:9 box grew taller than 16:9 and `object-fit:cover` had to
+   zoom/crop the image hard — the "sudden zoom / cut-off" bug, worst on small
+   screens. A fixed aspect box (the pattern YouTube/Plex use) keeps a constant,
+   predictable height and crops only the minimal amount cover implies. */
 .thumb {
   width: 120px;
-  height: 68px;
+  aspect-ratio: 16 / 9;
   object-fit: cover;
+  object-position: center;
   border-radius: 8px;
   display: block;
   background: var(--surface-2);
@@ -455,7 +576,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
    orientation instead of being cropped into the landscape box. The wrapper is
    tagged .portrait by JS once the image's natural dimensions are known. */
 .thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 68px; }
-.thumb-wrap.portrait .thumb { height: 120px; }
+.thumb-wrap.portrait .thumb { aspect-ratio: 9 / 16; }
 .thumb-empty { background: var(--surface-2); }
 /* Duration pill: bottom-left of the thumbnail box. */
 .dur {
@@ -505,7 +626,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 .thumb-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
 .act-cloud { border-style: dashed; color: var(--muted, #9aa); cursor: default; }
 
-.body { flex: 1; min-width: 0; }
+.body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .title {
   font-weight: 600;
   display: flex;
@@ -548,7 +669,11 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 .badge-queued { background: var(--warn); }
 .badge-running { background: var(--run); color: #04263a; }
-.badge-completed { background: var(--ok); }
+/* Completed is hidden by default so a long history isn't a wall of green; it
+   only flashes for ~30s after a fresh success (see markFreshCompleted). Other
+   badges (queued / running / failed / duplicate) always show. */
+.badge-completed { background: var(--ok); display: none; }
+.badge-completed.flash { display: inline-block; }
 .badge-failed { background: var(--err); }
 .badge-duplicate { background: var(--surface-2); color: var(--muted); }
 
@@ -563,8 +688,14 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 
 .err { color: var(--err); font-size: 12px; margin-top: 6px; word-break: break-word; }
 
-/* ---- Card actions: save / share, right-aligned on the completed status row ---- */
-.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+/* ---- Card actions: save / share, parked at the card's bottom-right ----
+   A separate row from the status badge (decoupled), sunk to the bottom of the
+   body (margin-top:auto) and right-aligned, with breathing room so it never
+   jams against the card edge. */
+.actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin-top: auto; align-self: flex-end; padding-top: 8px;
+}
 .act {
   font-size: 12px;
   padding: 5px 10px;
@@ -592,6 +723,9 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 .act-icon:hover { border: none; color: var(--accent); }
 .act-icon svg { display: block; }
+/* Delete (trash) action: neutral by default, red on hover — its destructive
+   intent, and it always routes through the confirm dialog. */
+.act-del:hover { color: var(--err); }
 /* A live (public) share tints the share icon the Completed green, at-a-glance
    signalling "this is shared". Beats .act-icon's neutral color by specificity. */
 .act-share.act-on { color: var(--ok); }
@@ -613,6 +747,25 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 .hits svg { display: block; }
 .hits-n { color: var(--text); }
+
+/* ---- Meta chip in the action row (resolution | file size) ----
+   One neutral capsule mirroring the .hits pill, parked at the LEFT of the card's
+   action row (before the trash icon), showing "720p | 20.4 MB". line-height:1 +
+   symmetric padding keeps the label optically centred on the row rather than
+   riding high (the font's descent space would otherwise push it up). */
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
 
 /* Video/audio pass label next to the status badge. */
 .phase { font-weight: 600; color: var(--run); }
@@ -821,8 +974,159 @@ body.player-open { overflow: hidden; }
 .toast-info { border-color: var(--accent); }
 
 @media (max-width: 420px) {
+  /* Only the width narrows on small screens; the height follows from the fixed
+     aspect-ratio (no explicit height, so no force-compression / crop). */
   .thumb-wrap, .thumb { width: 96px; }
-  .thumb { height: 54px; }
   .thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 60px; }
-  .thumb-wrap.portrait .thumb { height: 107px; }
+}
+
+/* ---- Diagnostics error log (settings) ----------------------------------- */
+.logs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.logs-actions { display: flex; gap: 6px; }
+.log-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; max-height: 260px; overflow-y: auto; }
+.log-entry { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; }
+.log-entry > summary {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  cursor: pointer; list-style: none; font-size: 12px; user-select: none;
+}
+.log-entry > summary::-webkit-details-marker { display: none; }
+.log-time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.log-badge { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.log-entry--download .log-badge { color: var(--run); }
+.log-stage { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; white-space: nowrap; }
+.log-msg-short { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-entry[open] .log-msg-short { white-space: normal; }
+.log-copy { flex: none; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 6px; }
+.log-copy:hover { color: var(--text); }
+.log-full {
+  margin: 0; padding: 8px 10px; border-top: 1px solid var(--border);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.settings-footer { margin-top: 14px; text-align: center; color: var(--muted); font-size: 12px; }
+.settings-footer a { color: var(--accent); }
+
+/* ---- Per-item resolution button + multi-select picker ------------------- */
+.res-btn { display: inline-flex; align-items: center; gap: 5px; }
+.res-btn .res-btn-label { font-variant-numeric: tabular-nums; font-weight: 600; }
+.res-btn:hover { color: var(--accent); border-color: var(--accent); }
+.res-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; max-height: 320px; overflow-y: auto; }
+/* Resolution options are toggle rows, not native checkboxes: the row surface
+   itself carries the selected state (same natural-highlight pattern as the
+   home-screen card multi-select), so Android WebViews never paint the stray
+   rectangular checkbox tap-highlight. */
+.res-opt {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border: 1px solid var(--border); border-radius: 10px; cursor: pointer; font-size: 14px;
+  user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.res-opt:hover { border-color: var(--accent); }
+/* Instant swap (no transition) — matches .item.selected: some Android WebViews
+   leave a transitioned border/shadow stuck at its start value, hiding the ring. */
+.res-opt.selected {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent) inset;
+  font-weight: 600;
+}
+
+/* ---- Website management --------------------------------------------------- */
+.modal-card-wide { max-width: 680px; }
+.sites-global { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+.sites-global .row { display: flex; gap: 8px; align-items: center; }
+.sites-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.sites-toolbar #site-search { flex: 1 1 auto; min-width: 0; }
+.sites-toolbar .sel-toggle { flex: 0 0 auto; }
+.website-list { display: flex; flex-direction: column; gap: 10px; }
+
+/* Card: elevated surface with a soft ring; the selected (cookie-in-use) look and
+   the disabled (greyed) look are both instant, no layout shift. */
+.website-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* A site with an active cookie reads as "in use" — accent ring + tint, mirroring
+   the resolution-picker / multi-select selected state. */
+.website-card:has(.ck-on) {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 7%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+/* Disabled site: greyed and de-emphasised (mature "inactive" pattern), but its
+   controls stay reachable so it can be re-enabled. */
+.website-card.disabled { opacity: .55; filter: grayscale(0.6); }
+.website-card.disabled:has(.ck-on) { box-shadow: none; border-color: var(--border); background: var(--surface); }
+
+/* Header row: toggle · (name + status, domains) · overflow menu. */
+.site-main { display: flex; align-items: flex-start; gap: 10px; }
+.site-info { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.site-titlerow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.site-name { font-weight: 600; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-domains-list { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Enable/disable pill switch. */
+.site-toggle {
+  position: relative; width: 40px; height: 22px; border-radius: 999px; flex-shrink: 0; margin-top: 1px;
+  border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; padding: 0;
+}
+.site-toggle .knob {
+  position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--muted); transition: left .15s, background .15s;
+}
+.site-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
+.site-toggle.on .knob { left: 20px; background: var(--accent); }
+
+/* Overflow (kebab) menu: collapses the rarely-used per-site actions. */
+.site-menu-wrap { position: relative; flex-shrink: 0; }
+.site-menu-btn {
+  display: flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  border: none; background: none; color: var(--muted); border-radius: 8px; cursor: pointer; padding: 0;
+}
+.site-menu-btn:hover { background: var(--surface-2); color: var(--text); }
+.site-menu-pop {
+  position: absolute; top: 34px; right: 0; z-index: 5; min-width: 160px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.35);
+}
+.site-menu-item {
+  display: block; width: 100%; text-align: left; font-size: 13px; padding: 8px 10px;
+  border: none; background: none; color: var(--text); border-radius: 8px; cursor: pointer; text-decoration: none;
+}
+.site-menu-item:hover { background: var(--surface); }
+.site-menu-item.danger { color: var(--err); }
+
+/* Controls row: the max-resolution dropdown + the cookie action button. */
+.site-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.site-res-field { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.site-res-label { font-size: 12px; color: var(--muted); flex-shrink: 0; }
+.site-res-select { flex: 1 1 auto; min-width: 0; }
+.site-cookie-btn {
+  flex-shrink: 0; font-size: 13px; padding: 8px 14px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
+}
+.site-cookie-btn:hover { border-color: var(--accent); }
+.site-cookie-btn.has { border-style: dashed; }
+
+/* Selection mode: whole card is the tap target; inner controls stand down. */
+.sites-selecting .website-card { cursor: pointer; }
+.sites-selecting .website-card > * { pointer-events: none; }
+.website-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.website-card.selected:has(.ck-on) { background: color-mix(in oklab, var(--accent) 14%, var(--surface)); }
+
+/* Batch action bar, docked at the bottom of the sites modal. */
+.site-select-bar {
+  position: sticky; bottom: 0; margin-top: 14px; z-index: 6;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 -4px 20px rgba(0,0,0,.2);
 }

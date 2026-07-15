@@ -36,11 +36,11 @@ android {
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
-            packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
-                jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86_64/*.so")
-            }
+            // NOTE: the Tauri template keeps native debug symbols here
+            // (jniLibs.keepDebugSymbols) which bloats the debug APK to ~550MB.
+            // We drop it so AGP strips the Rust .so files — the debug APK is a
+            // functional test build, not a native-debugging build. Cuts the
+            // APK to tens of MB.
         }
         getByName("release") {
             isMinifyEnabled = true

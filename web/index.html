@@ -24,6 +24,9 @@
       <!-- Server status heartbeat: green + breathing while the SSE stream is
            live, red when it drops. Driven by the EventSource lifecycle in app.js. -->
       <span id="server-status" class="server-status down" role="status" aria-label="Server status" data-i18n-aria="aria.serverStatus"></span>
+      <!-- Total downloaded readout: count + summed size of all downloads, sitting
+           to the right of the heartbeat. Populated from /api/stats by app.js. -->
+      <span id="dl-stats" class="dl-stats hidden" role="status" aria-live="polite"></span>
     </div>
     <div class="topbar-actions">
       <!-- Language picker: a topbar popover (industry-standard header menu),
@@ -35,7 +38,7 @@
       <!-- Theme toggle: follows the system by default, cycles System → Light →
            Dark. The sun/moon glyph reflects the currently-effective theme. -->
       <button id="theme-toggle" class="icon-btn" aria-label="Theme" title="Theme"></button>
-      <button id="cookies-toggle" class="icon-btn" aria-label="Cookies" title="Cookies" data-i18n-aria="aria.cookies" data-i18n-title="aria.cookies"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5"/><path d="M8.5 8.5v.01"/><path d="M16 15.5v.01"/><path d="M12 12v.01"/><path d="M11 17v.01"/><path d="M7 14v.01"/></svg></button>
+      <button id="websites-toggle" class="icon-btn" aria-label="Websites" title="Websites" data-i18n-aria="aria.websites" data-i18n-title="aria.websites"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v4"/><path d="m14.305 7.53.923-.382"/><path d="m15.228 4.852-.923-.383"/><path d="m16.852 3.228-.383-.924"/><path d="m16.852 8.772-.383.923"/><path d="m19.148 3.228.383-.924"/><path d="m19.53 9.696-.382-.924"/><path d="m20.772 4.852.924-.383"/><path d="m20.772 7.148.924.383"/><path d="M22 13v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><path d="M8 21h8"/><circle cx="18" cy="6" r="3"/></svg></button>
       <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings" data-i18n-aria="aria.settings" data-i18n-title="aria.settings"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg></button>
     </div>
   </header>
@@ -74,11 +77,29 @@
   <div id="select-bar" class="select-bar hidden" role="toolbar" aria-label="Batch actions">
     <span id="select-count" class="select-count" data-i18n="sel.count0">Select items</span>
     <div class="select-actions">
+      <button id="sel-all" class="btn btn-ghost" data-i18n="sel.all">Select all</button>
+      <button id="sel-invert" class="btn btn-ghost" data-i18n="sel.invert">Invert</button>
       <button id="sel-download" class="btn btn-ghost" data-i18n="sel.download" disabled>Download</button>
       <button id="sel-share" class="btn btn-ghost" data-i18n="sel.share" disabled>Share</button>
       <button id="sel-unshare" class="btn btn-ghost" data-i18n="sel.unshare" disabled>Unshare</button>
       <button id="sel-copy" class="btn btn-ghost" data-i18n="sel.copy" disabled>Copy links</button>
+      <button id="sel-clean" class="btn btn-ghost" data-i18n="sel.clean" disabled>Clean downloads</button>
+      <button id="sel-delete" class="btn btn-danger" data-i18n="sel.delete" disabled>Delete</button>
       <button id="sel-cancel" class="btn" data-i18n="sel.done">Done</button>
+    </div>
+  </div>
+
+  <!-- Delete confirmation: batch delete is destructive (removes records and any
+       downloaded files), so require an explicit confirm. -->
+  <div id="delete-confirm" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
+    <div class="modal-card">
+      <button id="delete-confirm-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="delete-confirm-title" class="modal-heading" data-i18n="deleteConfirm.title">Delete selected?</h2>
+      <p id="delete-confirm-sub" class="hint-muted"></p>
+      <div class="share-actions">
+        <button id="delete-confirm-cancel" class="btn btn-ghost" data-i18n="deleteConfirm.cancel">Cancel</button>
+        <button id="delete-confirm-yes" class="btn btn-danger" data-i18n="deleteConfirm.confirm">Delete</button>
+      </div>
     </div>
   </div>
 
@@ -187,20 +208,118 @@
       <textarea id="seal-archive" class="ta" rows="8"
                 placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..." data-i18n-ph="ph.archive"></textarea>
       <button id="seal-import" class="btn wide" data-i18n="settings.archiveSave">Save archive</button>
+
+      <!-- Diagnostics log: the backend's bounded ring buffer of recent probe /
+           download errors. Each row is a native <details> disclosure (industry-
+           standard collapsible log line) — click to expand the full message,
+           with per-row and copy-all buttons. -->
+      <hr class="sep">
+      <div class="logs-head">
+        <label data-i18n="settings.logs">Error log</label>
+        <div class="logs-actions">
+          <button id="logs-refresh" class="btn btn-ghost" data-i18n="logs.refresh">Refresh</button>
+          <button id="logs-copy" class="btn btn-ghost" data-i18n="logs.copyAll">Copy all</button>
+        </div>
+      </div>
+      <p class="hint-muted" data-i18n="settings.logsHint">The most recent errors Whale hit while reading or downloading links. Tap a row to expand.</p>
+      <div id="log-list" class="log-list"></div>
+      <p id="log-empty" class="hint-muted hidden" data-i18n="settings.logsEmpty">No errors recorded yet.</p>
+
+      <!-- Repo / issue link: gives users a one-tap path to file a bug. -->
+      <p class="settings-footer" data-i18n-html="settings.issue">
+        Having problems? File a bug here:
+        <a href="https://github.com/Meeks233/Whale/issues" target="_blank" rel="noopener noreferrer">github.com/Meeks233/Whale</a>
+      </p>
     </div>
   </div>
 
-  <!-- Cookies dialog. Per-platform cookie jars, edited in a popup like Share. -->
-  <div id="cookies" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="cookies-title">
+  <!-- Website Management. The editable site registry: per-site cookies, resolution
+       cap, enable/disable, alternate domains, and merging duplicates. -->
+  <div id="websites" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="websites-title">
+    <div class="modal-card modal-card-wide">
+      <button id="websites-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="websites-title" class="modal-heading" data-i18n="sites.title">Website management</h2>
+
+      <!-- Global default resolution (moved here from Settings): the fallback cap
+           for any site that doesn't pin its own. -->
+      <div class="sites-global">
+        <label for="max-res" data-i18n="settings.maxRes">Maximum resolution</label>
+        <div class="row">
+          <select id="max-res" class="select">
+            <option value="none" data-i18n="res.noneOpt">None (no download)</option>
+            <option value="0" data-i18n="res.highest">Highest available</option>
+            <option value="4320">8K (4320p)</option>
+            <option value="2160">4K (2160p)</option>
+            <option value="1440">2K (1440p)</option>
+            <option value="1080">1080p</option>
+            <option value="720">720p</option>
+            <option value="480">480p</option>
+            <option value="360">360p</option>
+          </select>
+          <button id="max-res-save" class="btn" data-i18n="btn.save">Save</button>
+        </div>
+        <p id="max-res-hint" class="hint" data-i18n="settings.maxResHint">Caps the quality yt-dlp downloads. Highest picks the best available.</p>
+        <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the WHALE_MAX_HEIGHT environment variable.</p>
+      </div>
+
+      <div class="sites-toolbar">
+        <button id="site-sel-toggle" class="sel-toggle" type="button" aria-label="Select" data-i18n-aria="sites.select" title="Select">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        </button>
+        <input id="site-search" type="search" class="input" data-i18n-ph="ph.siteSearch" placeholder="Search sites…" autocomplete="off">
+        <button id="sites-add" class="btn" data-i18n="sites.add">Add site</button>
+      </div>
+      <div id="website-list" class="website-list"></div>
+
+      <!-- Batch bar, shown in selection mode when ≥1 site is picked. -->
+      <div id="site-select-bar" class="site-select-bar hidden">
+        <span id="site-sel-count" class="select-count"></span>
+        <div class="select-actions">
+          <button id="site-sel-enable" class="btn btn-ghost" data-i18n="sites.batchEnable">Enable</button>
+          <button id="site-sel-disable" class="btn btn-ghost" data-i18n="sites.batchDisable">Disable</button>
+          <button id="site-sel-merge" class="btn btn-ghost" data-i18n="sites.merge">Merge</button>
+          <button id="site-sel-delete" class="btn btn-ghost btn-danger" data-i18n="cookie.delete">Delete</button>
+          <button id="site-sel-cancel" class="btn" data-i18n="res.cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add / edit a website (name, key, domains). -->
+  <div id="site-edit" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="site-edit-title">
     <div class="modal-card">
-      <button id="cookies-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
-      <h2 id="cookies-title" class="modal-heading" data-i18n="cookies.title">Platform cookies</h2>
-      <p class="hint-muted" data-i18n="cookies.hint">
-        Log in on a site, export its cookies with a “Get cookies.txt” browser extension,
-        then paste them here. Whale applies them automatically to every download from that
-        platform (X cookies → all x.com / twitter.com links, etc.).
-      </p>
-      <div id="cookie-list" class="cookie-list"></div>
+      <button id="site-edit-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="site-edit-title" class="modal-heading" data-i18n="sites.addTitle">Add website</h2>
+      <label data-i18n="sites.name">Name</label>
+      <input id="site-edit-name" class="input" type="text" autocomplete="off" placeholder="Example">
+      <label data-i18n="sites.key">Key</label>
+      <input id="site-edit-key" class="input" type="text" autocomplete="off" placeholder="example" pattern="[a-z0-9_]+">
+      <p class="hint-muted" data-i18n="sites.keyHint">Lowercase letters, digits, underscore. Used for the cookie file and folder.</p>
+      <label data-i18n="sites.domains">Alternate domains</label>
+      <textarea id="site-edit-hosts" class="ta" rows="3" placeholder="example.com, exmpl.co, ex.tv"></textarea>
+      <p class="hint-muted" data-i18n="sites.domainsHint">Comma / space / newline separated. Duplicates are removed automatically.</p>
+      <p id="site-edit-err" class="hint hidden"></p>
+      <div class="share-actions">
+        <button id="site-edit-cancel" class="btn btn-ghost" data-i18n="res.cancel">Cancel</button>
+        <button id="site-edit-save" class="btn" data-i18n="btn.save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resolution multi-select. Opened from a completed video card's resolution
+       button: pick which resolution versions to keep. Checking a new one
+       downloads it; unchecking a downloaded one deletes its local file. -->
+  <div id="resolution" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="resolution-title">
+    <div class="modal-card">
+      <button id="resolution-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="resolution-title" class="modal-heading" data-i18n="res.title">Download resolutions</h2>
+      <p class="hint-muted" data-i18n="res.hint">Tap the resolution versions to keep. Selecting a new one downloads it; deselecting a downloaded one deletes its local file.</p>
+      <div id="resolution-list" class="res-list" role="group" aria-labelledby="resolution-title"></div>
+      <p id="resolution-empty" class="hint-muted hidden" data-i18n="res.none">No resolution info for this item.</p>
+      <div class="share-actions">
+        <button id="resolution-cancel" class="btn btn-ghost" data-i18n="res.cancel">Cancel</button>
+        <button id="resolution-save" class="btn" data-i18n="res.apply">Apply</button>
+      </div>
     </div>
   </div>
 

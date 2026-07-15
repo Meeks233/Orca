@@ -12,6 +12,9 @@ interface Item {
   status: string;
   title?: string;
   filepath?: string | null;
+  filesize?: number | null;
+  total_filesize?: number | null;  // sum across all downloaded resolution variants
+  height?: number | null;
   thumbnail_url?: string;
   duration?: number | null;
   extractor?: string;
@@ -23,6 +26,7 @@ interface Item {
   public_slug?: string;
   public_until?: number | null;
   public_hits?: number;
+  playlist_index?: number | null;
   [k: string]: unknown;
 }
 
@@ -35,6 +39,15 @@ interface ProgressEv {
   eta?: string;
   percent?: number | null;
   [k: string]: unknown;
+}
+
+// One recorded backend error (GET /api/logs), shaped by src/errlog.rs.
+interface LogEntry {
+  at: number;        // unix seconds
+  stage: string;     // "probe" | "download"
+  url: string;
+  platform: string;
+  message: string;
 }
 
 // Typed getElementById: every id below is present in index.html.
@@ -66,8 +79,8 @@ function setToken(tok: string): void {
 }
 
 // Push the server base + token to native storage so the headless "Quick
-// Download" ShareActivity can POST to the backend without opening the WebView.
-// No-op outside the Tauri app.
+// Download" ShareActivity can POST to the backend in the background without
+// opening the WebView. No-op outside the Tauri app.
 function mirrorShareCreds(): void {
   const T = window.__TAURI__;
   if (!T || !T.core || !T.core.invoke) return;
@@ -104,17 +117,50 @@ const els = {
   settings: byId('settings'),
   settingsToggle: byId('settings-toggle'),
   settingsClose: byId('settings-close'),
-  cookies: byId('cookies'),
-  cookiesToggle: byId('cookies-toggle'),
-  cookiesClose: byId('cookies-close'),
-  cookieList: byId('cookie-list'),
+  websites: byId('websites'),
+  websitesToggle: byId('websites-toggle'),
+  websitesClose: byId('websites-close'),
+  websiteList: byId('website-list'),
+  sitesAdd: byId<HTMLButtonElement>('sites-add'),
+  siteSearch: byId<HTMLInputElement>('site-search'),
+  siteSelToggle: byId<HTMLButtonElement>('site-sel-toggle'),
+  siteSelBar: byId('site-select-bar'),
+  siteSelCount: byId('site-sel-count'),
+  siteSelEnable: byId<HTMLButtonElement>('site-sel-enable'),
+  siteSelDisable: byId<HTMLButtonElement>('site-sel-disable'),
+  siteSelMerge: byId<HTMLButtonElement>('site-sel-merge'),
+  siteSelDelete: byId<HTMLButtonElement>('site-sel-delete'),
+  siteSelCancel: byId<HTMLButtonElement>('site-sel-cancel'),
+  siteEdit: byId('site-edit'),
+  siteEditTitle: byId('site-edit-title'),
+  siteEditClose: byId<HTMLButtonElement>('site-edit-close'),
+  siteEditCancel: byId<HTMLButtonElement>('site-edit-cancel'),
+  siteEditSave: byId<HTMLButtonElement>('site-edit-save'),
+  siteEditName: byId<HTMLInputElement>('site-edit-name'),
+  siteEditKey: byId<HTMLInputElement>('site-edit-key'),
+  siteEditHosts: byId<HTMLTextAreaElement>('site-edit-hosts'),
+  siteEditErr: byId('site-edit-err'),
   token: byId<HTMLInputElement>('token'),
   tokenSave: byId<HTMLButtonElement>('token-save'),
   tokenHint: byId('token-hint'),
   server: byId<HTMLInputElement>('server'),
   serverSave: byId<HTMLButtonElement>('server-save'),
+  maxRes: byId<HTMLSelectElement>('max-res'),
+  maxResSave: byId<HTMLButtonElement>('max-res-save'),
+  maxResHint: byId('max-res-hint'),
+  maxResLocked: byId('max-res-locked'),
   sealArchive: byId<HTMLTextAreaElement>('seal-archive'),
   sealImport: byId<HTMLButtonElement>('seal-import'),
+  logList: byId('log-list'),
+  logEmpty: byId('log-empty'),
+  logsRefresh: byId<HTMLButtonElement>('logs-refresh'),
+  logsCopy: byId<HTMLButtonElement>('logs-copy'),
+  resolution: byId('resolution'),
+  resolutionList: byId('resolution-list'),
+  resolutionEmpty: byId('resolution-empty'),
+  resolutionClose: byId<HTMLButtonElement>('resolution-close'),
+  resolutionCancel: byId<HTMLButtonElement>('resolution-cancel'),
+  resolutionSave: byId<HTMLButtonElement>('resolution-save'),
   submitForm: byId<HTMLFormElement>('submit-form'),
   url: byId<HTMLInputElement>('url'),
   submitBtn: byId<HTMLButtonElement>('submit-btn'),
@@ -125,11 +171,20 @@ const els = {
   selectToggle: byId<HTMLButtonElement>('select-toggle'),
   selBar: byId('select-bar'),
   selCount: byId('select-count'),
+  selAll: byId<HTMLButtonElement>('sel-all'),
+  selInvert: byId<HTMLButtonElement>('sel-invert'),
   selDownload: byId<HTMLButtonElement>('sel-download'),
   selShare: byId<HTMLButtonElement>('sel-share'),
   selUnshare: byId<HTMLButtonElement>('sel-unshare'),
   selCopy: byId<HTMLButtonElement>('sel-copy'),
+  selClean: byId<HTMLButtonElement>('sel-clean'),
+  selDelete: byId<HTMLButtonElement>('sel-delete'),
   selCancel: byId<HTMLButtonElement>('sel-cancel'),
+  deleteConfirm: byId('delete-confirm'),
+  deleteConfirmSub: byId('delete-confirm-sub'),
+  deleteConfirmClose: byId<HTMLButtonElement>('delete-confirm-close'),
+  deleteConfirmCancel: byId<HTMLButtonElement>('delete-confirm-cancel'),
+  deleteConfirmYes: byId<HTMLButtonElement>('delete-confirm-yes'),
   batchShare: byId('batch-share'),
   batchShareSub: byId('batch-share-sub'),
   batchShareConfirm: byId<HTMLButtonElement>('batch-share-confirm'),
@@ -157,6 +212,7 @@ const els = {
   themeToggle: byId<HTMLButtonElement>('theme-toggle'),
   themeColorMeta: byId<HTMLMetaElement>('theme-color-meta'),
   serverStatus: byId('server-status'),
+  dlStats: byId('dl-stats'),
 };
 
 // ---- List state -----------------------------------------------------------
@@ -169,7 +225,23 @@ const state = {
   items: new Map<number, Item>(),          // id -> latest item object (for the share dialog)
   selectMode: false,                       // multi-select active
   selected: new Set<number>(),             // selected item ids
+  // Multi-video posts (a link with >1 video, e.g. a tweet with two clips) fold
+  // into one playlist card. key = shared webpage_url -> its card container + body.
+  groups: new Map<string, { li: HTMLLIElement; body: HTMLUListElement }>(),
+  // Latest SSE progress per item id (percent/speed/status), so a playlist fold
+  // header can show its aggregate download progress + the live download speed.
+  progress: new Map<number, { percent: number | null; speed: string; status: string }>(),
+  // Folds the user has expanded, by key. Survives list resets (manual / 5-min
+  // auto refresh) so a re-render restores the open/closed state.
+  expandedGroups: new Set<string>(),
 };
+
+// The playlist a multi-video item belongs to (its shared webpage_url), or null
+// for a standalone item. The backend sets playlist_index only when siblings
+// share a URL, so that flag is exactly our "this belongs to a fold" signal.
+function groupKeyOf(item: Item): string | null {
+  return item.playlist_index != null && item.webpage_url ? item.webpage_url : null;
+}
 
 // ---- Toast ----------------------------------------------------------------
 function toast(msg: string, kind?: string): void {
@@ -220,6 +292,37 @@ function setServerStatus(up: boolean): void {
   el.setAttribute('title', label);
 }
 
+// ---- Total-downloaded readout (beside the heartbeat) ----------------------
+// A small pill showing how many files Whale has stored and their combined size
+// — the familiar "N items · X GB" storage summary. Refreshed on boot, on each
+// completion, and after deletes. Hidden until the first successful fetch.
+const STATS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
+// Vertical kebab (⋮) for the website-card overflow menu.
+const MORE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`;
+let dlStatsCache: { count: number; total_bytes: number } | null = null;
+
+function renderDlStats(): void {
+  const el = els.dlStats;
+  if (!el || !dlStatsCache) return;
+  const { count, total_bytes } = dlStatsCache;
+  if (count <= 0) { el.classList.add('hidden'); return; }
+  const size = fmtSize(total_bytes);
+  const label = t('stats.summary', { n: count });
+  el.innerHTML = `${STATS_SVG}<span class="dl-stats-text">${esc(label)}${size ? ' · ' + esc(size) : ''}</span>`;
+  el.setAttribute('title', label + (size ? ' · ' + size : ''));
+  el.classList.remove('hidden');
+}
+
+async function loadStats(): Promise<void> {
+  if (!getToken()) return;
+  try {
+    const res = await apiFetch('/api/stats');
+    if (!res.ok) return;
+    dlStatsCache = await res.json();
+    renderDlStats();
+  } catch (_) { /* offline / unauthorized — leave the last-known readout */ }
+}
+
 // ---- Rendering ------------------------------------------------------------
 function esc(s: unknown): string {
   const d = document.createElement('div');
@@ -237,6 +340,34 @@ function fmtDuration(sec: number | null | undefined): string {
   return h > 0 ? `${h}:${p2(m)}:${p2(s)}` : `${m}:${p2(s)}`;
 }
 
+// Human file size (binary units, matching yt-dlp/file managers): "12.3 MB",
+// "1.4 GB". Empty string for a missing/zero size so callers can drop the chip.
+function fmtSize(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = bytes;
+  let u = 0;
+  while (n >= 1024 && u < units.length - 1) { n /= 1024; u++; }
+  // Whole numbers for bytes/KB, one decimal from MB up (the familiar readout).
+  const digits = u <= 1 ? 0 : 1;
+  return `${n.toFixed(digits)} ${units[u]}`;
+}
+
+// A video pixel height → the resolution label people recognise (4K, 1080p…).
+// Buckets the common broadcast tiers; anything else falls back to "<h>p".
+function resLabel(height: number | null | undefined): string {
+  if (!height || height <= 0) return '';
+  if (height >= 4320) return '8K';
+  if (height >= 2160) return '4K';
+  if (height >= 1440) return '2K';
+  if (height >= 1080) return '1080p';
+  if (height >= 720) return '720p';
+  if (height >= 480) return '480p';
+  if (height >= 360) return '360p';
+  if (height >= 240) return '240p';
+  return height + 'p';
+}
+
 const TERMINAL: Record<string, number> = { completed: 1, failed: 1, duplicate: 1 };
 
 // Direct media link. `download` forces a browser save; otherwise it streams
@@ -245,6 +376,16 @@ const TERMINAL: Record<string, number> = { completed: 1, failed: 1, duplicate: 1
 function fileUrl(id: number, download?: boolean): string {
   const tok = encodeURIComponent(getToken());
   return apiUrl('/api/items/' + id + '/file?token=' + tok + (download ? '&download=1' : ''));
+}
+
+// Online-playback proxy: the backend resolves the upstream URL (with cookies)
+// and streams the bytes back, so the browser plays through us instead of hitting
+// a stale, IP-bound CDN URL directly. Keyed by the item's unguessable slug (like
+// share links), never its sequential id, so the URL can't be used to enumerate
+// other items. Token rides in the query — a <video> can't set headers.
+function streamUrl(slug: string): string {
+  const tok = encodeURIComponent(getToken());
+  return apiUrl('/api/stream/' + encodeURIComponent(slug) + '?token=' + tok);
 }
 
 // Tokenless public link, keyed by the item's random slug (not its id, so it
@@ -267,6 +408,11 @@ const DOWNLOAD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height=
 // at-a-glance "this is shared" cue.
 const SHARE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>`;
 
+// Trash glyph (Lucide "trash-2"): borderless inline icon matching Save/Share,
+// tinted red on hover. Every card carries one (leftmost action) so any item can
+// be deleted — always behind the confirm dialog.
+const TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+
 // Eye glyph (Lucide "eye") for the external-access counter capsule.
 const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`;
 
@@ -282,19 +428,64 @@ function hitsHtml(item: Item): string {
   return `<span class="hits" title="External link accesses">${EYE_SVG}<span class="hits-n">${n}</span></span>`;
 }
 
+// A file-size capsule at the LEFT of a card's action row (e.g. "20.4 MB").
+// Shows the COMBINED size of every downloaded resolution version (total_filesize),
+// so a multi-resolution item reflects its full on-disk footprint. Falls back to
+// the primary filesize. Vanishes when the size is unknown. Resolution lives in
+// its own button to the right of this chip (see resButtonHtml).
+function metaChipsHtml(item: Item): string {
+  // No local file (stream-only "None" mode, or a copy backed away to the cloud)
+  // → no on-disk footprint to report, so the size chip vanishes entirely.
+  if (!item.local_available) return '';
+  return metaChip('', fmtSize(item.total_filesize || item.filesize));
+}
+
+// Build a meta capsule from the (possibly empty) resolution | size parts.
+function metaChip(res: string, size: string): string {
+  const parts = [res, size].filter(Boolean);
+  if (!parts.length) return '';
+  return `<span class="meta-chip">${esc(parts.join(' | '))}</span>`;
+}
+
+// Stacked "layers" glyph — the industry-standard affordance for "multiple
+// versions / quality options" (à la a video player's quality selector).
+const LAYERS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></svg>`;
+
+// Resolution button: sits between the size chip and the delete icon. Shows the
+// item's current resolution and, on tap, opens the multi-select to add/remove
+// resolution versions. Only for completed video items (a known height).
+function resButtonHtml(item: Item): string {
+  if (item.status !== 'completed') return '';
+  // Label logic: a known height → its label (e.g. "1080p"); a stream-only item
+  // (no local file) → "None"; a downloaded file of unknown height (older/audio
+  // records) → icon only, so we never mislabel a present file as "None".
+  let label = '';
+  if (item.height && item.height > 0) label = resLabel(item.height);
+  else if (!item.local_available) label = t('res.noneLabel');
+  const labelSpan = label ? `<span class="res-btn-label">${esc(label)}</span>` : '';
+  return `<button class="act res-btn" data-act="resolutions" data-id="${item.id}" aria-label="${esc(t('res.pick'))}" title="${esc(t('res.pick'))}">${LAYERS_SVG}${labelSpan}</button>`;
+}
+
 function actionsHtml(item: Item): string {
-  if (item.status !== 'completed' || !item.filepath) return '';
-  const local = !!item.local_available;
-  const pub = !!item.public;
-  // Rendered inline on the status row (see rowHtml), pushed to the right. Local
-  // file present: Save (download icon) + Share icon. Local file gone (backed
-  // away): plays from upstream, no save/share. Sharing state (private vs. live
-  // link + expiry) lives inside the share dialog, Baidu-netdisk style.
-  const localActions = local
-    ? `<a class="act act-icon act-save" href="${fileUrl(item.id, true)}" download aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
+  // Delete is global: every card gets a trash icon (leftmost button, i.e. left
+  // of the Save button — but right of the size chip + resolution button) so any
+  // item — queued, running, failed or completed — can be removed. It always
+  // routes through the confirm dialog (openDeleteConfirm).
+  const del = `<button class="act act-icon act-del" data-act="delete" data-id="${item.id}" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>`;
+  // Save / share only make sense for a completed item with a file. Local file
+  // present: Save (download icon) + Share icon. Local file gone (backed away):
+  // plays from upstream, no save/share. Sharing state lives in the share dialog.
+  let mediaActions = '';
+  if (item.status === 'completed') {
+    const local = !!item.local_available && !!item.filepath;
+    const pub = !!item.public;
+    mediaActions = local
+      ? `<a class="act act-icon act-save" href="${fileUrl(item.id, true)}" download aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
       <button class="act act-icon act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
-    : `<span class="act act-cloud" title="Local copy is gone — plays from source">${esc(t('cloud.only'))}</span>`;
-  return `<div class="actions">${localActions}</div>`;
+      : `<span class="act act-cloud" title="Streams from source — no local copy">${esc(t('cloud.only'))}</span>`;
+  }
+  // Order: size chip · resolution button · delete · save/share.
+  return `<div class="actions">${metaChipsHtml(item)}${resButtonHtml(item)}${del}${mediaActions}</div>`;
 }
 
 // Cloud-file corner badge for the thumbnail: shown when an item is completed but
@@ -302,11 +493,15 @@ function actionsHtml(item: Item): string {
 const CLOUD_BADGE = `<span class="cloud-badge" title="Cloud only — plays from source"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M19 18H6a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 16.5 9H17a3.5 3.5 0 0 1 2 6.37V18Z"/></svg></span>`;
 // Play affordance shown on a finished thumbnail (bottom-right). Tapping the
 // thumbnail opens the in-app fullscreen player (see openPlayer).
-const PLAY_BADGE = `<span class="play-badge" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span>`;
+const PLAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>`;
+const PLAY_BADGE = `<span class="play-badge" aria-hidden="true">${PLAY_ICON}</span>`;
 
 // A completed item with a file is playable in-app (local file or cloud fallback).
 function isPlayable(item: Item): boolean {
-  return item.status === 'completed' && !!item.filepath;
+  // Any completed item is playable: with a local file it plays that; without one
+  // (stream-only "None" mode, or a copy backed away) it streams from source via
+  // /stream-url. Only queued/running/failed items aren't playable.
+  return item.status === 'completed';
 }
 
 // Friendly platform name from yt-dlp's extractor id (e.g. "youtube:tab" → YouTube).
@@ -356,7 +551,7 @@ function rowHtml(item: Item): string {
     ? `<img class="thumb" src="${esc(item.thumbnail_url)}" alt="" loading="lazy">`
     : `<div class="thumb thumb-empty"></div>`;
   const dur = item.duration ? `<span class="dur">${esc(fmtDuration(item.duration))}</span>` : '';
-  const cloud = item.status === 'completed' && item.filepath && !item.local_available ? CLOUD_BADGE : '';
+  const cloud = item.status === 'completed' && !item.local_available ? CLOUD_BADGE : '';
   const logo = sourceLogoHtml(item.extractor);
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
@@ -371,20 +566,42 @@ function rowHtml(item: Item): string {
       <div class="title">${logo}<span>${esc(item.title)}</span></div>
       ${uploader}
       <div class="statusline">
-        <span class="badge badge-${esc(item.status)}">${esc(statusLabel(item.status))}</span>
+        <span class="badge badge-${esc(item.status)}${badgeFlashClass(item.id, item.status)}">${esc(statusLabel(item.status))}</span>
         ${hitsHtml(item)}
         <span class="phase"></span>
         <span class="speed"></span>
         <span class="eta"></span>
-        ${actionsHtml(item)}
       </div>
       ${bar}
       ${meta}
+      ${actionsHtml(item)}
     </div>`;
 }
 
+// The Completed badge is hidden by default (see CSS) so a full history isn't a
+// wall of green; it only shows for ~30s right after a fresh completion. This adds
+// the `flash` class while an id is in that window.
+const freshCompleted = new Map<number, ReturnType<typeof setTimeout>>();
+function badgeFlashClass(id: number, status: string): string {
+  return status === 'completed' && freshCompleted.has(id) ? ' flash' : '';
+}
+function markFreshCompleted(id: number): void {
+  const prev = freshCompleted.get(id);
+  if (prev) clearTimeout(prev);
+  freshCompleted.set(id, setTimeout(() => {
+    freshCompleted.delete(id);
+    state.rows.get(id)?.querySelector('.badge-completed')?.classList.remove('flash');
+  }, 30_000));
+}
+
+// Last-rendered markup per row, so an upsert that produces byte-identical HTML
+// (the common case during a periodic refresh) touches no DOM at all — no reparse,
+// no thumbnail re-request, no flash. Keyed weakly so removed rows are collectable.
+const rowSig = new WeakMap<HTMLLIElement, string>();
+
 function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
   state.items.set(item.id, item);
+  const gkey = groupKeyOf(item);
   let li = state.rows.get(item.id);
   if (!li) {
     li = document.createElement('li');
@@ -393,17 +610,221 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
     // Preserve the visual selection state across a full re-render of the row.
     if (state.selected.has(item.id)) li.classList.add('selected');
     state.rows.set(item.id, li);
-    if (prepend) els.history.prepend(li);
-    else els.history.appendChild(li);
+    if (gkey) {
+      // Nest inside the playlist fold, ordered by playlist position so the
+      // sublist reads #1, #2, … regardless of the list's newest-first arrival.
+      insertByIndex(ensureGroup(gkey, prepend).body, li, item.playlist_index ?? 0);
+    } else if (prepend) {
+      els.history.prepend(li);
+    } else {
+      els.history.appendChild(li);
+    }
   }
-  li.innerHTML = rowHtml(item);
+  const html = rowHtml(item);
+  if (rowSig.get(li) !== html) {
+    li.innerHTML = html;
+    rowSig.set(li, html);
+  }
+  if (gkey) updateGroupHeader(gkey);
   els.empty.classList.add('hidden');
   return li;
+}
+
+// ---- Playlist folds (multi-video posts) -----------------------------------
+// A link with several videos (a tweet with two clips) collapses into one card:
+// a header previewing up to two thumbnails, expandable into the child rows.
+// Reuses the normal item cards as children so play/share/progress/select all work.
+function ensureGroup(gkey: string, prepend?: boolean): { li: HTMLLIElement; body: HTMLUListElement } {
+  const existing = state.groups.get(gkey);
+  if (existing) return existing;
+  const li = document.createElement('li');
+  // Restore the open/closed state a refresh would otherwise reset.
+  li.className = 'group-card' + (state.expandedGroups.has(gkey) ? '' : ' collapsed');
+  li.dataset.group = gkey;
+  const head = document.createElement('div');
+  head.className = 'group-head';
+  head.setAttribute('role', 'button');
+  head.tabIndex = 0;
+  const body = document.createElement('ul');
+  body.className = 'group-body';
+  li.append(head, body);
+  const g = { li, body };
+  state.groups.set(gkey, g);
+  if (prepend) els.history.prepend(li);
+  else els.history.appendChild(li);
+  return g;
+}
+
+// Insert `li` into a fold body keeping children sorted by playlist index.
+function insertByIndex(body: HTMLUListElement, li: HTMLLIElement, idx: number): void {
+  for (const child of Array.from(body.children)) {
+    const other = state.items.get(Number((child as HTMLElement).dataset.id));
+    if (other && (other.playlist_index ?? 0) > idx) { body.insertBefore(li, child); return; }
+  }
+  body.appendChild(li);
+}
+
+function groupChildIds(gkey: string): number[] {
+  const g = state.groups.get(gkey);
+  return g ? [...g.body.children].map((c) => Number((c as HTMLElement).dataset.id)) : [];
+}
+
+// Fill the fold header from its children. Industry "playlist" pattern (YouTube /
+// file managers): the FIRST video's thumbnail (its real orientation preserved),
+// a stacked-card edge behind it so it reads as a list at a glance, the video
+// count bottom-left, a sequential-play button bottom-right, plus whole-list
+// share / download actions. See the .group-thumb stack CSS.
+function updateGroupHeader(gkey: string): void {
+  const g = state.groups.get(gkey);
+  if (!g) return;
+  const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[];
+  if (!items.length) return;
+  const first = items[0];
+  const thumb = first.thumbnail_url
+    ? `<img class="thumb" src="${esc(first.thumbnail_url)}" alt="" loading="lazy">`
+    : `<div class="thumb thumb-empty"></div>`;
+  const base = (first.title || '').replace(/\s*#\d+\s*$/, '');
+  // Raw (not HTML-escaped): it's applied via textContent in updateGroupProgress,
+  // which does its own escaping — pre-escaping here would double-encode it.
+  const uploader = first.uploader ? first.uploader + ' · ' : '';
+  // Sequential-play button appears once any child is playable; whole-list
+  // download / share once any child still has a local file. Delete-all is always
+  // available (the leftmost list action), so the actions row is never empty.
+  const play = items.some(isPlayable)
+    ? `<button class="play-badge group-play" data-act="play-list" aria-label="${esc(t('group.playAll'))}" title="${esc(t('group.playAll'))}">${PLAY_ICON}</button>`
+    : '';
+  const dlShare = items.some((it) => isPlayable(it) && it.local_available)
+    ? `<button class="act act-icon" data-act="dl-list" aria-label="${esc(t('group.downloadAll'))}" title="${esc(t('group.downloadAll'))}">${DOWNLOAD_SVG}</button>
+        <button class="act act-icon" data-act="share-list" aria-label="${esc(t('group.shareAll'))}" title="${esc(t('group.shareAll'))}">${SHARE_SVG}</button>`
+    : '';
+  // Aggregate size of the whole post, shown left of the list actions (mirrors
+  // the per-video size chip). Dropped when no child has a known size yet.
+  const totalBytes = items.reduce((sum, it) => sum + (it.total_filesize || it.filesize || 0), 0);
+  const sizeChip = metaChip('', fmtSize(totalBytes));
+  const listActions = `<div class="actions group-actions">
+        ${sizeChip}
+        <button class="act act-icon act-del" data-act="del-list" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>
+        ${dlShare}
+      </div>`;
+  const head = g.li.querySelector('.group-head') as HTMLElement;
+  head.innerHTML = `
+    <div class="thumb-wrap group-thumb">
+      ${thumb}
+      <span class="group-count">${items.length}</span>
+      ${play}
+    </div>
+    <div class="group-info">
+      <div class="title">${sourceLogoHtml(first.extractor)}<span>${esc(base)}</span></div>
+      <div class="group-sub"><span class="group-status"></span><span class="group-speed"></span></div>
+      <div class="progress group-progress hidden"><div class="progress-fill" style="width:0%"></div></div>
+    </div>
+    <div class="group-side">
+      <svg class="group-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      ${listActions}
+    </div>`;
+  // The uploader prefix is a static lead-in; the status/speed/progress are filled
+  // (and kept live) by updateGroupProgress so a progress tick needn't rebuild the
+  // whole header.
+  const statusEl = head.querySelector('.group-status') as HTMLElement | null;
+  if (statusEl && uploader) statusEl.dataset.prefix = uploader;
+  updateGroupProgress(gkey);
+  refreshGroupHeadSelection(gkey);
+}
+
+// Refresh just a fold header's aggregate progress: the overall percent bar, the
+// live download speed of the currently-running child, and the summary text.
+// Called from updateGroupHeader (initial paint) and from each progress tick
+// (patchRow) so the fold reflects downloads without a full header rebuild.
+function updateGroupProgress(gkey: string): void {
+  const g = state.groups.get(gkey);
+  if (!g) return;
+  const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[];
+  if (!items.length) return;
+  const total = items.length;
+  // Prefer the latest SSE status (state.progress) over the possibly-stale item
+  // object so a queued→running transition counts toward the aggregate at once.
+  const statusOf = (it: Item): string => state.progress.get(it.id)?.status || it.status;
+  const done = items.filter((it) => statusOf(it) === 'completed').length;
+  const failed = items.filter((it) => statusOf(it) === 'failed').length;
+  const active = items.some((it) => statusOf(it) === 'queued' || statusOf(it) === 'running');
+  // Overall percent: completed children = 100, a running child contributes its
+  // latest tick percent, everything else 0.
+  let sum = 0;
+  let curSpeed = '';
+  for (const it of items) {
+    const st = statusOf(it);
+    if (st === 'completed') { sum += 100; continue; }
+    if (st === 'running') {
+      const pr = state.progress.get(it.id);
+      const pct = pr && pr.percent != null ? Math.max(0, Math.min(100, pr.percent)) : 0;
+      sum += pct;
+      if (!curSpeed && pr && pr.speed) curSpeed = pr.speed;
+    }
+  }
+  const pct = Math.round(sum / total);
+  const head = g.li.querySelector('.group-head');
+  if (!head) return;
+  const bar = head.querySelector('.group-progress');
+  const fill = head.querySelector('.group-progress .progress-fill') as HTMLElement | null;
+  const statusEl = head.querySelector('.group-status') as HTMLElement | null;
+  const speedEl = head.querySelector('.group-speed') as HTMLElement | null;
+  if (bar) bar.classList.toggle('hidden', !active);
+  if (fill) fill.style.width = pct + '%';
+  const prefix = statusEl?.dataset.prefix || '';
+  if (statusEl) {
+    statusEl.textContent = prefix + (active
+      ? t('group.progress', { done, total }) + ` · ${pct}%`
+      : failed ? t('group.failed', { n: failed })
+        : t('group.count', { n: total }));
+  }
+  if (speedEl) speedEl.textContent = active && curSpeed ? curSpeed : '';
+}
+
+// Mark the fold header selected (all children picked) or partial (some).
+function refreshGroupHeadSelection(gkey: string): void {
+  const g = state.groups.get(gkey);
+  if (!g) return;
+  const ids = groupChildIds(gkey);
+  const sel = ids.filter((id) => state.selected.has(id)).length;
+  const head = g.li.querySelector('.group-head') as HTMLElement;
+  head.classList.toggle('selected', sel > 0 && sel === ids.length);
+  head.classList.toggle('partial', sel > 0 && sel < ids.length);
+}
+
+function refreshGroupHeaders(): void {
+  state.groups.forEach((_g, gkey) => refreshGroupHeadSelection(gkey));
+}
+
+// Tapping a fold header in select mode picks/clears the whole post at once.
+function toggleGroupSelect(gkey: string): void {
+  const ids = groupChildIds(gkey);
+  const allSel = ids.length > 0 && ids.every((id) => state.selected.has(id));
+  ids.forEach((id) => { if (allSel) state.selected.delete(id); else state.selected.add(id); });
+  syncSelectionClasses();
+}
+
+function toggleGroupExpand(gkey: string): void {
+  const g = state.groups.get(gkey);
+  if (!g) return;
+  const collapsed = g.li.classList.toggle('collapsed');
+  if (collapsed) state.expandedGroups.delete(gkey);
+  else state.expandedGroups.add(gkey);
+}
+
+// Play every playable child in order in the fullscreen player, advancing on end.
+function playGroup(gkey: string): void {
+  const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter((it) => it && isPlayable(it as Item)) as Item[];
+  if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
+  playQueue = items.map((it) => ({ id: it.id, cloud: !it.local_available, poster: it.thumbnail_url }));
+  playIndex = 0;
+  playCurrentInQueue();
 }
 
 // Patch a row in place from a ProgressEvent (does not rebuild full row).
 function patchRow(ev: ProgressEv): void {
   notifyProgress(ev); // native download notification (mobile only; no-op elsewhere)
+  // Record the latest tick so a playlist fold can aggregate progress + speed.
+  state.progress.set(ev.id, { percent: ev.percent ?? null, speed: ev.speed || '', status: ev.status });
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
   const badge = li.querySelector('.badge');
@@ -431,16 +852,25 @@ function patchRow(ev: ProgressEv): void {
     if (speed) speed.textContent = '';
     if (eta) eta.textContent = '';
     // A just-completed item gains a file: refetch to render play/save/share.
+    // Flash the green Completed badge for 30s (markFreshCompleted) — this is a
+    // fresh success, unlike the old completed rows whose badge stays hidden.
     if (ev.status === 'completed') {
+      markFreshCompleted(ev.id);
+      badge?.classList.add('flash');
       apiFetch('/api/items/' + ev.id)
         .then((r) => (r.ok ? r.json() : null))
         .then((it) => { if (it) upsertRow(it, false); })
         .catch(() => { /* ignore */ });
+      loadStats(); // a fresh file changes the total-downloaded readout
     }
   } else if (bar && fill) {
     bar.classList.remove('hidden');
     if (ev.percent != null) fill.style.width = Math.max(0, Math.min(100, ev.percent)) + '%';
   }
+  // Roll this tick up into the fold header (total progress + live speed).
+  const it = state.items.get(ev.id);
+  const gk = it ? groupKeyOf(it) : null;
+  if (gk) updateGroupProgress(gk);
 }
 
 // ---- List loading ---------------------------------------------------------
@@ -451,6 +881,8 @@ async function loadItems(reset?: boolean): Promise<void> {
     state.cursor = null;
     state.rows.clear();
     state.items.clear();
+    state.groups.clear();
+    state.progress.clear();
     els.history.innerHTML = '';
     els.loader.classList.add('hidden'); // hide until we know there's a next page
   }
@@ -571,7 +1003,7 @@ function ensureEventsConnected(): void {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) ensureEventsConnected(); });
 window.addEventListener('focus', ensureEventsConnected);
 
-// ---- Cookies --------------------------------------------------------------
+// ---- Website management ---------------------------------------------------
 function fmtBytes(n: number | undefined): string {
   if (!n) return '';
   if (n < 1024) return n + ' B';
@@ -579,106 +1011,354 @@ function fmtBytes(n: number | undefined): string {
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-interface CookiePlatform {
+interface CookieStatus { present: boolean; enabled: boolean; bytes: number; updated_at: number; }
+interface Website {
   key: string;
   name: string;
-  present: boolean;
-  enabled: boolean;
-  bytes: number;
+  hosts: string[];
   login_url: string;
+  enabled: boolean;
+  max_height: number | null;
+  no_download: boolean;
+  sort: number;
+  cookie?: CookieStatus;
 }
 
-function cookieRowHtml(p: CookiePlatform): string {
-  const statusText = !p.present
-    ? `<span class="ck-status ck-none">${esc(t('cookie.notSet'))}</span>`
-    : p.enabled
-      ? `<span class="ck-status ck-on">${esc(t('cookie.active', { size: fmtBytes(p.bytes) }))}</span>`
-      : `<span class="ck-status ck-off">${esc(t('cookie.disabled', { size: fmtBytes(p.bytes) }))}</span>`;
-  const actions = p.present
-    ? `<button class="ck-btn" data-act="toggle" data-enabled="${p.enabled ? 'false' : 'true'}">${esc(p.enabled ? t('cookie.disable') : t('cookie.enable'))}</button>
-       <button class="ck-btn ck-danger" data-act="delete">${esc(t('cookie.delete'))}</button>`
-    : '';
-  return `
-    <div class="ck-head">
-      <span class="ck-name">${esc(p.name)}</span>
-      ${statusText}
-    </div>
-    <div class="ck-body">
-      <a class="ck-btn" href="${esc(p.login_url)}" target="_blank" rel="noopener">${esc(t('cookie.login'))}</a>
-      <button class="ck-btn" data-act="paste">${esc(p.present ? t('cookie.replace') : t('cookie.paste'))}</button>
-      ${actions}
-      <textarea class="ck-paste hidden" placeholder="${esc(t('ph.cookiePaste'))}" rows="4"></textarea>
-      <div class="ck-paste-actions hidden">
-        <button class="ck-btn ck-primary" data-act="save">${esc(t('cookie.save'))}</button>
-        <button class="ck-btn" data-act="cancel">${esc(t('cookie.cancel'))}</button>
-      </div>
+let websitesLoaded: Website[] = [];
+// Client-side filter query (name / domains / key) and batch-select state, mirroring
+// the home list's search + multi-select so the two screens feel like one system.
+let siteQuery = '';
+let siteSelectMode = false;
+const siteSelected = new Set<string>();
+
+// The per-site maximum-resolution ladder, offered as a single dropdown (not a chip
+// row): one unambiguous "cap" control per card.
+const SITE_RES_LADDER = [4320, 2160, 1440, 1080, 720, 480, 360];
+
+function siteResSelectHtml(w: Website): string {
+  // Current value: 'none' (stream-only) → a pinned height → 'global' (follow the
+  // global default). The <select> is the whole control; `data-act="res"` routes its
+  // change event.
+  const active = w.no_download ? 'none' : (w.max_height && w.max_height > 0 ? String(w.max_height) : 'global');
+  const opt = (val: string, label: string): string =>
+    `<option value="${val}"${active === val ? ' selected' : ''}>${esc(label)}</option>`;
+  const opts = [opt('global', t('sites.followGlobal')), opt('none', t('res.noneLabel'))]
+    .concat(SITE_RES_LADDER.map((h) => opt(String(h), resLabel(h) || h + 'p')));
+  return `<select class="select site-res-select" data-act="res" aria-label="${esc(t('sites.maxRes'))}">${opts.join('')}</select>`;
+}
+
+function cookieChipHtml(w: Website): string {
+  const c = w.cookie;
+  if (!c || !c.present) return `<span class="ck-status ck-none">${esc(t('cookie.notSet'))}</span>`;
+  return c.enabled
+    ? `<span class="ck-status ck-on">${esc(t('cookie.active', { size: fmtBytes(c.bytes) }))}</span>`
+    : `<span class="ck-status ck-off">${esc(t('cookie.disabled', { size: fmtBytes(c.bytes) }))}</span>`;
+}
+
+// Kebab overflow menu: everything that isn't an everyday control (login, test,
+// domain edit, cookie enable/disable + delete, delete site) collapses here so the
+// card front shows only the toggle, cookie status, one cookie button and the cap.
+function siteMenuHtml(w: Website): string {
+  const present = !!(w.cookie && w.cookie.present);
+  const items: string[] = [];
+  if (w.login_url)
+    items.push(`<a class="site-menu-item" href="${esc(w.login_url)}" target="_blank" rel="noopener">${esc(t('cookie.login'))}</a>`);
+  items.push(`<button class="site-menu-item" data-act="edit">${esc(t('sites.editDomains'))}</button>`);
+  items.push(`<button class="site-menu-item" data-act="validate">${esc(t('sites.validate'))}</button>`);
+  if (present) {
+    items.push(`<button class="site-menu-item" data-act="ck-toggle" data-enabled="${w.cookie!.enabled ? 'false' : 'true'}">${esc(w.cookie!.enabled ? t('cookie.disable') : t('cookie.enable'))}</button>`);
+    items.push(`<button class="site-menu-item danger" data-act="ck-delete">${esc(t('cookie.delete'))}</button>`);
+  }
+  items.push(`<button class="site-menu-item danger" data-act="site-delete">${esc(t('sites.delete'))}</button>`);
+  return `<div class="site-menu-wrap">
+      <button class="site-menu-btn" data-act="menu" aria-label="${esc(t('sites.more'))}" aria-haspopup="true">${MORE_SVG}</button>
+      <div class="site-menu-pop hidden" role="menu">${items.join('')}</div>
     </div>`;
 }
 
-async function loadCookies(): Promise<void> {
+function websiteCardHtml(w: Website): string {
+  const present = !!(w.cookie && w.cookie.present);
+  return `
+    <div class="site-main">
+      <button class="site-toggle ${w.enabled ? 'on' : 'off'}" data-act="enable" role="switch" aria-checked="${w.enabled}" title="${esc(w.enabled ? t('sites.disable') : t('sites.enable'))}"><span class="knob"></span></button>
+      <div class="site-info">
+        <div class="site-titlerow">
+          <span class="site-name">${esc(w.name)}</span>
+          ${cookieChipHtml(w)}
+        </div>
+        <div class="site-domains-list">${esc(w.hosts.join(', ') || '—')}</div>
+      </div>
+      ${siteMenuHtml(w)}
+    </div>
+    <div class="site-controls">
+      <label class="site-res-field">
+        <span class="site-res-label">${esc(t('sites.maxRes'))}</span>
+        ${siteResSelectHtml(w)}
+      </label>
+      <button class="site-cookie-btn${present ? ' has' : ''}" data-act="ck-import">${esc(present ? t('cookie.replace') : t('cookie.paste'))}</button>
+    </div>
+    <textarea class="ck-paste hidden" placeholder="${esc(t('ph.cookiePaste'))}" rows="4"></textarea>
+    <div class="ck-paste-actions hidden">
+      <button class="btn" data-act="ck-save">${esc(t('cookie.save'))}</button>
+      <button class="btn btn-ghost" data-act="ck-cancel">${esc(t('cookie.cancel'))}</button>
+    </div>`;
+}
+
+async function loadWebsites(): Promise<void> {
   if (!getToken()) { showTokenField(false); toast('Set your token first', 'error'); return; }
   try {
-    const res = await apiFetch('/api/cookies');
+    const res = await apiFetch('/api/websites');
     if (!res.ok) { toast(t('toast.loadCookiesFail'), 'error'); return; }
     const data = await res.json();
-    els.cookieList.innerHTML = '';
-    (data.platforms || []).forEach((p: CookiePlatform) => {
-      const div = document.createElement('div');
-      div.className = 'cookie-item';
-      div.dataset.key = p.key;
-      div.innerHTML = cookieRowHtml(p);
-      els.cookieList.appendChild(div);
-    });
+    websitesLoaded = (data.websites || []) as Website[];
+    renderWebsites();
   } catch (e) {
     if (!e || !e.unauthorized) toast('Network error', 'error');
   }
 }
 
-async function cookieAction(key: string, act: string, el: HTMLElement): Promise<void> {
-  const item = el.closest('.cookie-item') as HTMLElement;
-  const paste = item.querySelector('.ck-paste') as HTMLTextAreaElement;
-  const pasteActions = item.querySelector('.ck-paste-actions') as HTMLElement;
-  if (act === 'paste') {
-    paste.classList.remove('hidden');
-    pasteActions.classList.remove('hidden');
-    paste.focus();
-    return;
+// Sites matching the current search box: name, any domain, or key (case-insensitive).
+function filteredWebsites(): Website[] {
+  const q = siteQuery.trim().toLowerCase();
+  if (!q) return websitesLoaded;
+  return websitesLoaded.filter((w) =>
+    w.name.toLowerCase().includes(q) ||
+    w.key.toLowerCase().includes(q) ||
+    w.hosts.some((h) => h.toLowerCase().includes(q)));
+}
+
+function renderWebsites(): void {
+  const shown = filteredWebsites();
+  els.websiteList.innerHTML = '';
+  for (const w of shown) {
+    const div = document.createElement('div');
+    div.className = 'website-card' + (w.enabled ? '' : ' disabled') + (siteSelected.has(w.key) ? ' selected' : '');
+    div.dataset.key = w.key;
+    div.innerHTML = websiteCardHtml(w);
+    els.websiteList.appendChild(div);
   }
-  if (act === 'cancel') {
-    paste.value = '';
-    paste.classList.add('hidden');
-    pasteActions.classList.add('hidden');
-    return;
-  }
+  els.websites.classList.toggle('sites-selecting', siteSelectMode);
+  updateSiteSelBar();
+}
+
+// PUT a partial update to a website and refresh its card in place.
+async function saveWebsite(key: string, patch: Record<string, unknown>): Promise<boolean> {
   try {
-    let res: Response | undefined;
-    if (act === 'save') {
-      const text = paste.value.trim();
-      if (!text) { toast(t('toast.pasteCookiesFirst'), 'error'); return; }
-      res = await apiFetch('/api/cookies/' + encodeURIComponent(key), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies: text }),
-      });
-    } else if (act === 'toggle') {
-      const enabled = el.dataset.enabled === 'true';
-      res = await apiFetch('/api/cookies/' + encodeURIComponent(key), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled }),
-      });
-    } else if (act === 'delete') {
-      res = await apiFetch('/api/cookies/' + encodeURIComponent(key), { method: 'DELETE' });
-    }
-    if (!res) return;
+    const res = await apiFetch('/api/websites/' + encodeURIComponent(key), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.cookieUpdateFail'), 'error'); return; }
-    if (act === 'save') toast(t('toast.cookiesSaved'), 'ok');
-    if (act === 'delete') toast(t('toast.cookiesRemoved'), 'info');
-    loadCookies();
+    if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return false; }
+    if (data && data.website) {
+      const i = websitesLoaded.findIndex((w) => w.key === key);
+      if (i >= 0) websitesLoaded[i] = data.website;
+      renderWebsites();
+    }
+    return true;
   } catch (e) {
     if (!e || !e.unauthorized) toast('Network error', 'error');
+    return false;
   }
+}
+
+async function websiteAction(key: string, act: string, el: HTMLElement): Promise<void> {
+  const w = websitesLoaded.find((x) => x.key === key);
+  if (!w) return;
+  const card = el.closest('.website-card') as HTMLElement;
+  const paste = card.querySelector('.ck-paste') as HTMLTextAreaElement;
+  const pasteActions = card.querySelector('.ck-paste-actions') as HTMLElement;
+
+  // Any concrete action dismisses an open overflow menu (the menu toggle itself
+  // manages its own open/closed state below).
+  if (act !== 'menu') closeSiteMenus();
+
+  switch (act) {
+    case 'enable':
+      await saveWebsite(key, { enabled: !w.enabled });
+      return;
+    case 'res': {
+      // The card's maximum-resolution dropdown (change event).
+      const cap = (el as HTMLSelectElement).value;
+      if (cap === 'global') await saveWebsite(key, { max_height: 0, no_download: false });
+      else if (cap === 'none') await saveWebsite(key, { no_download: true, max_height: 0 });
+      else await saveWebsite(key, { max_height: Number(cap), no_download: false });
+      return;
+    }
+    case 'menu': {
+      // Toggle this card's overflow menu; close any other open one.
+      const pop = card.querySelector('.site-menu-pop') as HTMLElement;
+      const wasOpen = !pop.classList.contains('hidden');
+      closeSiteMenus();
+      if (!wasOpen) pop.classList.remove('hidden');
+      return;
+    }
+    case 'edit':
+      openSiteEdit(w);
+      return;
+    case 'site-delete':
+      if (!confirm(t('sites.deleteConfirm', { name: w.name }))) return;
+      try {
+        const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
+        if (res.ok) { siteSelected.delete(key); websitesLoaded = websitesLoaded.filter((x) => x.key !== key); renderWebsites(); }
+      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      return;
+    case 'validate': {
+      const sample = prompt(t('sites.validatePrompt', { name: w.name }), w.hosts[0] ? 'https://' + w.hosts[0] + '/' : '');
+      if (!sample) return;
+      toast(t('sites.validating'), 'info');
+      try {
+        const res = await apiFetch('/api/websites/validate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: sample }),
+        });
+        const data = await res.json().catch(() => ({}));
+        toast(data.ok ? t('sites.validateOk', { title: data.title || '' }) : t('sites.validateFail', { err: data.error || '' }), data.ok ? 'ok' : 'error');
+      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      return;
+    }
+    case 'ck-import':
+      paste.classList.remove('hidden'); pasteActions.classList.remove('hidden'); paste.focus();
+      return;
+    case 'ck-cancel':
+      paste.value = ''; paste.classList.add('hidden'); pasteActions.classList.add('hidden');
+      return;
+    case 'ck-save': {
+      const text = paste.value.trim();
+      if (!text) { toast(t('toast.pasteCookiesFirst'), 'error'); return; }
+      try {
+        const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cookies: text }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.cookieUpdateFail'), 'error'); return; }
+        toast(t('toast.cookiesSaved'), 'ok');
+        if (data.cookie) w.cookie = data.cookie;
+        renderWebsites();
+      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      return;
+    }
+    case 'ck-toggle': {
+      const enabled = el.dataset.enabled === 'true';
+      try {
+        const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.cookie) { w.cookie = data.cookie; renderWebsites(); }
+      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      return;
+    }
+    case 'ck-delete': {
+      try {
+        const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) { w.cookie = data.cookie; toast(t('toast.cookiesRemoved'), 'info'); renderWebsites(); }
+      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      return;
+    }
+  }
+}
+
+function closeSiteMenus(): void {
+  els.websiteList.querySelectorAll('.site-menu-pop:not(.hidden)').forEach((m) => m.classList.add('hidden'));
+}
+
+// ---- Website multi-select (batch enable/disable/merge/delete) ----
+// Mirrors the home list's selection model: a toolbar toggle flips select mode, a
+// tap on a card toggles its membership, and a bar exposes the batch actions.
+function setSiteSelectMode(on: boolean): void {
+  siteSelectMode = on;
+  if (!on) siteSelected.clear();
+  closeSiteMenus();
+  els.siteSelToggle.classList.toggle('active', on);
+  renderWebsites();
+}
+
+function toggleSiteSelect(key: string): void {
+  if (siteSelected.has(key)) siteSelected.delete(key); else siteSelected.add(key);
+  const card = els.websiteList.querySelector(`.website-card[data-key="${CSS.escape(key)}"]`);
+  if (card) card.classList.toggle('selected', siteSelected.has(key));
+  updateSiteSelBar();
+}
+
+function selectedSiteKeys(): string[] {
+  // In display (sort) order, so merge's target is the topmost selection.
+  return filteredWebsites().filter((w) => siteSelected.has(w.key)).map((w) => w.key);
+}
+
+function updateSiteSelBar(): void {
+  const n = siteSelected.size;
+  els.siteSelBar.classList.toggle('hidden', !siteSelectMode || n === 0);
+  els.siteSelCount.textContent = t('sites.selectedN', { n });
+  els.siteSelMerge.disabled = n < 2;
+}
+
+async function batchSetEnabled(enabled: boolean): Promise<void> {
+  const keys = selectedSiteKeys();
+  if (!keys.length) return;
+  for (const key of keys) {
+    const w = websitesLoaded.find((x) => x.key === key);
+    if (w && w.enabled !== enabled) await saveWebsite(key, { enabled });
+  }
+  setSiteSelectMode(false);
+}
+
+async function batchDeleteSites(): Promise<void> {
+  const keys = selectedSiteKeys();
+  if (!keys.length) return;
+  if (!confirm(t('sites.deleteN', { n: keys.length }))) return;
+  for (const key of keys) {
+    try {
+      const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
+      if (res.ok) websitesLoaded = websitesLoaded.filter((x) => x.key !== key);
+    } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+  }
+  setSiteSelectMode(false);
+}
+
+// Merge every selected site into the first (by display order); the rest fold in
+// and are deleted, with their domains/cookies/download folders migrated.
+async function batchMergeSites(): Promise<void> {
+  const keys = selectedSiteKeys();
+  if (keys.length < 2) return;
+  const target = keys[0];
+  const sources = keys.slice(1);
+  const targetName = websitesLoaded.find((w) => w.key === target)?.name || target;
+  if (!confirm(t('sites.mergeConfirm', { n: sources.length, name: targetName }))) return;
+  try {
+    const res = await apiFetch('/api/websites/merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, sources }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
+    toast(t('sites.merged', { n: sources.length }), 'ok');
+    setSiteSelectMode(false);
+    loadWebsites();
+  } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+}
+
+// Add/edit site dialog. `existing` null = add (key editable); else edit (key locked).
+let siteEditKey: string | null = null;
+function openSiteEdit(existing: Website | null): void {
+  siteEditKey = existing ? existing.key : null;
+  els.siteEditTitle.textContent = existing ? t('sites.editTitle') : t('sites.addTitle');
+  els.siteEditName.value = existing ? existing.name : '';
+  els.siteEditKey.value = existing ? existing.key : '';
+  els.siteEditKey.readOnly = !!existing;
+  els.siteEditHosts.value = existing ? existing.hosts.join(', ') : '';
+  els.siteEditErr.classList.add('hidden');
+  openModal(els.siteEdit);
+  (existing ? els.siteEditHosts : els.siteEditName).focus();
+}
+
+async function saveSiteEdit(): Promise<void> {
+  const name = els.siteEditName.value.trim();
+  const key = (siteEditKey || els.siteEditKey.value.trim().toLowerCase()).replace(/[^a-z0-9_]/g, '');
+  const hosts = els.siteEditHosts.value.trim();
+  if (!key) { els.siteEditErr.textContent = t('sites.keyRequired'); els.siteEditErr.classList.remove('hidden'); return; }
+  const ok = await saveWebsite(key, { name: name || key, hosts });
+  if (ok) { closeModal(els.siteEdit); if (!siteEditKey) loadWebsites(); }
 }
 
 // ---- Share dialog (Baidu-netdisk style) -----------------------------------
@@ -812,34 +1492,68 @@ function closeModal(el: HTMLElement): void {
 
 // ---- Wire up UI -----------------------------------------------------------
 els.settingsToggle.addEventListener('click', () => {
-  closeModal(els.cookies);
+  closeModal(els.websites);
   els.token.value = getToken();
   if (els.server) els.server.value = apiBase();
   openModal(els.settings);
   loadArchive();
+  loadLogs();
 });
 els.settingsClose.addEventListener('click', () => closeModal(els.settings));
 els.settings.addEventListener('click', (e) => {
   if (e.target === els.settings) closeModal(els.settings); // backdrop dismiss
 });
 
-els.cookiesToggle.addEventListener('click', () => {
+els.websitesToggle.addEventListener('click', () => {
   closeModal(els.settings);
-  openModal(els.cookies);
-  loadCookies();
+  openModal(els.websites);
+  // Open fresh: no lingering search filter or selection from a previous visit.
+  siteQuery = '';
+  els.siteSearch.value = '';
+  setSiteSelectMode(false);
+  loadSettings(); // the global max-res control now lives in this window
+  loadWebsites();
 });
-els.cookiesClose.addEventListener('click', () => closeModal(els.cookies));
-els.cookies.addEventListener('click', (e) => {
-  if (e.target === els.cookies) closeModal(els.cookies); // backdrop dismiss
+els.websitesClose.addEventListener('click', () => closeModal(els.websites));
+els.websites.addEventListener('click', (e) => {
+  if (e.target === els.websites) closeModal(els.websites); // backdrop dismiss
 });
 
-els.cookieList.addEventListener('click', (e) => {
+els.websiteList.addEventListener('click', (e) => {
+  const card = (e.target as HTMLElement).closest('.website-card') as HTMLElement | null;
+  if (!card) return;
+  // Selection mode: a tap anywhere on the card toggles its membership. Inner
+  // controls are pointer-events:none in this mode (CSS) so they never fire.
+  if (siteSelectMode) { toggleSiteSelect(card.dataset.key!); return; }
   const btn = (e.target as HTMLElement).closest('[data-act]') as HTMLElement | null;
   if (!btn) return;
-  const item = btn.closest('.cookie-item') as HTMLElement | null;
-  if (!item) return;
-  cookieAction(item.dataset.key!, btn.dataset.act!, btn);
+  websiteAction(card.dataset.key!, btn.dataset.act!, btn);
 });
+// The maximum-resolution dropdown reports via change, not click.
+els.websiteList.addEventListener('change', (e) => {
+  const sel = (e.target as HTMLElement).closest('select[data-act="res"]') as HTMLSelectElement | null;
+  if (!sel || siteSelectMode) return;
+  const card = sel.closest('.website-card') as HTMLElement;
+  websiteAction(card.dataset.key!, 'res', sel);
+});
+// Click outside any open kebab menu closes it.
+document.addEventListener('click', (e) => {
+  if (!(e.target as HTMLElement).closest('.site-menu-wrap')) closeSiteMenus();
+});
+els.sitesAdd.addEventListener('click', () => openSiteEdit(null));
+els.siteSearch.addEventListener('input', debounce(() => { siteQuery = els.siteSearch.value; renderWebsites(); }, 150));
+els.siteSelToggle.addEventListener('click', () => setSiteSelectMode(!siteSelectMode));
+els.siteSelEnable.addEventListener('click', () => batchSetEnabled(true));
+els.siteSelDisable.addEventListener('click', () => batchSetEnabled(false));
+els.siteSelMerge.addEventListener('click', batchMergeSites);
+els.siteSelDelete.addEventListener('click', batchDeleteSites);
+els.siteSelCancel.addEventListener('click', () => setSiteSelectMode(false));
+els.siteEditClose.addEventListener('click', () => closeModal(els.siteEdit));
+els.siteEditCancel.addEventListener('click', () => closeModal(els.siteEdit));
+els.siteEdit.addEventListener('click', (e) => {
+  if (e.target === els.siteEdit) closeModal(els.siteEdit);
+});
+els.siteEditSave.addEventListener('click', saveSiteEdit);
 
 els.tokenSave.addEventListener('click', () => {
   setToken(els.token.value.trim());
@@ -847,6 +1561,7 @@ els.tokenSave.addEventListener('click', () => {
   closeModal(els.settings);
   connectEvents();
   loadItems(true);
+  loadStats();
 });
 
 // Server URL (app only): persist, then reconnect the SSE + reload against it.
@@ -888,6 +1603,266 @@ async function loadArchive(): Promise<void> {
   } catch (e) {
     if (!e || !e.unauthorized) toast(t('toast.loadArchiveFail'), 'error');
   }
+}
+
+// ---- Max-resolution setting -----------------------------------------------
+// Server-side cap on the resolution yt-dlp downloads. Highest by default; a
+// WHALE_MAX_HEIGHT env var pins it (the control then reads locked/disabled).
+async function loadSettings(): Promise<void> {
+  if (!els.maxRes || !getToken()) return;
+  try {
+    const res = await apiFetch('/api/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    // "None" (no-download) is the sentinel value "none"; otherwise the numeric cap
+    // (0 = highest). See put_settings.
+    els.maxRes.value = data.no_download ? 'none' : String(data.max_height || 0);
+    const locked = !!data.max_height_locked;
+    els.maxRes.disabled = locked;
+    els.maxResSave.disabled = locked;
+    els.maxResLocked.classList.toggle('hidden', !locked);
+  } catch (_) { /* offline / unauthorized — leave the control as-is */ }
+}
+
+// ---- Diagnostics error log ------------------------------------------------
+// Reads the backend's bounded ring buffer (GET /api/logs) and renders each
+// entry as a native <details> disclosure — the standard, dependency-free
+// collapsible "log line": summary shows time + platform + a one-line preview,
+// expanding reveals the full message. Per-row and copy-all buttons use the
+// existing clipboard helper. Refreshed each time Settings opens.
+let logsCache: LogEntry[] = [];
+
+function fmtLogTime(at: number): string {
+  try { return new Date(at * 1000).toLocaleString(); } catch (_) { return String(at); }
+}
+
+// One entry flattened to plain text for the clipboard.
+function logEntryText(e: LogEntry): string {
+  return `${fmtLogTime(e.at)}  [${e.stage}] ${e.platform}\n${e.url}\n${e.message}`;
+}
+
+function renderLogs(entries: LogEntry[]): void {
+  const list = els.logList;
+  if (!list) return;
+  list.textContent = '';
+  if (els.logEmpty) els.logEmpty.classList.toggle('hidden', entries.length > 0);
+  for (const e of entries) {
+    const d = document.createElement('details');
+    d.className = 'log-entry log-entry--' + (e.stage === 'download' ? 'download' : 'probe');
+
+    const summary = document.createElement('summary');
+    summary.innerHTML =
+      `<span class="log-time">${esc(fmtLogTime(e.at))}</span>` +
+      `<span class="log-badge">${esc(e.platform || 'unknown')}</span>` +
+      `<span class="log-stage">${esc(e.stage)}</span>` +
+      `<span class="log-msg-short">${esc(e.message)}</span>`;
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'log-copy';
+    copyBtn.title = t('logs.copyOne');
+    copyBtn.setAttribute('aria-label', t('logs.copyOne'));
+    copyBtn.textContent = '⧉';
+    // Don't let the copy button toggle the disclosure.
+    copyBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      copyText(logEntryText(e), t('toast.logCopied'));
+    });
+    summary.appendChild(copyBtn);
+    d.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.className = 'log-full';
+    pre.textContent = `${e.url}\n\n${e.message}`;
+    d.appendChild(pre);
+
+    list.appendChild(d);
+  }
+}
+
+async function loadLogs(): Promise<void> {
+  if (!els.logList || !getToken()) return;
+  try {
+    const res = await apiFetch('/api/logs');
+    if (!res.ok) return;
+    const data = await res.json();
+    logsCache = (data.entries || []) as LogEntry[];
+    renderLogs(logsCache);
+  } catch (e) {
+    if (!e || !e.unauthorized) toast(t('toast.logsLoadFail'), 'error');
+  }
+}
+
+if (els.logsRefresh) {
+  els.logsRefresh.addEventListener('click', () => loadLogs());
+}
+if (els.logsCopy) {
+  els.logsCopy.addEventListener('click', () => {
+    if (!logsCache.length) { toast(t('logs.empty'), 'info'); return; }
+    copyText(logsCache.map(logEntryText).join('\n\n'), t('toast.logsCopied', { n: logsCache.length }));
+  });
+}
+
+// ---- Per-item resolution multi-select -------------------------------------
+// The resolution button on a completed card opens this: a checkbox list of the
+// resolution versions the source offers, with the already-downloaded ones
+// checked. Applying downloads newly-checked versions and deletes the files of
+// unchecked ones. At least one must stay checked (no silent fallback).
+let resTarget: number | null = null;
+
+async function openResolutions(id: number): Promise<void> {
+  if (!getToken()) { showTokenField(false); return; }
+  // Fetch first, decide second: the source's resolution set is cached server-side
+  // after the first probe, so this is fast on repeat opens. Only pop the modal
+  // when there's an actual choice to make (≥2 options); a single available
+  // resolution just gets a toast — no dialog to dismiss (Req 2).
+  let data: { available?: number[]; downloaded?: number[] };
+  try {
+    const res = await apiFetch(`/api/items/${id}/resolutions`);
+    if (!res.ok) throw new Error('load');
+    data = await res.json();
+  } catch (e) {
+    if (!e || !e.unauthorized) toast(t('res.loadFail'), 'error');
+    return;
+  }
+  // Collapse heights that map to the same human label (e.g. a portrait video's
+  // 1280 and a 1080 both read "1080p") so the picker never shows a duplicate row;
+  // keep the highest actual height per label (list arrives highest-first).
+  const available = dedupByLabel(data.available || []);
+  const downloaded = data.downloaded || [];
+  // Open the picker whenever there's a real choice: ≥2 source resolutions, OR the
+  // item already holds ≥1 downloaded version (so it can be cleared to "None").
+  // Only short-circuit with a toast when there is genuinely nothing to decide.
+  if (available.length <= 1 && downloaded.length === 0) {
+    toast(t('res.single', { res: resLabel(available[0]) || t('res.noneLabel') }), 'info');
+    return;
+  }
+  resTarget = id;
+  els.resolutionEmpty.classList.add('hidden');
+  renderResolutionOptions(available, downloaded);
+  openModal(els.resolution);
+}
+
+// Keep only the first (highest) height for each distinct resolution label, so two
+// heights that bucket to the same label don't produce duplicate picker rows.
+function dedupByLabel(heights: number[]): number[] {
+  const seen = new Set<string>();
+  const out: number[] = [];
+  for (const h of heights) {
+    const label = resLabel(h) || (h + 'p');
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(h);
+  }
+  return out;
+}
+
+// Each option is a toggle row (industry multi-select pattern), NOT a native
+// checkbox: the row itself highlights when selected (like the home-screen card
+// multi-select), so Android WebViews don't paint the stray rectangular checkbox
+// tap-highlight (Req 4).
+function renderResolutionOptions(available: number[], downloaded: number[]): void {
+  els.resolutionList.textContent = '';
+  if (!available.length) {
+    els.resolutionEmpty.classList.remove('hidden');
+    els.resolutionSave.disabled = true;
+    return;
+  }
+  els.resolutionEmpty.classList.add('hidden');
+  const have = new Set(downloaded);
+  for (const h of available) {
+    const opt = document.createElement('div');
+    opt.className = 'res-opt' + (have.has(h) ? ' selected' : '');
+    opt.dataset.height = String(h);
+    opt.setAttribute('role', 'checkbox');
+    opt.setAttribute('aria-checked', have.has(h) ? 'true' : 'false');
+    opt.tabIndex = 0;
+    const span = document.createElement('span');
+    span.textContent = resLabel(h) || (h + 'p');
+    opt.appendChild(span);
+    els.resolutionList.appendChild(opt);
+  }
+  els.resolutionSave.disabled = false;
+}
+
+// Toggle a resolution row's selected state (click / keyboard). Delegated from the
+// list container so it survives re-renders.
+function toggleResOpt(opt: HTMLElement): void {
+  const on = opt.classList.toggle('selected');
+  opt.setAttribute('aria-checked', on ? 'true' : 'false');
+}
+
+async function saveResolutions(): Promise<void> {
+  if (resTarget == null) return;
+  const heights = [...els.resolutionList.querySelectorAll('.res-opt.selected')]
+    .map((c) => Number((c as HTMLElement).dataset.height));
+  // Deselecting everything is the explicit "None" mode: the backend purges every
+  // local file and keeps the entry as a stream-only record (plays from source).
+  const target = resTarget;
+  els.resolutionSave.disabled = true;
+  try {
+    const res = await apiFetch(`/api/items/${target}/resolutions`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ heights }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
+    const queued = ((data && data.queued) || []).length;
+    toast(!heights.length ? t('res.cleared') : queued ? t('res.queued', { n: queued }) : t('res.updated'), 'ok');
+    closeModal(els.resolution);
+    // Refetch so the card's resolution label/size reflect the new highest kept
+    // version immediately (removals repoint the primary server-side; Req 3).
+    apiFetch('/api/items/' + target)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((it) => { if (it) upsertRow(it, false); })
+      .catch(() => { /* SSE / next load will catch up */ });
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  } finally {
+    els.resolutionSave.disabled = false;
+  }
+}
+
+els.resolutionClose.addEventListener('click', () => closeModal(els.resolution));
+els.resolutionCancel.addEventListener('click', () => closeModal(els.resolution));
+els.resolution.addEventListener('click', (e) => {
+  if (e.target === els.resolution) closeModal(els.resolution); // backdrop dismiss
+});
+els.resolutionSave.addEventListener('click', saveResolutions);
+// Toggle a resolution row on tap (delegated) and on Enter/Space for keyboard use.
+els.resolutionList.addEventListener('click', (e) => {
+  const opt = (e.target as HTMLElement).closest('.res-opt') as HTMLElement | null;
+  if (opt) toggleResOpt(opt);
+});
+els.resolutionList.addEventListener('keydown', (e) => {
+  const ev = e as KeyboardEvent;
+  if (ev.key !== 'Enter' && ev.key !== ' ') return;
+  const opt = (ev.target as HTMLElement).closest('.res-opt') as HTMLElement | null;
+  if (opt) { ev.preventDefault(); toggleResOpt(opt); }
+});
+
+if (els.maxResSave) {
+  els.maxResSave.addEventListener('click', async () => {
+    els.maxResSave.disabled = true;
+    try {
+      const none = els.maxRes.value === 'none';
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(none ? { no_download: true } : { max_height: Number(els.maxRes.value) || 0 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
+      els.maxRes.value = data.no_download ? 'none' : String(data.max_height || 0);
+      toast(t('toast.settingsSaved'), 'ok');
+    } catch (e) {
+      if (!e || !e.unauthorized) toast('Network error', 'error');
+    } finally {
+      els.maxResSave.disabled = false;
+    }
+  });
 }
 
 if (els.sealImport) {
@@ -952,10 +1927,28 @@ loaderObserver.observe(els.loader);
 // thumbnail play / share dialog as before.
 els.history.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
+  const head = target.closest('.group-head') as HTMLElement | null;
+  const gkey = () => (head!.parentElement as HTMLElement).dataset.group as string;
   if (state.selectMode) {
     if (suppressClick) { suppressClick = false; return; } // ignore the click a long-press spawns
+    if (head) { e.preventDefault(); toggleGroupSelect(gkey()); return; } // whole fold at once
     const li = target.closest('.item') as HTMLElement | null;
     if (li) { e.preventDefault(); toggleSelect(Number(li.dataset.id)); }
+    return;
+  }
+  if (head) {
+    // Whole-list actions on the fold header take priority over expand/collapse.
+    const act = target.closest('[data-act]') as HTMLElement | null;
+    if (act && head.contains(act)) {
+      e.preventDefault();
+      const a = act.dataset.act;
+      if (a === 'play-list') playGroup(gkey());
+      else if (a === 'share-list') shareGroup(gkey());
+      else if (a === 'dl-list') downloadGroup(gkey());
+      else if (a === 'del-list') deleteGroup(gkey());
+      return;
+    }
+    toggleGroupExpand(gkey());
     return;
   }
   const play = target.closest('.thumb-play') as HTMLElement | null;
@@ -965,6 +1958,8 @@ els.history.addEventListener('click', (e) => {
   if (!btn) return;
   const id = Number(btn.dataset.id);
   if (btn.dataset.act === 'share') openShare(id);
+  else if (btn.dataset.act === 'delete') openDeleteConfirm([id]);
+  else if (btn.dataset.act === 'resolutions') openResolutions(id);
 });
 
 // ---- Multi-select -------------------------------------------------------
@@ -997,7 +1992,14 @@ function updateSelBar(): void {
   const n = state.selected.size;
   els.selCount.textContent = n ? t('sel.countN', { n }) : t('sel.count0');
   els.selBar.classList.toggle('hidden', !state.selectMode);
-  [els.selDownload, els.selShare, els.selUnshare, els.selCopy].forEach((b) => { b.disabled = n === 0; });
+  [els.selDownload, els.selShare, els.selUnshare, els.selCopy, els.selClean, els.selDelete].forEach((b) => { b.disabled = n === 0; });
+  // Select-all / invert act on the loaded rows, so they're live whenever any
+  // row exists; "Select all" reads "Clear" once everything loaded is selected.
+  const loaded = state.rows.size;
+  els.selAll.disabled = loaded === 0;
+  els.selInvert.disabled = loaded === 0;
+  els.selAll.textContent = loaded > 0 && n >= loaded ? t('sel.clear') : t('sel.all');
+  refreshGroupHeaders(); // keep fold headers' selected/partial state in sync
 }
 
 // Items backing the current selection (latest known objects).
@@ -1005,11 +2007,38 @@ function selectedItems(): Item[] {
   return [...state.selected].map((id) => state.items.get(id)).filter(Boolean) as Item[];
 }
 
+// Reflect the selection Set onto every loaded row and refresh the toolbar.
+function syncSelectionClasses(): void {
+  state.rows.forEach((li, id) => li.classList.toggle('selected', state.selected.has(id)));
+  updateSelBar();
+}
+
+// "Select all" over the loaded rows; toggles to "clear" once all are selected
+// (the standard file-manager pattern — one button covers select-all and none).
+function selectAllLoaded(): void {
+  const ids = [...state.rows.keys()];
+  const allSelected = ids.length > 0 && ids.every((id) => state.selected.has(id));
+  if (allSelected) state.selected.clear();
+  else ids.forEach((id) => state.selected.add(id));
+  syncSelectionClasses();
+}
+
+// Flip each loaded row's membership (selected ⇄ unselected).
+function invertSelection(): void {
+  state.rows.forEach((_li, id) => {
+    if (state.selected.has(id)) state.selected.delete(id);
+    else state.selected.add(id);
+  });
+  syncSelectionClasses();
+}
+
 els.selectToggle.addEventListener('click', () => {
   if (state.selectMode) exitSelectMode();
   else enterSelectMode();
 });
 els.selCancel.addEventListener('click', exitSelectMode);
+els.selAll.addEventListener('click', selectAllLoaded);
+els.selInvert.addEventListener('click', invertSelection);
 
 // Long-press a card (touch) to enter select mode / select that row. A moved
 // finger or lifted press under the threshold cancels (so scrolling is intact).
@@ -1017,14 +2046,17 @@ let pressTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressClick = false; // set when a long-press fired, to swallow the trailing click
 els.history.addEventListener('touchstart', (e) => {
   suppressClick = false; // clear any stale flag from a prior long-press with no click
-  const li = (e.target as HTMLElement).closest('.item') as HTMLElement | null;
-  if (!li) return;
-  const id = Number(li.dataset.id);
+  const el = e.target as HTMLElement;
+  const head = el.closest('.group-head') as HTMLElement | null;
+  const li = el.closest('.item') as HTMLElement | null;
+  if (!head && !li) return;
   pressTimer = setTimeout(() => {
     pressTimer = null;
     suppressClick = true;
     if (!state.selectMode) enterSelectMode();
-    toggleSelect(id);
+    // Long-press a fold header picks the whole post; a child card picks that row.
+    if (head) toggleGroupSelect((head.parentElement as HTMLElement).dataset.group as string);
+    else toggleSelect(Number(li!.dataset.id));
     if (navigator.vibrate) navigator.vibrate(15);
   }, 500);
 }, { passive: true });
@@ -1042,10 +2074,11 @@ function copyText(text: string, okMsg: string): void {
   }
 }
 
-// Save every selected item that still has a local file. Staggered so the
-// browser doesn't drop rapid concurrent downloads.
-function batchDownload(): void {
-  const items = selectedItems().filter((it) => it.status === 'completed' && it.local_available && it.filepath);
+// Save every item that still has a local file (the current selection, or an
+// explicit list — used to download a whole fold). Staggered so the browser
+// doesn't drop rapid concurrent downloads.
+function batchDownload(source?: Item[]): void {
+  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available && it.filepath);
   if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
   items.forEach((it, i) => {
     setTimeout(() => {
@@ -1061,9 +2094,12 @@ function batchDownload(): void {
 }
 
 // Open the batch-share dialog: the same 7 / 30 / permanent duration picker as
-// the single-item share, applied to every selected completed item at once.
-function openBatchShare(): void {
-  const items = selectedItems().filter((it) => it.status === 'completed' && it.filepath);
+// the single-item share, applied to every completed item in the selection — or
+// an explicit list (a whole fold), stashed so the deferred confirm targets it.
+let batchShareSource: Item[] | null = null;
+function openBatchShare(source?: Item[]): void {
+  batchShareSource = source ?? null;
+  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.filepath);
   if (!items.length) { toast(t('toast.noShareable'), 'info'); return; }
   els.batchShareSub.textContent = t('batchShare.sub', { n: items.length });
   const def = els.batchShare.querySelector('input[value="7"]') as HTMLInputElement | null;
@@ -1078,9 +2114,10 @@ function selectedBatchShareDays(): number | null {
   return v === 'permanent' ? null : Number(v);
 }
 
-// Make every selected completed item public with the chosen window.
+// Make every targeted completed item public with the chosen window (the stashed
+// fold list if a fold was shared, else the current selection).
 async function applyBatchShare(): Promise<void> {
-  const items = selectedItems().filter((it) => it.status === 'completed' && it.filepath);
+  const items = (batchShareSource ?? selectedItems()).filter((it) => it.status === 'completed' && it.filepath);
   if (!items.length) { closeModal(els.batchShare); return; }
   const days = selectedBatchShareDays();
   els.batchShareConfirm.disabled = true;
@@ -1101,8 +2138,17 @@ async function applyBatchShare(): Promise<void> {
   } finally {
     els.batchShareConfirm.disabled = false;
     closeModal(els.batchShare);
+    batchShareSource = null;
     updateSelBar(); // re-enable per current selection
   }
+}
+
+// Whole-fold helpers wired to the header's play/share/download actions.
+function shareGroup(gkey: string): void {
+  openBatchShare(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
+}
+function downloadGroup(gkey: string): void {
+  batchDownload(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
 }
 
 // Stop sharing every selected item that is currently public (turns them private).
@@ -1137,10 +2183,121 @@ function batchCopyLinks(): void {
   copyText(links.join('\n'), t('toast.linksCopiedN', { n: links.length }));
 }
 
-els.selDownload.addEventListener('click', batchDownload);
-els.selShare.addEventListener('click', openBatchShare);
+// Drop a row from the DOM and all state maps (after a successful delete). If it
+// was the last child of a playlist fold, remove the (now empty) fold too;
+// otherwise refresh the fold header (thumbnails / count / status).
+function removeRow(id: number): void {
+  const li = state.rows.get(id);
+  const groupCard = li?.closest('.group-card') as HTMLElement | null;
+  li?.remove();
+  state.rows.delete(id);
+  state.items.delete(id);
+  state.selected.delete(id);
+  const gkey = groupCard?.dataset.group;
+  if (gkey) {
+    const g = state.groups.get(gkey);
+    if (g && g.body.children.length === 0) { groupCard!.remove(); state.groups.delete(gkey); }
+    else updateGroupHeader(gkey);
+  }
+}
+
+// Ids awaiting the confirm dialog's Yes. Deletion is destructive (DB record +
+// any local files), so every path — a single card's trash icon, a whole fold,
+// or the multi-select selection — routes through this one confirm.
+let pendingDeleteIds: number[] = [];
+function openDeleteConfirm(ids: number[]): void {
+  const n = ids.length;
+  if (!n) return;
+  pendingDeleteIds = ids;
+  // Sum the local file sizes we'd reclaim so the confirm states how much space
+  // deleting frees (industry file-manager pattern for a destructive delete).
+  const freed = ids.reduce((sum, id) => {
+    const it = state.items.get(id);
+    return sum + (it?.total_filesize || it?.filesize || 0);
+  }, 0);
+  const sub = t('deleteConfirm.sub', { n });
+  els.deleteConfirmSub.textContent = freed > 0
+    ? sub + ' ' + t('deleteConfirm.frees', { size: fmtSize(freed) })
+    : sub;
+  openModal(els.deleteConfirm);
+}
+
+// Delete every video of a playlist fold (its child ids), behind the confirm.
+function deleteGroup(gkey: string): void {
+  openDeleteConfirm(groupChildIds(gkey));
+}
+
+// DELETE every pending item, removing its local file too (the backend no-ops
+// safely when there's no file, so this just clears the record then). Rows drop
+// from the list as they succeed.
+async function batchDelete(): Promise<void> {
+  const ids = pendingDeleteIds.slice();
+  pendingDeleteIds = [];
+  closeModal(els.deleteConfirm);
+  if (!ids.length) return;
+  els.selDelete.disabled = true;
+  let ok = 0;
+  try {
+    for (const id of ids) {
+      const res = await apiFetch('/api/items/' + id + '?delete_file=true', { method: 'DELETE' });
+      if (res.ok) { removeRow(id); ok++; }
+    }
+    if (ok) els.empty.classList.toggle('hidden', state.rows.size > 0);
+    if (ok) loadStats(); // removed files shrink the total-downloaded readout
+    toast(ok ? t('toast.deletedN', { n: ok }) : t('toast.deleteFail'), ok ? 'ok' : 'error');
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  } finally {
+    updateSelBar();
+  }
+}
+
+// Batch "clean local downloads": set every selected item to "None" (stream-only)
+// by reconciling its resolutions to the empty set. The backend purges each item's
+// local files and clears its primary, keeping the DB entry so it still streams
+// from source. Rows refresh in place (cloud badge, no size chip).
+async function batchClean(): Promise<void> {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  els.selClean.disabled = true;
+  let ok = 0;
+  try {
+    for (const id of ids) {
+      const res = await apiFetch('/api/items/' + id + '/resolutions', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ heights: [] }),
+      });
+      if (res.ok) {
+        ok++;
+        apiFetch('/api/items/' + id)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((it) => { if (it) upsertRow(it, false); })
+          .catch(() => { /* SSE / next load will catch up */ });
+      }
+    }
+    if (ok) loadStats(); // freed files shrink the total-downloaded readout
+    toast(ok ? t('sel.cleanedN', { n: ok }) : t('toast.saveFail'), ok ? 'ok' : 'error');
+    exitSelectMode();
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  } finally {
+    updateSelBar();
+  }
+}
+
+els.selDownload.addEventListener('click', () => batchDownload());
+els.selShare.addEventListener('click', () => openBatchShare());
 els.selUnshare.addEventListener('click', batchUnshare);
 els.selCopy.addEventListener('click', batchCopyLinks);
+els.selClean.addEventListener('click', batchClean);
+els.selDelete.addEventListener('click', () => openDeleteConfirm([...state.selected]));
+els.deleteConfirmYes.addEventListener('click', batchDelete);
+els.deleteConfirmCancel.addEventListener('click', () => closeModal(els.deleteConfirm));
+els.deleteConfirmClose.addEventListener('click', () => closeModal(els.deleteConfirm));
+els.deleteConfirm.addEventListener('click', (e) => {
+  if (e.target === els.deleteConfirm) closeModal(els.deleteConfirm); // backdrop dismiss
+});
 els.batchShareConfirm.addEventListener('click', applyBatchShare);
 els.batchShareClose.addEventListener('click', () => closeModal(els.batchShare));
 els.batchShare.addEventListener('click', (e) => {
@@ -1161,6 +2318,13 @@ els.history.addEventListener('load', (e) => {
 // Keyboard access for the play thumbnail (it's a role="button").
 els.history.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
+  const head = (e.target as HTMLElement).closest('.group-head') as HTMLElement | null;
+  if (head) {
+    e.preventDefault();
+    const gkey = (head.parentElement as HTMLElement).dataset.group as string;
+    if (state.selectMode) toggleGroupSelect(gkey); else toggleGroupExpand(gkey);
+    return;
+  }
   const play = (e.target as HTMLElement).closest('.thumb-play') as HTMLElement | null;
   if (!play) return;
   e.preventDefault();
@@ -1178,11 +2342,20 @@ function thumbSrc(play: HTMLElement): string | undefined {
   return img?.currentSrc || img?.src || undefined;
 }
 
+// Sequential-play queue for a whole fold. Empty for a normal single-tap play, so
+// the `ended` handler is a no-op there.
+let playQueue: Array<{ id: number; cloud: boolean; poster?: string }> = [];
+let playIndex = 0;
+function playCurrentInQueue(): void {
+  const cur = playQueue[playIndex];
+  if (cur) openPlayer(cur.id, cur.cloud, cur.poster);
+}
+
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const v = els.playerVideo;
   // Show the source thumbnail as the poster so the load gap (especially the
-  // cloud stream-url round-trip) reads as the still frame instead of Chrome's
-  // default gray media placeholder. Cleared again in closePlayer.
+  // cloud proxy resolve) reads as the still frame instead of Chrome's default
+  // gray media placeholder. Cleared again in closePlayer.
   if (poster) v.poster = poster; else v.removeAttribute('poster');
   els.player.classList.remove('hidden');
   els.player.setAttribute('aria-hidden', 'false');
@@ -1192,16 +2365,16 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   if (!isNativeApp && !(history.state && history.state.player)) history.pushState({ player: true }, '');
   const play = () => v.play().catch(() => { /* autoplay may need a tap */ });
   if (cloud) {
-    v.removeAttribute('src');
-    v.dataset.loading = '1';
-    apiFetch('/api/items/' + id + '/stream-url')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d && d.url) { v.src = d.url; v.load(); play(); }
-        else { toast(t('toast.streamFail'), 'error'); closePlayer(true); }
-      })
-      .catch(() => { closePlayer(true); })
-      .finally(() => { delete v.dataset.loading; });
+    // Online mode: play through the backend proxy, keyed by the item's slug (not
+    // its id). It resolves the upstream URL with cookies and streams the bytes
+    // back, so we never hand the browser a stale/IP-bound CDN URL. The resolve
+    // happens server-side (capped at 25s); the poster holds until the first bytes
+    // arrive, and the <video> 'error' handler surfaces a failed resolve.
+    const slug = state.items.get(id)?.public_slug;
+    if (!slug) { toast(t('toast.streamFail'), 'error'); closePlayer(true); return; }
+    v.src = streamUrl(slug);
+    v.load();
+    play();
   } else {
     v.src = fileUrl(id);
     v.load();
@@ -1221,8 +2394,26 @@ function closePlayer(pop: boolean): void {
   els.player.classList.add('hidden');
   els.player.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('player-open');
+  playQueue = []; // stop any sequential fold playback
   if (!isNativeApp && pop && history.state && history.state.player) history.back();
 }
+
+// Advance a fold's sequential playback when the current clip ends.
+els.playerVideo.addEventListener('ended', () => {
+  if (playIndex < playQueue.length - 1) { playIndex++; playCurrentInQueue(); }
+});
+
+// The media itself failing to load (a cloud source the browser can't play — e.g.
+// an IP-bound upstream URL that resolved fine but won't stream) would otherwise
+// leave the player frozen on its poster. Surface it and close instead of hanging.
+// Guarded on a live src attribute so closePlayer's own src teardown — which
+// clears the attribute before hiding — never trips a spurious toast.
+els.playerVideo.addEventListener('error', () => {
+  if (els.player.classList.contains('hidden')) return;
+  if (!els.playerVideo.getAttribute('src')) return;
+  toast(t('toast.streamFail'), 'error');
+  closePlayer(true);
+});
 
 // ---- Share dialog wiring --------------------------------------------------
 els.shareClose.addEventListener('click', closeShare);
@@ -1253,10 +2444,12 @@ els.playerClose.addEventListener('click', () => closePlayer(true));
 // Close the top-most open surface. Returns true if it handled the Back.
 function dismissTopLayer(): boolean {
   if (!els.player.classList.contains('hidden')) { closePlayer(false); return true; }
+  if (!els.deleteConfirm.classList.contains('hidden')) { closeModal(els.deleteConfirm); return true; }
   if (!els.batchShare.classList.contains('hidden')) { closeModal(els.batchShare); return true; }
   if (!els.shareOverlay.classList.contains('hidden')) { closeShare(); return true; }
+  if (!els.siteEdit.classList.contains('hidden')) { closeModal(els.siteEdit); return true; }
   if (!els.settings.classList.contains('hidden')) { closeModal(els.settings); return true; }
-  if (!els.cookies.classList.contains('hidden')) { closeModal(els.cookies); return true; }
+  if (!els.websites.classList.contains('hidden')) { closeModal(els.websites); return true; }
   if (state.selectMode) { exitSelectMode(); return true; }
   return false;
 }
@@ -1562,8 +2755,9 @@ if (els.themeToggle) {
 document.addEventListener('i18n:changed', () => {
   renderThemeToggle();
   setServerStatus(serverUp);
+  renderDlStats(); // re-localize the "N items · X GB" summary
   if (getToken()) loadItems(true);
-  if (!els.cookies.classList.contains('hidden')) loadCookies();
+  if (!els.websites.classList.contains('hidden')) loadWebsites();
 });
 
 // ---- Auto-refresh ---------------------------------------------------------
@@ -1580,7 +2774,41 @@ function autoRefresh(): void {
   if (state.q) return;              // don't clobber an active search
   if (window.scrollY > 200) return; // user is browsing older pages — leave them be
   lastAutoRefresh = Date.now();
-  loadItems(true);
+  softRefresh();
+}
+
+// Non-destructive page-1 refresh: reconcile the newest page in place instead of
+// wiping #history and rebuilding it (the old loadItems(true), which flashed).
+// Existing rows patch via upsertRow's signature guard (untouched when unchanged),
+// genuinely-new rows are inserted at the top in order, and rows that vanished
+// server-side within the refreshed range are removed. Rows below the first page
+// (older, scroll-loaded) are left alone.
+async function softRefresh(): Promise<void> {
+  if (state.loading) return;
+  state.loading = true;
+  try {
+    const params = new URLSearchParams();
+    params.set('limit', String(PAGE_SIZE));
+    const res = await apiFetch('/api/items?' + params.toString());
+    if (!res.ok) return;
+    const data = await res.json();
+    const items: Item[] = data.items || [];
+    // Iterate oldest→newest so prepending new rows leaves them newest-first.
+    for (let i = items.length - 1; i >= 0; i--) upsertRow(items[i], true);
+    // Drop rows deleted upstream. When a full page came back, only reconcile within
+    // its window (id >= the oldest returned) so scroll-loaded older rows are spared.
+    // When a partial page came back the whole history fits here, so reconcile all.
+    const present = new Set(items.map((it) => it.id));
+    const floor = items.length >= PAGE_SIZE ? items[items.length - 1].id : -Infinity;
+    for (const id of [...state.rows.keys()]) {
+      if (id >= floor && !present.has(id)) removeRow(id);
+    }
+    els.empty.classList.toggle('hidden', state.rows.size !== 0);
+  } catch (e) {
+    if (!e || !e.unauthorized) { /* transient; the next tick or SSE will heal it */ }
+  } finally {
+    state.loading = false;
+  }
 }
 
 setInterval(autoRefresh, AUTO_REFRESH_MS);
@@ -1599,6 +2827,7 @@ if (!getToken()) showTokenField(false);
 loadServerConfig();
 connectEvents();
 loadItems(true);
+loadStats();
 handleShareParam();
 setupNativeShare();
 setupNotifications();

@@ -10,6 +10,7 @@ mod archive;
 mod config;
 mod cookies;
 mod db;
+mod errlog;
 mod error;
 mod net_guard;
 mod platform;
@@ -19,6 +20,7 @@ mod seal_import;
 mod types;
 mod url_normalize;
 mod web;
+mod websites;
 mod ytdlp;
 
 use clap::{Parser, Subcommand};
@@ -101,7 +103,17 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         .ensure_dir()
         .with_context(|| "cannot create cookies dir")?;
 
-    let queue = queue::Queue::spawn(cfg.clone(), db.clone(), archive.clone(), cookie_store.clone());
+    // Bounded in-memory error log shared by the submit path (probe failures) and
+    // the download worker (download failures), and read back by GET /api/logs.
+    let errlog = errlog::ErrorLog::new();
+
+    let queue = queue::Queue::spawn(
+        cfg.clone(),
+        db.clone(),
+        archive.clone(),
+        cookie_store.clone(),
+        errlog.clone(),
+    );
     for id in requeue {
         queue.enqueue(id).await;
     }
@@ -130,6 +142,7 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         queue,
         cookies: cookie_store,
         ytdlp_version,
+        errlog,
     };
 
     let bind = cfg.bind;

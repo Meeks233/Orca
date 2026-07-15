@@ -76,6 +76,21 @@ impl CookieStore {
         }
     }
 
+    /// Move a cookie jar from `from` to `to`, preserving its enabled/disabled
+    /// state. Used when merging websites so the surviving site inherits the
+    /// merged-away site's cookies. No-op if `from` has nothing.
+    pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.ensure_dir()?;
+        let on = self.enabled_path(from);
+        let off = self.disabled_path(from);
+        if on.exists() {
+            std::fs::rename(&on, self.enabled_path(to))?;
+        } else if off.exists() {
+            std::fs::rename(&off, self.disabled_path(to))?;
+        }
+        Ok(())
+    }
+
     /// Delete cookies for `key` (both enabled and disabled copies).
     pub fn remove(&self, key: &str) -> io::Result<()> {
         for p in [self.enabled_path(key), self.disabled_path(key)] {
@@ -123,8 +138,16 @@ fn mtime_secs(m: &std::fs::Metadata) -> i64 {
 /// Resolve the cookie file for a download of `url`: a platform-specific enabled
 /// cookie wins; otherwise fall back to the global `WHALE_COOKIES` file (if set).
 pub fn resolve(store: &CookieStore, global: Option<&Path>, url: &str) -> Option<PathBuf> {
-    if let Some(p) = platform::from_url(url) {
-        if let Some(path) = store.active_cookie(p.key) {
+    let key = platform::from_url(url).map(|p| p.key);
+    resolve_keyed(store, global, key)
+}
+
+/// Resolve the cookie file when the caller has already determined the site `key`
+/// (e.g. from the DB-backed website registry, which supports user-added sites the
+/// static platform catalog doesn't). Falls back to the global cookie file.
+pub fn resolve_keyed(store: &CookieStore, global: Option<&Path>, key: Option<&str>) -> Option<PathBuf> {
+    if let Some(k) = key {
+        if let Some(path) = store.active_cookie(k) {
             return Some(path);
         }
     }

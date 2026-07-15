@@ -12,21 +12,42 @@ use tokio::sync::mpsc;
 
 const PREFIX: &str = "__WHALE__";
 
+#[derive(Debug)]
 pub struct DownloadOutcome {
     pub filepath: String,
     pub filesize: i64,
+    /// Final video pixel height parsed from the `.last_res_<id>` sidecar, or
+    /// `None` for audio-only downloads / when yt-dlp reported no height.
+    pub height: Option<i64>,
 }
 
 /// Run a download for `item`. Progress ticks are sent on `progress` as they are
 /// parsed from yt-dlp's stdout; the final outcome resolves when the process exits.
+///
+/// `cancel` lets the caller abort mid-download: firing it (or dropping its
+/// `Sender`) kills the yt-dlp child and returns [`YtdlpError::Cancelled`]. The
+/// queue wires this to item deletion so a deleted download stops fetching
+/// instead of running on headlessly.
 pub async fn download(
     cfg: &Config,
     item: &Item,
     cookies: Option<&Path>,
     progress: mpsc::Sender<ProgressEvent>,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
+    variant: Option<i64>,
 ) -> Result<DownloadOutcome, YtdlpError> {
+    // yt-dlp `--print-to-file` *appends*; clear any stale sidecar from a prior
+    // run (e.g. a retry of this item) so we read only this run's final path. The
+    // tag keys the sidecar per (item, resolution) so variant downloads of one
+    // item don't clobber each other.
+    let tag = crate::ytdlp::options::job_tag(item.id, variant);
+    let sidecar = cfg.data_dir.join(format!(".last_path_{tag}"));
+    let _ = std::fs::remove_file(&sidecar);
+    let res_sidecar = cfg.data_dir.join(format!(".last_res_{tag}"));
+    let _ = std::fs::remove_file(&res_sidecar);
+
     let mut child = tokio::process::Command::new(&cfg.ytdlp_path)
-        .args(download_args(cfg, item, cookies))
+        .args(download_args(cfg, item, cookies, variant))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
@@ -52,31 +73,95 @@ pub async fn download(
         collected
     });
 
-    // Parse stdout line-by-line, forwarding progress events.
+    // Kill the child, reap it, and abort stderr draining — the shared teardown
+    // for a cancelled download.
+    async fn abort_child(child: &mut tokio::process::Child) {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    // Parse stdout line-by-line, forwarding progress events. Cancellation can
+    // arrive at any point during the download, so race each read against it.
+    // `stdout_lines` owns the taken pipe (independent of `child`), so the
+    // cancel arm can touch `child` without a borrow conflict.
     let mut stdout_lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = stdout_lines.next_line().await {
-        if let Some(ev) = parse_progress_line(item.id, &line) {
-            // Ignore send errors: receiver may have gone away.
-            let _ = progress.send(ev).await;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut cancel => {
+                abort_child(&mut child).await;
+                stderr_task.abort();
+                return Err(YtdlpError::Cancelled);
+            }
+            line = stdout_lines.next_line() => match line {
+                Ok(Some(line)) => {
+                    if let Some(ev) = parse_progress_line(item.id, &line) {
+                        // Ignore send errors: receiver may have gone away.
+                        let _ = progress.send(ev).await;
+                    }
+                }
+                _ => break, // stdout closed → process is finishing
+            },
         }
     }
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| YtdlpError::Spawn(format!("failed to wait on yt-dlp: {e}")))?;
+    // Stdout is drained; wait for exit, still cancellable. Return an Option so the
+    // `child`-touching teardown runs after the select's futures are dropped.
+    let waited = tokio::select! {
+        biased;
+        _ = &mut cancel => None,
+        s = child.wait() => Some(s.map_err(|e| YtdlpError::Spawn(format!("failed to wait on yt-dlp: {e}")))?),
+    };
+    let status = match waited {
+        None => {
+            abort_child(&mut child).await;
+            stderr_task.abort();
+            return Err(YtdlpError::Cancelled);
+        }
+        Some(s) => s,
+    };
     let stderr_lines = stderr_task.await.unwrap_or_default();
 
     if status.success() {
-        let sidecar = cfg.data_dir.join(format!(".last_path_{}", item.id));
-        let filepath = std::fs::read_to_string(&sidecar)
-            .map_err(|e| YtdlpError::Download(format!("could not read sidecar path: {e}")))?
-            .trim()
-            .to_string();
+        // Read the last non-empty line — the final file path yt-dlp moved into
+        // place (a single entry per run, since multi-video posts are pinned to one
+        // `--playlist-items` index). yt-dlp exits 0 but writes NO sidecar when it
+        // skips the download because the key is already in the `--download-archive`
+        // (a re-submit of something already downloaded). Surface that as
+        // `AlreadyDownloaded` so the caller keeps the existing file instead of
+        // marking the item failed with a cryptic "could not read sidecar" error.
+        let filepath = match std::fs::read_to_string(&sidecar) {
+            Ok(raw) => raw
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string),
+            Err(_) => None,
+        };
+        let Some(filepath) = filepath else {
+            return Err(YtdlpError::AlreadyDownloaded);
+        };
         let filesize = std::fs::metadata(&filepath)
             .map(|m| m.len() as i64)
             .unwrap_or(0);
-        Ok(DownloadOutcome { filepath, filesize })
+        // Best-effort resolution: read the last non-empty line of the height
+        // sidecar and parse it. Missing / "NA" (audio-only) → None.
+        let height = std::fs::read_to_string(&res_sidecar)
+            .ok()
+            .and_then(|raw| {
+                raw.lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .and_then(|l| l.parse::<i64>().ok())
+            })
+            .filter(|h| *h > 0);
+        Ok(DownloadOutcome {
+            filepath,
+            filesize,
+            height,
+        })
     } else {
         Err(YtdlpError::Download(error_tail(&stderr_lines)))
     }
@@ -180,5 +265,109 @@ mod tests {
     #[test]
     fn parse_percent_rejects_garbage() {
         assert_eq!(parse_percent("N/A"), None);
+    }
+
+    // ---- Cancellation guarantee -------------------------------------------
+    // Proves a delete stops the backend job WITHOUT needing a real download:
+    // point `ytdlp_path` at a shell script that ignores its args and sleeps
+    // ("forever"), start download(), fire the cancel, and assert it returns
+    // `Cancelled` promptly (the child was killed). Run with `cargo test`.
+    use crate::config::{Config, Container};
+    use crate::types::{Item, Source, Status};
+    use std::net::SocketAddr;
+    use std::path::PathBuf;
+
+    fn cancel_test_config(dir: &std::path::Path, ytdlp: &std::path::Path) -> Config {
+        Config {
+            token: "secret".into(),
+            token_generated: false,
+            public_url: None,
+            client_tofu: true,
+            bind: "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
+            data_dir: dir.to_path_buf(),
+            download_dir: dir.to_path_buf(),
+            concurrency: 1,
+            polite: false,
+            sleep_min: 0,
+            sleep_max: 0,
+            sleep_requests: None,
+            impersonate: None,
+            concurrent_fragments: 1,
+            limit_rate: None,
+            container: Container::Mkv,
+            output_template: "%(id)s.%(ext)s".into(),
+            format: "b".into(),
+            format_user_set: false,
+            max_height: None,
+            subs: false,
+            auto_subs: false,
+            sub_langs: "en".into(),
+            embed_thumbnail: false,
+            cookies: None,
+            ytdlp_path: ytdlp.display().to_string(),
+        }
+    }
+
+    fn cancel_test_item() -> Item {
+        Item {
+            id: 999,
+            extractor: "youtube".into(),
+            video_id: "x".into(),
+            archive_key: "youtube x".into(),
+            title: "t".into(),
+            uploader: None,
+            webpage_url: "https://example.com/watch?v=x".into(),
+            thumbnail_url: None,
+            duration: None,
+            filepath: None,
+            filesize: None,
+            height: None,
+            source_max_height: None,
+            source: Source::Download,
+            status: Status::Queued,
+            error: None,
+            created_at: 0,
+            completed_at: None,
+            public: false,
+            public_slug: None,
+            public_until: None,
+            public_hits: 0,
+            local_available: false,
+            total_filesize: 0,
+            playlist_index: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_a_running_download() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("whale_cancel_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script: PathBuf = dir.join("fake-ytdlp.sh");
+        // Ignores every yt-dlp arg it's handed and just blocks, standing in for a
+        // long-running download.
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cfg = cancel_test_config(&dir, &script);
+        let item = cancel_test_item();
+        let (ptx, _prx) = mpsc::channel::<ProgressEvent>(8);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let task = tokio::spawn(async move { download(&cfg, &item, None, ptx, cancel_rx, None).await });
+
+        // Let the child spawn, then cancel it.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        cancel_tx.send(()).unwrap();
+
+        // Must return quickly (well under the script's 30s sleep).
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("download() did not return within 5s of cancel")
+            .expect("download task panicked");
+        assert!(matches!(res, Err(YtdlpError::Cancelled)), "expected Cancelled, got {res:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

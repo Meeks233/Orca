@@ -30,3 +30,12 @@ tauri-plugin-process = "2"
 # frontend drains. Mobile-only so desktop builds stay lean.
 [target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]
 tauri-plugin-mobile-sharetarget = "2"
+
+# Strip the debug library. `cargo tauri android build --debug` compiles the
+# cdylib with the `dev` profile, which bakes ~100MB of DWARF debuginfo into
+# libwhale_app_lib.so — that alone was ~90% of the debug APK. AGP does NOT strip
+# native libs for debug variants, so we strip at the Rust link step instead. The
+# test APK is for functional testing, not native debugging, so full strip is fine
+# (drops the .so from ~112MB to ~20MB). Release already strips via ProGuard/AGP.
+[profile.dev]
+strip = true

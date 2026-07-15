@@ -27,9 +27,37 @@ pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String
     args
 }
 
+/// Per-job filename/sidecar tag: `<id>` for a normal download, `<id>_<height>`
+/// for a specific-resolution variant, so concurrent variant downloads of one
+/// item don't collide on the `.last_path_*` / `.last_res_*` sidecars.
+pub(crate) fn job_tag(item_id: i64, variant: Option<i64>) -> String {
+    match variant {
+        Some(h) => format!("{item_id}_{h}"),
+        None => item_id.to_string(),
+    }
+}
+
 /// Args for a download run. `cookies` is the resolved cookie file for the item's
 /// URL (per-platform if present, else global) — see `crate::cookies::resolve`.
-pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<String> {
+///
+/// `variant` is `Some(height)` when downloading a specific resolution version
+/// (a second/third copy of the same video): it suffixes the output filename with
+/// `[<height>p]` so it doesn't overwrite the primary file, and tags the sidecars.
+pub fn download_args(
+    cfg: &Config,
+    item: &Item,
+    cookies: Option<&Path>,
+    variant: Option<i64>,
+) -> Vec<String> {
+    let tag = job_tag(item.id, variant);
+    // Suffix the filename with the resolution for variant downloads so the copies
+    // sit side by side (…[id].mkv and …[id] [720p].mkv).
+    let output_template = match variant {
+        Some(h) => cfg
+            .output_template
+            .replace(".%(ext)s", &format!(" [{h}p].%(ext)s")),
+        None => cfg.output_template.clone(),
+    };
     let mut args: Vec<String> = vec![
         "--ignore-config".into(),
         "--no-warnings".into(),
@@ -71,6 +99,14 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
         args.push(imp.clone());
     }
 
+    // Multi-video post: several items share one webpage_url, so restrict this run
+    // to the item's own video by position. Absent for standalone items (the URL
+    // already names a single video).
+    if let Some(idx) = item.playlist_index {
+        args.push("--playlist-items".into());
+        args.push(idx.to_string());
+    }
+
     args.push("--embed-metadata".into());
 
     if cfg.embed_thumbnail {
@@ -80,15 +116,25 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
     args.push("--embed-chapters".into());
 
     args.push("-o".into());
-    args.push(cfg.output_template.clone());
+    args.push(output_template);
 
+    // Self-organise the download directory by site: each item's files land in a
+    // per-platform subfolder (YouTube/, Twitter/, …) derived from its extractor.
+    let site_dir = crate::platform::download_folder(&item.extractor);
     args.push("--paths".into());
-    args.push(format!("home:{}", cfg.download_dir.display()));
+    args.push(format!("home:{}/{}", cfg.download_dir.display(), site_dir));
     args.push("--paths".into());
     args.push(format!("temp:{}/.part", cfg.download_dir.display()));
 
-    args.push("--download-archive".into());
-    args.push(cfg.archive_path().display().to_string());
+    // The download archive dedups against already-fetched videos. A resolution
+    // variant is a *deliberate* re-download of a video whose key is already in
+    // the archive, so it must bypass the archive entirely — otherwise yt-dlp
+    // skips it ("already recorded") and writes no file. Only the primary download
+    // records/consults the archive.
+    if variant.is_none() {
+        args.push("--download-archive".into());
+        args.push(cfg.archive_path().display().to_string());
+    }
 
     args.push("--no-simulate".into());
     args.push("--newline".into());
@@ -103,7 +149,13 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
 
     args.push("--print-to-file".into());
     args.push("after_move:filepath".into());
-    args.push(format!("{}/.last_path_{}", cfg.data_dir.display(), item.id));
+    args.push(format!("{}/.last_path_{}", cfg.data_dir.display(), tag));
+
+    // Capture the final video height (e.g. 1080) so the UI can label the item's
+    // resolution. Written to its own sidecar; empty/"NA" for audio-only.
+    args.push("--print-to-file".into());
+    args.push("after_move:%(height)s".into());
+    args.push(format!("{}/.last_res_{}", cfg.data_dir.display(), tag));
 
     if let Some(cookies) = cookies {
         args.push("--cookies".into());
@@ -148,6 +200,8 @@ mod tests {
             container: Container::Mkv,
             output_template: "%(uploader,channel|Unknown)s - %(title).150B [%(id)s].%(ext)s".into(),
             format: "bv*+ba/b".into(),
+            format_user_set: false,
+            max_height: None,
             subs: true,
             auto_subs: false,
             sub_langs: "all,-live_chat".into(),
@@ -170,6 +224,8 @@ mod tests {
             duration: Some(120),
             filepath: None,
             filesize: None,
+            height: None,
+            source_max_height: None,
             source: Source::Download,
             status: Status::Queued,
             error: None,
@@ -180,6 +236,8 @@ mod tests {
             public_until: None,
             public_hits: 0,
             local_available: false,
+            total_filesize: 0,
+            playlist_index: None,
         }
     }
 
@@ -216,7 +274,7 @@ mod tests {
     fn download_args_key_flags_in_order() {
         let cfg = test_config();
         let item = test_item();
-        let args = download_args(&cfg, &item, None);
+        let args = download_args(&cfg, &item, None, None);
 
         // --merge-output-format immediately followed by "mkv"
         let mi = pos(&args, "--merge-output-format");
@@ -255,9 +313,9 @@ mod tests {
         assert_eq!(args[pi + 1], "after_move:filepath");
         assert_eq!(args[pi + 2], "/data/.last_path_42");
 
-        // paths
+        // paths: home is the per-site subfolder (test_item's extractor is youtube)
         let phi = pos(&args, "--paths");
-        assert_eq!(args[phi + 1], "home:/downloads");
+        assert_eq!(args[phi + 1], "home:/downloads/Youtube");
 
         // relative order: -f before --merge-output-format before --download-archive
         assert!(fi < mi);
@@ -265,6 +323,19 @@ mod tests {
 
         // ends with the webpage_url
         assert_eq!(args.last().unwrap(), &item.webpage_url);
+    }
+
+    #[test]
+    fn download_args_pins_playlist_index_when_set() {
+        let cfg = test_config();
+        let mut item = test_item();
+        // Standalone item → no --playlist-items.
+        assert!(!download_args(&cfg, &item, None, None).iter().any(|a| a == "--playlist-items"));
+        // Multi-video post entry → pinned to its position.
+        item.playlist_index = Some(2);
+        let args = download_args(&cfg, &item, None, None);
+        let pi = pos(&args, "--playlist-items");
+        assert_eq!(args[pi + 1], "2");
     }
 
     #[test]
@@ -276,7 +347,7 @@ mod tests {
         cfg.container = Container::Mp4;
         let item = test_item();
         let cookies = PathBuf::from("/data/c.txt");
-        let args = download_args(&cfg, &item, Some(&cookies));
+        let args = download_args(&cfg, &item, Some(&cookies), None);
 
         assert!(!args.iter().any(|a| a == "--embed-subs"));
         assert!(!args.iter().any(|a| a == "--write-subs"));

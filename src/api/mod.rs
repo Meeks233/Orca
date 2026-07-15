@@ -7,6 +7,7 @@ mod cookies;
 mod events;
 mod items;
 mod media;
+mod websites;
 
 use crate::archive::Archive;
 use crate::config::Config;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub queue: Queue,
     pub cookies: CookieStore,
     pub ytdlp_version: String,
+    pub errlog: crate::errlog::ErrorLog,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -33,12 +35,32 @@ pub fn router(state: AppState) -> Router {
         .route("/api/items", post(items::submit).get(items::list))
         .route("/api/items/:id", get(items::get).delete(items::delete))
         .route("/api/items/:id/retry", post(items::retry))
+        .route(
+            "/api/items/:id/resolutions",
+            get(items::resolutions).put(items::set_resolutions),
+        )
         .route("/api/items/:id/public", post(items::set_public))
-        .route("/api/items/:id/stream-url", get(media::stream_url))
+        .route("/api/stats", get(items::stats))
+        .route("/api/logs", get(items::logs))
+        .route("/api/settings", get(items::get_settings).put(items::put_settings))
         .route("/api/cookies", get(cookies::list))
         .route(
             "/api/cookies/:platform",
             put(cookies::set).patch(cookies::toggle).delete(cookies::delete),
+        )
+        // Website Management: the editable site registry (successor to /api/cookies).
+        .route("/api/websites", get(websites::list))
+        .route("/api/websites/merge", post(websites::merge))
+        .route("/api/websites/validate", post(websites::validate))
+        .route(
+            "/api/websites/:key",
+            put(websites::upsert).delete(websites::delete),
+        )
+        .route(
+            "/api/websites/:key/cookies",
+            post(websites::set_cookies)
+                .patch(websites::toggle_cookies)
+                .delete(websites::delete_cookies),
         )
         .route(
             "/api/archive",
@@ -60,6 +82,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/clients/register", post(clients::register))
         .route("/api/events", get(events::events))
         .route("/api/items/:id/file", get(media::file))
+        // Online-playback proxy keyed by the item's unguessable slug (not its
+        // enumerable id). Self-authorizes via the token, like /file.
+        .route("/api/stream/:slug", get(media::stream))
         .route("/api/p/:slug", get(media::public_file))
         .fallback(crate::web::static_handler);
 

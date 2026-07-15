@@ -7,15 +7,20 @@
 //! or non-HTTP schemes like `file://`. This module rejects those before we ever
 //! spawn yt-dlp.
 //!
-//! Two layers:
-//! - [`precheck`] is pure: scheme allowlist + literal-IP / localhost rejection.
-//! - [`guard`] adds a DNS-resolution pass so `http://internal-name/` is caught
-//!   when it resolves into a forbidden range. Resolution *errors* fail open
-//!   (yt-dlp couldn't reach it either); a successful resolution to any private
-//!   address fails closed.
+//! [`guard`] enforces a scheme allowlist and rejects literal internal IPs and
+//! localhost/mDNS names ([`precheck`]).
 //!
-//! Residual risk: DNS rebinding (yt-dlp re-resolves later) is not defended here;
-//! that needs a pinning HTTP proxy and is out of scope for a self-hosted tool.
+//! We deliberately do NOT resolve hostnames and classify the result: fake-IP
+//! proxies (Clash / sing-box, common on the machines that run a self-hosted
+//! downloader) map every domain into a reserved range like `198.18.0.0/15`, so
+//! resolving `youtube.com` yields a "private" address and blocks legitimate
+//! downloads. App-layer resolution is also defeated by DNS rebinding (yt-dlp
+//! re-resolves later), so it buys little. Robustly blocking a hostname that
+//! resolves internally needs a pinning HTTP proxy, which is out of scope.
+//!
+//! Residual risk: `http://internal-name/` (a hostname resolving to a private
+//! IP) is not blocked. The literal-IP, scheme, and localhost guards cover the
+//! high-value vectors (cloud metadata, loopback, RFC-1918, `file://`).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -83,31 +88,11 @@ pub fn precheck(url: &str) -> Result<String, UrlRejection> {
     Ok(host)
 }
 
-/// Full guard: [`precheck`], then resolve hostnames and reject if any resolved
-/// address is in a forbidden range. Intended to run once at submit time.
-pub async fn guard(url: &str) -> Result<(), UrlRejection> {
-    let host = precheck(url)?;
-
-    // Literal IPs were already classified in precheck.
-    if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
-    }
-
-    // Resolve the name. Port is irrelevant to the address classification.
-    let target = format!("{host}:0");
-    match tokio::net::lookup_host(target).await {
-        Ok(addrs) => {
-            for addr in addrs {
-                if is_forbidden_ip(addr.ip()) {
-                    return Err(UrlRejection::PrivateAddress);
-                }
-            }
-            Ok(())
-        }
-        // Couldn't resolve → yt-dlp can't reach it either; don't block on a
-        // transient/offline DNS failure.
-        Err(_) => Ok(()),
-    }
+/// Reject a submitted URL that must not reach yt-dlp: a non-http(s) scheme, or a
+/// literal internal IP / localhost host. Hostnames are intentionally not
+/// resolved (see the module docs). Run once at submit time.
+pub fn guard(url: &str) -> Result<(), UrlRejection> {
+    precheck(url).map(|_| ())
 }
 
 /// True if `ip` is anything other than a routable public address: loopback,
@@ -188,6 +173,17 @@ mod tests {
         ] {
             assert_eq!(precheck(u).unwrap_err(), UrlRejection::PrivateAddress, "{u}");
         }
+    }
+
+    #[test]
+    fn guard_passes_hostnames_without_resolving() {
+        // Hostnames are not resolved, so a normal domain always passes even
+        // behind a fake-IP proxy; only literal internal IPs / localhost / bad
+        // schemes are rejected.
+        assert!(guard("https://www.youtube.com/watch?v=abc").is_ok());
+        assert!(guard("https://example.com/x").is_ok());
+        assert_eq!(guard("http://127.0.0.1/").unwrap_err(), UrlRejection::PrivateAddress);
+        assert_eq!(guard("file:///etc/passwd").unwrap_err(), UrlRejection::BadScheme);
     }
 
     #[test]
