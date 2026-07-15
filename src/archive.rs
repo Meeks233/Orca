@@ -46,13 +46,16 @@ impl Archive {
         };
 
         let file_existed = fs::metadata(path).await.is_ok();
-        let on_disk: HashSet<String> = existing.iter().cloned().collect();
 
-        let mut set: HashSet<String> = on_disk.clone();
+        let mut set: HashSet<String> = existing.iter().cloned().collect();
         set.extend(seed);
 
-        // Rewrite the file when the file is missing or its contents differ from the union.
-        if !file_existed || set != on_disk {
+        // Rewrite whenever the file isn't already the canonical sorted-unique form:
+        // this seeds new keys AND collapses any duplicate lines (yt-dlp's own
+        // `--download-archive` write can coincide with an app-side record).
+        let mut canonical: Vec<String> = set.iter().cloned().collect();
+        canonical.sort();
+        if !file_existed || existing != canonical {
             write_sorted(path, &set).await?;
         }
 
@@ -94,6 +97,15 @@ impl Archive {
                 .with_context(|| format!("appending to archive {}", self.inner.path.display()))?;
         }
         Ok(())
+    }
+
+    /// Record a key that yt-dlp already wrote to the archive file itself via
+    /// `--download-archive` on a completed download. Updates the in-memory set
+    /// ONLY — the line is already on disk, so appending here (as `insert` would)
+    /// duplicates it. Keeps `keys()`/`remove()` consistent without a file write,
+    /// so recording a finished download costs no extra I/O.
+    pub async fn mark_downloaded(&self, key: &str) {
+        self.inner.set.lock().await.insert(key.to_string());
     }
 
     /// Remove `key` from the set and rewrite the file from the remaining keys. Used by DELETE.
@@ -161,6 +173,40 @@ mod tests {
         let contents = fs::read_to_string(&path).await.unwrap();
         let count = contents.lines().filter(|l| *l == "youtube ccc").count();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn load_collapses_duplicate_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.txt");
+        // Simulate the yt-dlp + app double-write: duplicate (and unsorted) lines.
+        fs::write(&path, "twitter b\ntwitter a\ntwitter b\ntwitter a\n").await.unwrap();
+
+        let archive = Archive::load(&path, vec![]).await.unwrap();
+        let contents = fs::read_to_string(&path).await.unwrap();
+        // Canonicalized: sorted, one line each.
+        assert_eq!(contents.lines().collect::<Vec<_>>(), vec!["twitter a", "twitter b"]);
+        assert!(archive.contains("twitter a").await);
+        assert!(archive.contains("twitter b").await);
+    }
+
+    #[tokio::test]
+    async fn mark_downloaded_updates_set_without_appending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.txt");
+        // yt-dlp already wrote the line via --download-archive.
+        fs::write(&path, "twitter x\n").await.unwrap();
+        let archive = Archive::load(&path, vec![]).await.unwrap();
+
+        // Mirroring it must NOT append a second line, but the set must know it so
+        // a later remove() can rewrite the file without it.
+        archive.mark_downloaded("twitter x").await;
+        let contents = fs::read_to_string(&path).await.unwrap();
+        assert_eq!(contents.lines().filter(|l| *l == "twitter x").count(), 1);
+
+        archive.remove("twitter x").await.unwrap();
+        let after = fs::read_to_string(&path).await.unwrap();
+        assert!(after.lines().all(|l| l != "twitter x"), "delete frees the key");
     }
 
     #[tokio::test]

@@ -44,6 +44,80 @@ pub async fn probe(
     Ok(results)
 }
 
+/// Probe the distinct video pixel heights the source offers, highest first
+/// (e.g. `[2160, 1440, 1080, 720, 480, 360]`), so the resolution picker can list
+/// exactly what actually exists — no arbitrary standard-bucket guessing (which
+/// double-listed a portrait video's true height alongside a same-label bucket).
+/// Empty when no format reported a height (audio-only / unknown).
+pub async fn probe_heights(
+    cfg: &Config,
+    url: &str,
+    cookies: Option<&Path>,
+) -> Result<Vec<i64>, YtdlpError> {
+    let args = crate::ytdlp::options::probe_args(cfg, url, cookies);
+    let output = tokio::process::Command::new(&cfg.ytdlp_path)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| YtdlpError::Spawn(format!("failed to run {}: {e}", cfg.ytdlp_path)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(YtdlpError::Probe(stderr_tail(&stderr)));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut set: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for h in heights_from_json(&v) {
+            set.insert(h);
+        }
+    }
+    Ok(set.into_iter().rev().collect())
+}
+
+/// Distinct **real video** heights (>0) from a `--dump-json` object: the height
+/// of every format that carries an actual video codec, plus the top-level
+/// `height`, highest first. Shared by the probe parser (stored at submit) and
+/// `probe_heights` (background/lazy refresh).
+///
+/// Formats whose `vcodec` is explicitly `"none"` are skipped — that excludes
+/// audio-only streams and YouTube's storyboard/preview images (which otherwise
+/// leak junk tiers like 27p/45p/90p into the picker). A format that omits
+/// `vcodec` entirely (some extractors don't report it) is kept, since its height
+/// is the only signal we have.
+pub(crate) fn heights_from_json(v: &serde_json::Value) -> Vec<i64> {
+    let mut set: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    if let Some(formats) = v.get("formats").and_then(|f| f.as_array()) {
+        for f in formats {
+            // Skip anything that isn't a real video stream: audio-only / storyboard
+            // formats carry `vcodec: "none"`, and storyboard previews are `mhtml`
+            // image sheets (some extractors label them only by ext) — both would
+            // otherwise leak junk tiers like 27p/45p/90p into the picker.
+            let vcodec_none = matches!(
+                f.get("vcodec").and_then(|c| c.as_str()),
+                Some("none") | Some("")
+            );
+            let image_ext = matches!(
+                f.get("ext").and_then(|e| e.as_str()),
+                Some("mhtml") | Some("jpg") | Some("png") | Some("webp")
+            );
+            if vcodec_none || image_ext {
+                continue;
+            }
+            if let Some(h) = f.get("height").and_then(|h| h.as_i64()).filter(|h| *h > 0) {
+                set.insert(h);
+            }
+        }
+    }
+    if let Some(h) = v.get("height").and_then(|h| h.as_i64()).filter(|h| *h > 0) {
+        set.insert(h);
+    }
+    set.into_iter().rev().collect()
+}
+
 /// Last ~`STDERR_TAIL` chars of stderr, trimmed. Char-boundary safe.
 fn stderr_tail(stderr: &str) -> String {
     let trimmed = stderr.trim();
@@ -85,6 +159,15 @@ pub(crate) fn parse_dump_json_line(line: &str) -> Option<ProbeResult> {
         .and_then(|x| x.as_f64())
         .map(|d| d.round() as i64);
 
+    // 1-based position within a playlist/multi-video post, when present. Whether
+    // it's actually needed for download disambiguation is decided in `submit`
+    // (only when siblings share a webpage_url).
+    let playlist_index = v.get("playlist_index").and_then(|x| x.as_i64());
+
+    // Distinct source heights, captured now so the resolution picker reads them
+    // from the DB instead of re-probing on first open.
+    let available_heights = heights_from_json(&v);
+
     Some(ProbeResult {
         extractor,
         video_id,
@@ -93,6 +176,8 @@ pub(crate) fn parse_dump_json_line(line: &str) -> Option<ProbeResult> {
         thumbnail_url,
         duration,
         webpage_url,
+        playlist_index,
+        available_heights,
     })
 }
 
@@ -149,6 +234,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_playlist_index_for_multi_video_entry() {
+        // A tweet with two clips: each entry carries its 1-based playlist_index.
+        let line = r#"{"extractor":"twitter","id":"111","title":"clip #2","webpage_url":"https://x.com/u/status/9","playlist_index":2,"n_entries":2}"#;
+        let r = parse_dump_json_line(line).expect("should parse");
+        assert_eq!(r.playlist_index, Some(2));
+
+        // Standalone video: no playlist_index field.
+        let solo = r#"{"extractor":"youtube","id":"y","title":"t","webpage_url":"u"}"#;
+        assert_eq!(parse_dump_json_line(solo).unwrap().playlist_index, None);
+    }
+
+    #[test]
     fn missing_duration_and_thumbnail_are_none() {
         let line = r#"{"extractor":"generic","id":"y","title":"t","webpage_url":"u"}"#;
         let r = parse_dump_json_line(line).expect("should parse");
@@ -162,6 +259,27 @@ mod tests {
         assert!(parse_dump_json_line("not json").is_none());
         // Missing required field `id`.
         assert!(parse_dump_json_line(r#"{"extractor":"youtube","title":"t","webpage_url":"u"}"#).is_none());
+    }
+
+    #[test]
+    fn heights_from_json_collects_distinct_desc() {
+        // Real video formats (vcodec present, or omitted) count; storyboard images
+        // and audio (vcodec "none") are skipped so junk tiers don't leak in.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"height":720,"formats":[
+                {"height":1080,"vcodec":"vp9"},{"height":720,"vcodec":"avc1"},
+                {"height":720,"vcodec":"avc1"},{"height":null,"vcodec":"vp9"},
+                {"height":360},
+                {"height":90,"vcodec":"none"},{"height":45,"vcodec":"none"},
+                {"height":180,"ext":"mhtml"},
+                {"height":0,"acodec":"opus","vcodec":"none"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(heights_from_json(&v), vec![1080, 720, 360]);
+        // Only storyboard/audio (vcodec none) → empty.
+        let audio: serde_json::Value =
+            serde_json::from_str(r#"{"formats":[{"height":45,"vcodec":"none"},{"acodec":"opus","vcodec":"none"}]}"#).unwrap();
+        assert!(heights_from_json(&audio).is_empty());
     }
 
     #[test]

@@ -43,7 +43,8 @@ Behavior: probe → dedup → enqueue (see ARCHITECTURE §3).
 { "item": { "id": 42, "extractor": "youtube", "video_id": "dQw4w9WgXcQ",
             "archive_key": "youtube dQw4w9WgXcQ", "title": "…", "uploader": "…",
             "webpage_url": "…", "thumbnail_url": "…", "duration": 213,
-            "filepath": null, "filesize": null, "source": "download",
+            "filepath": null, "filesize": null, "total_filesize": 0, "height": null,
+            "source_max_height": null, "source": "download",
             "status": "queued", "error": null, "created_at": 1751961600,
             "completed_at": null },
   "duplicate": false }
@@ -91,15 +92,21 @@ surface. Use `/api/p/:slug` for tokenless public sharing.
 - Add `?download=1` to force a browser save (`Content-Disposition: attachment`, RFC 5987 UTF-8 filename).
 - `401` without a valid token; `400` if the item has no file yet; `404` if missing.
 
-### `GET /api/items/:id/stream-url` — resolve upstream stream URL (token required)
-For **online playback without downloading**, used when the local file is gone (backed away):
-runs `yt-dlp -g` for a progressive HTTP format and returns `{ "url": "<direct media url>" }`.
-The URL is short-lived and bound to the server's IP — resolve it fresh each time, don't cache.
-`500 {"error":"internal"}` if resolution fails (unsupported/expired/geo-blocked).
+### `GET /api/stream/:slug` — online playback proxy (token required)
+For **online playback without downloading**, used when the local file is gone (backed away).
+Keyed by the item's unguessable **`public_slug`** — the same scheme share links use — never the
+sequential id, so the URL can't be walked to reach other items. Still token-gated (owner only);
+the slug alone is not a public capability (that's `/api/p/:slug`).
+The backend runs `yt-dlp -g` (with the platform cookies) to resolve a progressive HTTP format, then
+**fetches it from this server and streams the bytes back** — so a stale, IP-bound CDN URL (e.g.
+X's `video.twimg.com`, signed for the resolving server's IP) never reaches the browser directly.
+- Forwards the client `Range` (returns `206 Partial Content`) and mirrors the upstream
+  `Content-Type`/`Content-Length`/`Content-Range`/`Accept-Ranges` so the `<video>` plays and seeks.
+- `401` without a valid token; `404` if the slug is unknown; `500` if resolution/fetch fails.
 
 > Item JSON carries a computed **`local_available`** boolean: `true` when `filepath` points at a
 > real file on disk, `false` once the local copy is pruned. The UI shows a cloud badge and falls
-> back to `/stream-url` when it's `false`.
+> back to `/api/stream/:slug` when it's `false`. Every item carries a `public_slug` from creation.
 
 ### `GET/POST/DELETE /api/archive` — manual dedup editor (token required)
 The dedup set uses **Seal's scheme**: one `"<extractor> <id>"` key per item (identical to yt-dlp
@@ -149,6 +156,18 @@ data: {"id":42,"status":"completed","percent":100.0,"speed":null,"eta":null}
 - A terminal `status` (`completed`/`failed`/`duplicate`) is always emitted so the UI can
   finalize a row without polling.
 - Heartbeat comment line every ~15s to keep proxies from closing the connection.
+
+### `GET /api/stats` — download totals (auth)
+`200 {"count":128,"total_bytes":13421772800}` — number of recorded downloads and
+their combined file size. Drives the "total downloaded" readout beside the header
+heartbeat.
+
+### `GET /api/settings` / `PUT /api/settings` — runtime settings (auth)
+- `GET` → `200 {"max_height":1080,"max_height_locked":false}`. `max_height` is the
+  effective resolution cap (`null` = highest). `max_height_locked` is `true` when
+  pinned by `WHALE_MAX_HEIGHT`.
+- `PUT {"max_height":720}` sets the cap (a `null`/`0` value clears it → highest);
+  echoes the `GET` shape. `400` when the setting is env-locked.
 
 ### `GET /api/health` — liveness
 `200 {"status":"ok","version":"…","ytdlp":"<version>"}` — no auth. Used by Docker healthcheck.

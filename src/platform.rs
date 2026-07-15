@@ -154,6 +154,37 @@ pub fn extractor_search_terms(term: &str) -> Vec<String> {
     vec![t]
 }
 
+/// Filesystem-safe subfolder name for a downloaded item, derived from its yt-dlp
+/// extractor, so the download directory self-organises by site (YouTube videos
+/// land in `YouTube/`, X posts in `Twitter/`, …). Uses the catalog's canonical
+/// key (title-cased) when the extractor family is known, else the extractor's
+/// own base label title-cased; unknown/empty falls back to `Other`.
+pub fn download_folder(extractor: &str) -> String {
+    // Extractor ids look like `youtube`, `youtube:tab`, `twitter:broadcast` —
+    // take the family base before any `:`/`_` separator.
+    let base = extractor
+        .split([':', '_'])
+        .next()
+        .unwrap_or(extractor)
+        .trim()
+        .to_ascii_lowercase();
+    // Prefer the catalog's canonical key so aliases collapse (twitter/x → Twitter).
+    let key = extractor_search_terms(&base)
+        .into_iter()
+        .next()
+        .unwrap_or(base);
+    // Keep only filesystem-safe chars; title-case the first letter.
+    let cleaned: String = key.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if cleaned.is_empty() {
+        return "Other".to_string();
+    }
+    let mut chars = cleaned.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => "Other".to_string(),
+    }
+}
+
 /// Detect the platform for a URL by its host. Returns `None` for unknown sites
 /// (which then fall back to the global cookies file, if any).
 pub fn from_url(url: &str) -> Option<&'static Platform> {
@@ -237,6 +268,17 @@ mod tests {
         assert_eq!(by_key("Twitter").unwrap().key, "twitter");
         assert_eq!(by_key("YOUTUBE").unwrap().key, "youtube");
         assert!(by_key("nope").is_none());
+    }
+
+    #[test]
+    fn download_folder_titlecases_and_folds_aliases() {
+        assert_eq!(download_folder("youtube"), "Youtube");
+        assert_eq!(download_folder("youtube:tab"), "Youtube");
+        // X's extractor family is "twitter"; the folder folds to the canonical key.
+        assert_eq!(download_folder("twitter"), "Twitter");
+        assert_eq!(download_folder("twitter:broadcast"), "Twitter");
+        assert_eq!(download_folder("generic"), "Generic");
+        assert_eq!(download_folder(""), "Other");
     }
 
     #[test]

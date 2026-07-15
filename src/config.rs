@@ -52,6 +52,15 @@ pub struct Config {
     pub container: Container,
     pub output_template: String,
     pub format: String,
+    /// True when `WHALE_FORMAT` was set explicitly by the operator. The
+    /// resolution cap (`max_height`) is only injected into the *default* format
+    /// — an explicit custom format is an escape hatch we pass through verbatim.
+    pub format_user_set: bool,
+    /// Max video pixel height passed in via `WHALE_MAX_HEIGHT` (e.g. 1080). When
+    /// `Some`, it is authoritative and overrides any UI-stored value (an env var
+    /// the operator "actively passed in" wins). `None` = follow the stored
+    /// setting, defaulting to highest.
+    pub max_height: Option<i64>,
     pub subs: bool,
     pub auto_subs: bool,
     pub sub_langs: String,
@@ -141,7 +150,22 @@ impl Config {
             "WHALE_OUTPUT_TEMPLATE",
             "%(uploader,channel|Unknown)s - %(title).150B [%(id)s].%(ext)s",
         );
+        let format_user_set = env_opt("WHALE_FORMAT").is_some();
         let format = env_or("WHALE_FORMAT", "bv*+ba/b");
+        // Highest by default (unset). A value of 0 / "highest"/"best"/"none"
+        // explicitly means no cap; any positive integer caps the height.
+        let max_height = match env_opt("WHALE_MAX_HEIGHT") {
+            None => None,
+            Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "0" | "highest" | "best" | "none" | "max" => None,
+                other => Some(
+                    other
+                        .trim_end_matches('p')
+                        .parse::<i64>()
+                        .context("WHALE_MAX_HEIGHT must be an integer height (e.g. 1080), 'highest', or 0")?,
+                ),
+            },
+        };
         let subs = env_bool("WHALE_SUBS", true);
         let auto_subs = env_bool("WHALE_AUTO_SUBS", false);
         let sub_langs = env_or("WHALE_SUB_LANGS", "all,-live_chat");
@@ -171,6 +195,8 @@ impl Config {
             container,
             output_template,
             format,
+            format_user_set,
+            max_height,
             subs,
             auto_subs,
             sub_langs,
@@ -183,6 +209,14 @@ impl Config {
 
     pub fn archive_path(&self) -> PathBuf {
         self.data_dir.join("archive.txt")
+    }
+
+    /// The `-f` format value for a download, applying the effective resolution
+    /// cap. `max_height` is the resolved cap (env override or stored setting);
+    /// `None` means highest. A custom operator-set `WHALE_FORMAT` is always
+    /// passed through untouched (the cap only shapes our default selector).
+    pub fn format_capped(&self, max_height: Option<i64>) -> String {
+        capped_format(&self.format, self.format_user_set, max_height)
     }
 
     /// Number of downloads allowed to run at once: forced to 1 in polite mode,
@@ -209,6 +243,21 @@ impl Config {
         let span = self.sleep_max.saturating_sub(self.sleep_min);
         let extra = if span == 0 { 0 } else { rand_below(span + 1) };
         std::time::Duration::from_secs(self.sleep_min + extra)
+    }
+}
+
+/// Build the `-f` value from a base format and an optional height cap. A custom
+/// operator format (`user_set`) is passed through verbatim; the cap only shapes
+/// our default selector. `None` / non-positive height means no cap.
+fn capped_format(base: &str, user_set: bool, max_height: Option<i64>) -> String {
+    match max_height {
+        Some(h) if !user_set && h > 0 => {
+            // Best video+audio at/under the cap, then a capped progressive file,
+            // then fall back to the best available so a source whose smallest
+            // rendition exceeds the cap still downloads.
+            format!("bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b")
+        }
+        _ => base.to_string(),
     }
 }
 
@@ -288,6 +337,23 @@ mod tests {
         }
         assert_eq!(rand_below(1), 0);
         assert_eq!(rand_below(0), 0);
+    }
+
+    #[test]
+    fn capped_format_injects_height_only_for_default_format() {
+        // Default format + a cap → height-limited selector with a fallback.
+        assert_eq!(
+            capped_format("bv*+ba/b", false, Some(1080)),
+            "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
+        );
+        // No cap (None or 0) → untouched default.
+        assert_eq!(capped_format("bv*+ba/b", false, None), "bv*+ba/b");
+        assert_eq!(capped_format("bv*+ba/b", false, Some(0)), "bv*+ba/b");
+        // A custom operator format is passed through even with a cap set.
+        assert_eq!(
+            capped_format("bestvideo+bestaudio", true, Some(720)),
+            "bestvideo+bestaudio"
+        );
     }
 
     #[test]

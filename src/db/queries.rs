@@ -2,7 +2,7 @@
 
 use super::{Db, ListPage, ListQuery};
 use crate::seal_import::{ImportOutcome, SealRecord};
-use crate::types::{Client, Item, ProbeResult, SiteCount, Source, Status};
+use crate::types::{Client, Item, ItemResolution, ProbeResult, SiteCount, Source, Status, Website};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
 use std::path::Path;
@@ -37,6 +37,8 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         thumbnail_url: row.try_get("thumbnail_url")?,
         duration: row.try_get("duration")?,
         filesize: row.try_get("filesize")?,
+        height: row.try_get("height")?,
+        source_max_height: row.try_get("source_max_height")?,
         source,
         status,
         error: row.try_get("error")?,
@@ -46,6 +48,8 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         public_slug: row.try_get("public_slug")?,
         public_until: row.try_get("public_until")?,
         public_hits: row.try_get("public_hits")?,
+        playlist_index: row.try_get("playlist_index")?,
+        total_filesize: row.try_get("total_filesize")?,
         filepath,
         local_available,
     })
@@ -61,8 +65,11 @@ fn filepath_exists(filepath: &Option<String>) -> bool {
 }
 
 const SELECT_COLS: &str = "id, extractor, video_id, archive_key, title, uploader, \
-    webpage_url, thumbnail_url, duration, filepath, filesize, source, status, error, \
-    created_at, completed_at, public, public_slug, public_until, public_hits";
+    webpage_url, thumbnail_url, duration, filepath, filesize, height, source_max_height, source, \
+    status, error, created_at, completed_at, public, public_slug, public_until, public_hits, \
+    playlist_index, \
+    COALESCE((SELECT SUM(filesize) FROM item_resolutions WHERE item_id = items.id), filesize, 0) \
+      AS total_filesize";
 
 /// Generate a 24-char (96-bit) hex slug from OS randomness — unguessable, so
 /// public links can't be derived from the sequential item id.
@@ -90,11 +97,20 @@ pub(super) async fn insert_probe(db: &Db, p: &ProbeResult, source: Source) -> an
     let now = now_unix();
     let archive_key = p.archive_key();
 
+    // Persist the source's available heights (CSV, highest first) captured by the
+    // probe, so the resolution picker reads them without re-probing. Empty vec →
+    // empty string ("probed, none reported"); distinguishes from NULL (never probed).
+    let heights_csv = heights_to_csv(&p.available_heights);
+
+    // Assign the unguessable slug up front so owner media URLs can be keyed by it
+    // (never by the enumerable sequential id). Sharing later reuses this same slug.
+    let slug = random_slug()?;
+
     let result = sqlx::query(
         "INSERT INTO items \
          (extractor, video_id, archive_key, title, uploader, webpage_url, thumbnail_url, \
-          duration, source, status, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          duration, source, status, created_at, playlist_index, available_heights, public_slug) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&p.extractor)
     .bind(&p.video_id)
@@ -107,6 +123,9 @@ pub(super) async fn insert_probe(db: &Db, p: &ProbeResult, source: Source) -> an
     .bind(source.as_str())
     .bind(Status::Queued.as_str())
     .bind(now)
+    .bind(p.playlist_index)
+    .bind(heights_csv)
+    .bind(&slug)
     .execute(&db.pool)
     .await?;
 
@@ -142,18 +161,310 @@ pub(super) async fn set_status(
     Ok(())
 }
 
-pub(super) async fn set_completed(db: &Db, id: i64, path: &str, size: i64) -> anyhow::Result<()> {
+pub(super) async fn set_completed(
+    db: &Db,
+    id: i64,
+    path: &str,
+    size: i64,
+    height: Option<i64>,
+) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE items SET filepath = ?, filesize = ?, status = 'completed', \
+        "UPDATE items SET filepath = ?, filesize = ?, height = ?, status = 'completed', \
          completed_at = ?, error = NULL WHERE id = ?",
     )
     .bind(path)
     .bind(size)
+    .bind(height)
     .bind(now_unix())
     .bind(id)
     .execute(&db.pool)
     .await?;
     Ok(())
+}
+
+/// Serialize a height list to the stored CSV form ("1080,720,360").
+fn heights_to_csv(heights: &[i64]) -> String {
+    heights.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// Parse the stored CSV back into a height list, dropping any non-numeric junk.
+fn heights_from_csv(csv: &str) -> Vec<i64> {
+    csv.split(',')
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .filter(|h| *h > 0)
+        .collect()
+}
+
+/// The source's available heights for an item, or `None` if never probed (the
+/// column is NULL). An empty `Vec` means "probed, source reported no heights".
+pub(super) async fn get_available_heights(db: &Db, id: i64) -> anyhow::Result<Option<Vec<i64>>> {
+    let row = sqlx::query("SELECT available_heights FROM items WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&db.pool)
+        .await?;
+    Ok(row.and_then(|r| r.get::<Option<String>, _>("available_heights")).map(|csv| heights_from_csv(&csv)))
+}
+
+/// Cache the source's available heights (CSV) discovered by a (re-)probe.
+pub(super) async fn set_available_heights(db: &Db, id: i64, heights: &[i64]) -> anyhow::Result<()> {
+    sqlx::query("UPDATE items SET available_heights = ? WHERE id = ?")
+        .bind(heights_to_csv(heights))
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+/// Repoint an item's primary file (the one played / streamed / shared) at its
+/// highest currently-downloaded resolution variant, so the card always shows the
+/// best version it holds. No-op when the item has no resolution rows (guards
+/// against nulling the primary out — see the EXISTS clause).
+pub(super) async fn repoint_primary(db: &Db, id: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE items SET \
+           filepath = (SELECT filepath FROM item_resolutions WHERE item_id = ? ORDER BY height DESC LIMIT 1), \
+           filesize = (SELECT filesize FROM item_resolutions WHERE item_id = ? ORDER BY height DESC LIMIT 1), \
+           height   = (SELECT height   FROM item_resolutions WHERE item_id = ? ORDER BY height DESC LIMIT 1) \
+         WHERE id = ? AND EXISTS (SELECT 1 FROM item_resolutions WHERE item_id = ?)",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// Clear an item's primary file pointer (filepath / filesize / height → NULL),
+/// turning it into a stream-only ("None" resolution) record: the DB entry stays,
+/// but the card shows no local file and playback falls back to upstream streaming
+/// (`/stream-url`). Used when the user purges an item's local downloads.
+pub(super) async fn clear_primary(db: &Db, id: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE items SET filepath = NULL, filesize = NULL, height = NULL WHERE id = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+/// Mark a freshly-probed item as a stream-only ("None" mode) record: completed,
+/// with no local file. Used when the global default resolution is "None" — the
+/// entry is kept for browsing/streaming but nothing is downloaded.
+pub(super) async fn mark_stream_only(db: &Db, id: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE items SET status = 'completed', completed_at = ?, \
+         filepath = NULL, filesize = NULL, height = NULL, error = NULL WHERE id = ?",
+    )
+    .bind(now_unix())
+    .bind(id)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// All downloaded resolution variants for an item, highest height first.
+pub(super) async fn list_resolutions(db: &Db, item_id: i64) -> anyhow::Result<Vec<ItemResolution>> {
+    let rows = sqlx::query(
+        "SELECT height, filepath, filesize FROM item_resolutions \
+         WHERE item_id = ? ORDER BY height DESC",
+    )
+    .bind(item_id)
+    .fetch_all(&db.pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(ItemResolution {
+            height: r.try_get("height")?,
+            filepath: r.try_get("filepath")?,
+            filesize: r.try_get("filesize")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Record (or replace) one downloaded resolution variant.
+pub(super) async fn upsert_resolution(
+    db: &Db,
+    item_id: i64,
+    height: i64,
+    filepath: &str,
+    filesize: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO item_resolutions (item_id, height, filepath, filesize, created_at) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(item_id, height) DO UPDATE SET \
+           filepath = excluded.filepath, filesize = excluded.filesize",
+    )
+    .bind(item_id)
+    .bind(height)
+    .bind(filepath)
+    .bind(filesize)
+    .bind(now_unix())
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a resolution variant, returning its stored file path (so the caller
+/// can delete the file). `None` if that height wasn't recorded.
+pub(super) async fn delete_resolution(
+    db: &Db,
+    item_id: i64,
+    height: i64,
+) -> anyhow::Result<Option<String>> {
+    let row = sqlx::query("SELECT filepath FROM item_resolutions WHERE item_id = ? AND height = ?")
+        .bind(item_id)
+        .bind(height)
+        .fetch_optional(&db.pool)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    let filepath: String = row.try_get("filepath")?;
+    sqlx::query("DELETE FROM item_resolutions WHERE item_id = ? AND height = ?")
+        .bind(item_id)
+        .bind(height)
+        .execute(&db.pool)
+        .await?;
+    Ok(Some(filepath))
+}
+
+/// Read a settings value by key (`None` if unset).
+pub(super) async fn get_setting(db: &Db, key: &str) -> anyhow::Result<Option<String>> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(&db.pool)
+        .await?;
+    Ok(row.map(|r| r.get::<String, _>("value")))
+}
+
+/// Upsert a settings value; `None` deletes the key (reverts to the default).
+pub(super) async fn set_setting(db: &Db, key: &str, value: Option<&str>) -> anyhow::Result<()> {
+    match value {
+        Some(v) => {
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES (?, ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(key)
+            .bind(v)
+            .execute(&db.pool)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM settings WHERE key = ?")
+                .bind(key)
+                .execute(&db.pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+// ---- Website registry (migration 0014) ----------------------------------
+
+fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
+    let hosts_csv: String = row.try_get("hosts")?;
+    Ok(Website {
+        key: row.try_get("key")?,
+        name: row.try_get("name")?,
+        hosts: crate::websites::parse_hosts(&hosts_csv),
+        login_url: row.try_get("login_url")?,
+        enabled: row.try_get::<i64, _>("enabled")? != 0,
+        max_height: row.try_get("max_height")?,
+        no_download: row.try_get::<i64, _>("no_download")? != 0,
+        sort: row.try_get("sort")?,
+        cookie: None,
+    })
+}
+
+/// All websites, in display order (then name).
+pub(super) async fn list_websites(db: &Db) -> anyhow::Result<Vec<Website>> {
+    let rows = sqlx::query(
+        "SELECT key, name, hosts, login_url, enabled, max_height, no_download, sort \
+         FROM websites ORDER BY sort, name",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    rows.iter().map(row_to_website).collect()
+}
+
+/// Insert or update a website (keyed by `key`). `hosts` is stored as CSV.
+pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
+    let hosts = crate::websites::hosts_to_csv(&w.hosts);
+    sqlx::query(
+        "INSERT INTO websites (key, name, hosts, login_url, enabled, max_height, no_download, sort, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(key) DO UPDATE SET \
+           name = excluded.name, hosts = excluded.hosts, login_url = excluded.login_url, \
+           enabled = excluded.enabled, max_height = excluded.max_height, \
+           no_download = excluded.no_download, sort = excluded.sort",
+    )
+    .bind(&w.key)
+    .bind(&w.name)
+    .bind(hosts)
+    .bind(&w.login_url)
+    .bind(w.enabled as i64)
+    .bind(w.max_height)
+    .bind(w.no_download as i64)
+    .bind(w.sort)
+    .bind(now_unix())
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// Fetch one website by key.
+pub(super) async fn get_website(db: &Db, key: &str) -> anyhow::Result<Option<Website>> {
+    let row = sqlx::query(
+        "SELECT key, name, hosts, login_url, enabled, max_height, no_download, sort \
+         FROM websites WHERE key = ?",
+    )
+    .bind(key)
+    .fetch_optional(&db.pool)
+    .await?;
+    row.as_ref().map(row_to_website).transpose()
+}
+
+/// Rewrite a path segment across every stored filepath (item primaries and
+/// resolution variants). Used after a site merge relocates a download folder, so
+/// the DB keeps pointing at the moved files. `from`/`to` are folder segments like
+/// `/OldSite/` → `/NewSite/`.
+pub(super) async fn rewrite_filepaths(db: &Db, from: &str, to: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE items SET filepath = REPLACE(filepath, ?, ?) WHERE filepath LIKE ?")
+        .bind(from)
+        .bind(to)
+        .bind(format!("%{from}%"))
+        .execute(&db.pool)
+        .await?;
+    sqlx::query("UPDATE item_resolutions SET filepath = REPLACE(filepath, ?, ?) WHERE filepath LIKE ?")
+        .bind(from)
+        .bind(to)
+        .bind(format!("%{from}%"))
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+/// Delete a website by key. Returns true if a row was removed.
+pub(super) async fn delete_website(db: &Db, key: &str) -> anyhow::Result<bool> {
+    let res = sqlx::query("DELETE FROM websites WHERE key = ?")
+        .bind(key)
+        .execute(&db.pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Aggregate download stats: `(count, total_bytes)` over items that have a
+/// recorded filesize (i.e. actually-downloaded records).
+pub(super) async fn download_stats(db: &Db) -> anyhow::Result<(i64, i64)> {
+    let row = sqlx::query(
+        "SELECT COUNT(filesize) AS n, COALESCE(SUM(filesize), 0) AS bytes FROM items",
+    )
+    .fetch_one(&db.pool)
+    .await?;
+    Ok((row.try_get("n")?, row.try_get("bytes")?))
 }
 
 /// Flip an item's public flag. `until` is the Unix timestamp when the share
@@ -432,6 +743,13 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
 pub(super) async fn delete(db: &Db, id: i64) -> anyhow::Result<Option<Item>> {
     let existing = get(db, id).await?;
     if existing.is_some() {
+        // Explicitly clear resolution variants too: the FK is `ON DELETE CASCADE`
+        // but SQLite only enforces it with `foreign_keys = ON` (off by default
+        // here), so don't rely on it — remove the rows ourselves.
+        sqlx::query("DELETE FROM item_resolutions WHERE item_id = ?")
+            .bind(id)
+            .execute(&db.pool)
+            .await?;
         sqlx::query("DELETE FROM items WHERE id = ?")
             .bind(id)
             .execute(&db.pool)
@@ -478,11 +796,14 @@ pub(super) async fn upsert_import(db: &Db, rec: SealRecord) -> anyhow::Result<Im
     }
 
     let now = now_unix();
+    // Imported items get the same unguessable slug as freshly probed ones, so
+    // their media URLs are never keyed by the enumerable sequential id.
+    let slug = random_slug()?;
     sqlx::query(
         "INSERT INTO items \
          (extractor, video_id, archive_key, title, uploader, webpage_url, filepath, \
-          source, status, created_at, completed_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'seal-import', 'completed', ?, ?)",
+          source, status, created_at, completed_at, public_slug) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'seal-import', 'completed', ?, ?, ?)",
     )
     .bind(&rec.extractor)
     .bind(&video_id)
@@ -493,6 +814,7 @@ pub(super) async fn upsert_import(db: &Db, rec: SealRecord) -> anyhow::Result<Im
     .bind(&rec.path)
     .bind(now)
     .bind(now)
+    .bind(&slug)
     .execute(&db.pool)
     .await?;
 
@@ -635,6 +957,8 @@ mod tests {
             thumbnail_url: None,
             duration: Some(42),
             webpage_url: format!("https://example.com/{video_id}"),
+            playlist_index: None,
+            available_heights: vec![1080, 720, 360],
         }
     }
 
@@ -884,21 +1208,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_public_assigns_stable_slug_and_looks_up() {
+    async fn insert_assigns_unguessable_slug() {
+        // Every item gets a 24-hex-char (96-bit) slug at creation — so media URLs
+        // key off the slug, never the enumerable sequential id — and it's usable
+        // for lookup immediately, before any sharing.
+        let (db, _dir) = temp_db().await;
+        let a = db.insert_probe(&probe("youtube", "s1", "One"), Source::Download).await.unwrap();
+        let b = db.insert_probe(&probe("youtube", "s2", "Two"), Source::Download).await.unwrap();
+        let sa = a.public_slug.clone().expect("slug at insert");
+        let sb = b.public_slug.clone().expect("slug at insert");
+        assert_eq!(sa.len(), 24);
+        assert!(sa.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(sa, sb, "slugs are random, not derived from the id");
+        // Resolvable before the item is ever made public.
+        assert!(!a.public);
+        assert_eq!(db.find_by_public_slug(&sa).await.unwrap().unwrap().id, a.id);
+    }
+
+    #[tokio::test]
+    async fn set_public_reuses_insert_slug_and_looks_up() {
         let (db, _dir) = temp_db().await;
         let p = probe("youtube", "pub1", "Public me");
         let item = db.insert_probe(&p, Source::Download).await.unwrap();
         assert!(!item.public);
-        assert!(item.public_slug.is_none());
+        // Slug now exists from insert, not from sharing.
+        let slug = item.public_slug.clone().expect("slug at insert");
+        assert_eq!(slug.len(), 24);
+        assert!(slug.chars().all(|c| c.is_ascii_hexdigit()));
 
-        // Permanent share (no expiry).
+        // Permanent share (no expiry) reuses the existing slug (COALESCE).
         db.set_public(item.id, true, None).await.unwrap();
         let pubd = db.get(item.id).await.unwrap().unwrap();
         assert!(pubd.public);
         assert!(pubd.public_until.is_none());
-        let slug = pubd.public_slug.clone().expect("slug assigned");
-        assert_eq!(slug.len(), 24);
-        assert!(slug.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(pubd.public_slug.as_deref(), Some(slug.as_str()));
 
         // Slug lookup resolves to the same row.
         let found = db.find_by_public_slug(&slug).await.unwrap().unwrap();
@@ -910,7 +1253,7 @@ mod tests {
         assert!(!priv_again.public);
         assert_eq!(priv_again.public_slug.as_deref(), Some(slug.as_str()));
 
-        // Re-sharing with an expiry reuses the same slug (COALESCE) and records it.
+        // Re-sharing with an expiry reuses the same slug and records the expiry.
         let until = now_unix() + 7 * 86400;
         db.set_public(item.id, true, Some(until)).await.unwrap();
         let reshared = db.get(item.id).await.unwrap().unwrap();
@@ -979,6 +1322,67 @@ mod tests {
         assert!(db.get(lapsed.id).await.unwrap().unwrap().public_slug.is_some());
         // Access tally zeroed on expiry — capsule drops once the share lapses.
         assert_eq!(db.get(lapsed.id).await.unwrap().unwrap().public_hits, 0);
+    }
+
+    #[tokio::test]
+    async fn repoint_primary_tracks_highest_downloaded() {
+        let (db, _dir) = temp_db().await;
+        let item = db
+            .insert_probe(&probe("youtube", "res1", "Multi res"), Source::Download)
+            .await
+            .unwrap();
+
+        // Two downloaded variants → primary points at the highest (720).
+        db.upsert_resolution(item.id, 360, "/d/v_360.mkv", 10).await.unwrap();
+        db.upsert_resolution(item.id, 720, "/d/v_720.mkv", 30).await.unwrap();
+        db.repoint_primary(item.id).await.unwrap();
+        let hi = db.get(item.id).await.unwrap().unwrap();
+        assert_eq!(hi.height, Some(720));
+        assert_eq!(hi.filepath.as_deref(), Some("/d/v_720.mkv"));
+        assert_eq!(hi.filesize, Some(30));
+
+        // Drop 720 → primary falls back to the next-highest remaining (360).
+        db.delete_resolution(item.id, 720).await.unwrap();
+        db.repoint_primary(item.id).await.unwrap();
+        let lo = db.get(item.id).await.unwrap().unwrap();
+        assert_eq!(lo.height, Some(360));
+        assert_eq!(lo.filepath.as_deref(), Some("/d/v_360.mkv"));
+
+        // No resolution rows left → repoint is a no-op (never nulls the primary).
+        db.delete_resolution(item.id, 360).await.unwrap();
+        db.repoint_primary(item.id).await.unwrap();
+        let kept = db.get(item.id).await.unwrap().unwrap();
+        assert_eq!(kept.filepath.as_deref(), Some("/d/v_360.mkv"));
+    }
+
+    #[tokio::test]
+    async fn total_filesize_sums_variants() {
+        let (db, _dir) = temp_db().await;
+        let item = db
+            .insert_probe(&probe("youtube", "tot", "Totals"), Source::Download)
+            .await
+            .unwrap();
+        // No variants yet, but a primary filesize is set → total falls back to it.
+        db.set_completed(item.id, "/d/primary.mkv", 100, Some(720)).await.unwrap();
+        assert_eq!(db.get(item.id).await.unwrap().unwrap().total_filesize, 100);
+        // Two variants → total is their sum (independent of the primary filesize).
+        db.upsert_resolution(item.id, 720, "/d/v720.mkv", 100).await.unwrap();
+        db.upsert_resolution(item.id, 360, "/d/v360.mkv", 25).await.unwrap();
+        assert_eq!(db.get(item.id).await.unwrap().unwrap().total_filesize, 125);
+    }
+
+    #[tokio::test]
+    async fn available_heights_round_trip() {
+        let (db, _dir) = temp_db().await;
+        // insert_probe seeds available_heights from the probe (see the `probe` helper).
+        let item = db
+            .insert_probe(&probe("youtube", "ah", "Heights"), Source::Download)
+            .await
+            .unwrap();
+        assert_eq!(db.get_available_heights(item.id).await.unwrap(), Some(vec![1080, 720, 360]));
+        // A refresh overwrites the cache.
+        db.set_available_heights(item.id, &[2160, 720]).await.unwrap();
+        assert_eq!(db.get_available_heights(item.id).await.unwrap(), Some(vec![2160, 720]));
     }
 
     #[tokio::test]

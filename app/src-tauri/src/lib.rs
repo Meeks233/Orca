@@ -1,15 +1,16 @@
 //! Whale app shell. The UI is the exact same `web/` frontend the server serves;
 //! this Tauri wrapper just hosts it in a native WebView (Android/desktop) and,
-//! on mobile, will bridge the Android share intent into a URL submission.
+//! on mobile, bridges the Android share intent into a URL submission.
 
 use tauri::Manager;
 
 /// Mirror the server base URL + token from the WebView's localStorage into a
 /// file the native `ShareActivity` can read (`<app_data_dir>/whale_share_creds.json`).
 ///
-/// The "Quick Download" share target must submit to the backend WITHOUT opening
-/// the WebView, so it can't read localStorage. The frontend calls this whenever
-/// the creds change (and on launch) so a headless share always has fresh creds.
+/// The "Quick Download" share target submits to the backend IN THE BACKGROUND
+/// without opening the WebView, so it can't read localStorage. The frontend
+/// calls this whenever the creds change (and on launch) so a headless share
+/// always has fresh creds.
 #[tauri::command]
 fn save_share_creds(app: tauri::AppHandle, base: String, token: String) {
     if let Ok(dir) = app.path().app_data_dir() {

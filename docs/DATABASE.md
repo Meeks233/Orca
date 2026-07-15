@@ -41,9 +41,11 @@ ALTER TABLE items ADD COLUMN public_slug TEXT;                   -- random share
 CREATE UNIQUE INDEX idx_items_public_slug ON items(public_slug) WHERE public_slug IS NOT NULL;
 ```
 `public = 1` enables tokenless streaming via `GET /api/p/:public_slug` (default `0`, private). The
-`public_slug` is a random 24-hex-char token assigned the first time an item is made public and kept
-stable afterwards, so public links can't be derived from the sequential `id`. The `/api/items/:id/file`
-route always requires a token.
+`public_slug` is a random 24-hex-char token. Since `migrations/0015_backfill_slug.sql` **every** item
+carries one from creation (not just when shared) — owner media URLs, e.g. the online-playback proxy
+`GET /api/stream/:public_slug`, key off the slug so they can't be derived from the sequential `id`.
+Sharing an item just flips `public`, reusing the slug it already has. The `/api/items/:id/file` route
+always requires a token.
 
 > **Computed, not stored:** the API adds a `local_available` boolean to each item at
 > response time (whether `filepath` points at a real file on disk). It has no column.
@@ -63,6 +65,39 @@ CREATE TABLE client_site_counts (           -- per-extractor submission tally
 ```
 Clients self-register a passphrase (only its hash is stored) and, once `trusted`, authenticate
 like the owner token. `WHALE_CLIENT_TOFU` controls whether new registrations are trusted on sight.
+
+### `migrations/0009_resolution.sql` + `migrations/0010_settings.sql`
+```sql
+ALTER TABLE items ADD COLUMN height INTEGER;   -- downloaded video pixel height (720, 1080, 2160…)
+CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);  -- runtime KV store
+```
+`height` is captured from yt-dlp at completion (`after_move:%(height)s` sidecar) and labels each
+item's resolution in the UI; `NULL` for audio-only / not-yet-completed / imported rows. The
+`settings` table holds runtime-adjustable values (currently `max_height`, the resolution cap);
+`WHALE_MAX_HEIGHT`, when set, overrides the stored value.
+
+### `migrations/0011_item_resolutions.sql` + `migrations/0012_source_max_height.sql`
+```sql
+CREATE TABLE item_resolutions ( id, item_id REFERENCES items(id) ON DELETE CASCADE,
+    height, filepath, filesize, created_at, UNIQUE(item_id, height) );  -- per-item variants
+ALTER TABLE items ADD COLUMN source_max_height INTEGER;  -- cached probed source ceiling
+```
+`item_resolutions` tracks every downloaded resolution version of an item (a 1080p **and** a 720p
+copy). The item's own `filepath`/`filesize`/`height` always point at the **highest** downloaded
+variant (repointed whenever variants are added/removed), so a card shows the best version it holds.
+`source_max_height` (0012) is retained but superseded by `available_heights`.
+
+### `migrations/0013_available_heights.sql`
+```sql
+ALTER TABLE items ADD COLUMN available_heights TEXT;  -- CSV of distinct source heights, desc
+```
+`available_heights` caches the distinct pixel heights the source actually offers
+(`"2160,1440,1080,720,480,360"`), parsed from the `formats` list of the submit-time probe — the
+same enumeration yt-dlp already does to pick the default format. The resolution picker reads this
+directly (no lazy re-probe) and a background refresh keeps it current; `NULL` until probed, empty
+string means "probed, no per-format heights". Item responses also carry a **computed** (not stored)
+`total_filesize` — `SUM(item_resolutions.filesize)` (falling back to `filesize`) — so the size
+capsule shows an item's combined footprint across all downloaded versions.
 
 ### Optional FTS (phase 2, `migrations/0002_fts.sql`)
 ```sql

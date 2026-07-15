@@ -23,7 +23,8 @@ by `Config::from_env()` at startup. No config file in v1.
 | `WHALE_LIMIT_RATE` | `10M` | no | Total download-rate cap, split evenly across `WHALE_CONCURRENCY` jobs and passed as per-job `--limit-rate`. `0`/`none`/`off` disables. |
 | `WHALE_CONTAINER` | `mkv` | no | `mkv` (default) or `mp4`. See DOWNLOAD_PIPELINE.md. |
 | `WHALE_OUTPUT_TEMPLATE` | `%(uploader,channel\|Unknown)s - %(title).150B [%(id)s].%(ext)s` | no | yt-dlp `-o` template. |
-| `WHALE_FORMAT` | `bv*+ba/b` | no | yt-dlp `-f` selector. |
+| `WHALE_FORMAT` | `bv*+ba/b` | no | yt-dlp `-f` selector. Set explicitly to bypass the `WHALE_MAX_HEIGHT` cap (passed through verbatim). |
+| `WHALE_MAX_HEIGHT` | — | no | Max video pixel height cap (e.g. `1080`); `0`/`highest`/`none` = no cap (default, highest available). When set it is authoritative and locks the in-app "Maximum resolution" setting. Only shapes the default format — ignored if `WHALE_FORMAT` is set. |
 | `WHALE_SUBS` | `true` | no | Download+embed all real subtitles. |
 | `WHALE_AUTO_SUBS` | `false` | no | Also fetch auto-generated captions (`--write-auto-subs`). |
 | `WHALE_SUB_LANGS` | `all,-live_chat` | no | `--sub-langs` value. |
