@@ -6,6 +6,12 @@ Rust code is in `src/`, migrations in `migrations/`, frontend source in
 `frontend/src/`, committed frontend output in `web/`, and the Tauri application in
 `app/`. `web/` is both embedded by the backend and packaged by Tauri.
 
+All hand-written frontend and frontend-tooling code must be strict TypeScript.
+Do not add `.js`, `.mjs`, `.cjs`, or `.jsx` source files. The only permitted
+JavaScript files are the generated browser bundles `web/app.js`, `web/theme.js`,
+and `web/sw.js`; edit their TypeScript sources under `frontend/` and rebuild.
+`npm run check:javascript` enforces this rule locally and in CI.
+
 ## Checks
 
 ```bash

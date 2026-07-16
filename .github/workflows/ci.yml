@@ -95,6 +95,9 @@ jobs:
       - name: Typecheck (tsc --noEmit, strict)
         run: npm run typecheck
 
+      - name: Reject hand-written JavaScript
+        run: npm run check:javascript
+
       - name: Lint (ESLint + security rules)
         run: npm run lint
 

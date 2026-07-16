@@ -6,7 +6,7 @@
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "strict": true,
     "noImplicitAny": true,
-    "useUnknownInCatchVariables": false,
+    "useUnknownInCatchVariables": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
@@ -16,8 +16,9 @@
     "allowUnreachableCode": false,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+    "types": ["node"],
     "noEmit": true,
     "isolatedModules": true
   },
-  "include": ["src/app.ts", "src/e2ee.ts", "src/i18n.ts"]
+  "include": ["src/**/*.ts", "*.ts"]
 }
