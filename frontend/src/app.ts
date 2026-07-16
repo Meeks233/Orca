@@ -1,5 +1,5 @@
 // Whale web UI — the whole client. Bundled (with i18n) and minified into
-// ../web/app.js by build.mjs. Importing i18n for its side effect installs
+// ../web/app.js by build.ts. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
 import { decryptEvent, encryptedEventSourceUrl, encryptedFetch } from './e2ee';
@@ -312,12 +312,18 @@ function toast(msg: string, kind?: string): void {
 }
 
 // ---- Auth-aware fetch ------------------------------------------------------
+class UnauthorizedError extends Error {}
+
+function isUnauthorized(error: unknown): boolean {
+  return error instanceof UnauthorizedError;
+}
+
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
   opts = opts || {};
   const res = await encryptedFetch(apiUrl(path), path, getToken(), opts);
   if (res.status === 401) {
     showTokenField(true);
-    throw { unauthorized: true };
+    throw new UnauthorizedError('Unauthorized');
   }
   return res;
 }
@@ -1001,7 +1007,7 @@ async function loadItems(reset?: boolean): Promise<void> {
     const isEmpty = state.rows.size === 0;
     els.empty.classList.toggle('hidden', !isEmpty);
   } catch (e) {
-    if (!e || !e.unauthorized) toast(t('toast.network'), 'error');
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
   } finally {
     state.loading = false;
     // If the loader is still within reach (content shorter than the viewport,
@@ -1052,7 +1058,7 @@ async function submitUrl(url: string): Promise<void> {
     }
     els.url.value = '';
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     els.submitBtn.disabled = false;
   }
@@ -1281,7 +1287,7 @@ async function loadWebsites(): Promise<void> {
     applyBlurToRows();
     renderWebsites();
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   }
 }
 
@@ -1326,7 +1332,7 @@ async function saveWebsite(key: string, patch: Record<string, unknown>, render =
     }
     return true;
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
     return false;
   }
 }
@@ -1375,7 +1381,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
       try {
         const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
         if (res.ok) { siteSelected.delete(key); websitesLoaded = websitesLoaded.filter((x) => x.key !== key); renderWebsites(); }
-      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
       return;
     case 'validate': {
       const sample = prompt(t('sites.validatePrompt', { name: w.name }), w.hosts[0] ? 'https://' + w.hosts[0] + '/' : '');
@@ -1387,7 +1393,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
         });
         const data = await res.json().catch(() => ({}));
         toast(data.ok ? t('sites.validateOk', { title: data.title || '' }) : t('sites.validateFail', { err: data.error || '' }), data.ok ? 'ok' : 'error');
-      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
       return;
     }
     case 'ck-import':
@@ -1408,7 +1414,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
         toast(t('toast.cookiesSaved'), 'ok');
         if (data.cookie) w.cookie = data.cookie;
         renderWebsites();
-      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
       return;
     }
     case 'ck-switch': {
@@ -1422,7 +1428,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
           });
           const data = await res.json().catch(() => ({}));
           if (res.ok && data.cookie) { w.cookie = data.cookie; renderWebsites(); }
-        } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+        } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
       } else {
         // The frontend thinks there's no jar — but our cached view can be stale
         // (app resume, a dropped refresh, an SSE re-render), and a jar the user
@@ -1440,7 +1446,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
           } else if (res.status !== 404) {
             return; // a real server error — don't fall through to a spurious re-import
           }
-        } catch (e) { if (e && e.unauthorized) return; }
+        } catch (e) { if (isUnauthorized(e)) return; }
         // Genuinely no jar on the server → open the import field to add one.
         paste.classList.remove('hidden'); pasteActions.classList.remove('hidden'); paste.focus();
       }
@@ -1451,7 +1457,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
         const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', { method: 'DELETE' });
         const data = await res.json().catch(() => ({}));
         if (res.ok) { w.cookie = data.cookie; toast(t('toast.cookiesRemoved'), 'info'); renderWebsites(); }
-      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
       return;
     }
   }
@@ -1537,7 +1543,7 @@ async function batchDeleteSites(): Promise<void> {
     try {
       const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
       if (res.ok) websitesLoaded = websitesLoaded.filter((x) => x.key !== key);
-    } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+    } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
   }
   setSiteSelectMode(false);
 }
@@ -1560,7 +1566,7 @@ async function batchMergeSites(): Promise<void> {
     toast(t('sites.merged', { n: sources.length }), 'ok');
     setSiteSelectMode(false);
     loadWebsites();
-  } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+  } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
 }
 
 // Add/edit site dialog. `existing` null = add (key editable); else edit (key locked).
@@ -1664,7 +1670,7 @@ async function applyShare(makePublic: boolean): Promise<void> {
     if (!makePublic) { toast(t('toast.sharingStopped'), 'info'); closeShare(); }
     else { if (share.id === id) { showCancelConfirm(false); renderShare(data); } toast(t('toast.linkReady'), 'ok'); }
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     els.shareConfirm.disabled = false;
     els.shareStop.disabled = false;
@@ -1918,7 +1924,7 @@ async function loadArchive(): Promise<void> {
     sealLoaded = new Set(keys);
     els.sealArchive.value = keys.join('\n');
   } catch (e) {
-    if (!e || !e.unauthorized) toast(t('toast.loadArchiveFail'), 'error');
+    if (!isUnauthorized(e)) toast(t('toast.loadArchiveFail'), 'error');
   }
 }
 
@@ -2007,7 +2013,7 @@ async function loadLogs(): Promise<void> {
     logsCache = (data.entries || []) as LogEntry[];
     renderLogs(logsCache);
   } catch (e) {
-    if (!e || !e.unauthorized) toast(t('toast.logsLoadFail'), 'error');
+    if (!isUnauthorized(e)) toast(t('toast.logsLoadFail'), 'error');
   }
 }
 
@@ -2040,7 +2046,7 @@ async function openResolutions(id: number): Promise<void> {
     if (!res.ok) throw new Error('load');
     data = await res.json();
   } catch (e) {
-    if (!e || !e.unauthorized) toast(t('res.loadFail'), 'error');
+    if (!isUnauthorized(e)) toast(t('res.loadFail'), 'error');
     return;
   }
   // Collapse heights that map to the same human label (e.g. a portrait video's
@@ -2136,7 +2142,7 @@ async function saveResolutions(): Promise<void> {
       .then((it) => { if (it) upsertRow(it, false); })
       .catch(() => { /* SSE / next load will catch up */ });
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     els.resolutionSave.disabled = false;
   }
@@ -2175,7 +2181,7 @@ if (els.maxResSave) {
       els.maxRes.value = data.no_download ? 'none' : String(data.max_height || 0);
       toast(t('toast.settingsSaved'), 'ok');
     } catch (e) {
-      if (!e || !e.unauthorized) toast('Network error', 'error');
+      if (!isUnauthorized(e)) toast('Network error', 'error');
     } finally {
       els.maxResSave.disabled = false;
     }
@@ -2214,7 +2220,7 @@ if (els.sealImport) {
       els.sealArchive.value = [...now].sort().join('\n');
       toast(t('toast.archiveSaved', { add: toAdd.length, rem: toRemove.length }), 'ok');
     } catch (e) {
-      if (!e || !e.unauthorized) toast('Network error', 'error');
+      if (!isUnauthorized(e)) toast('Network error', 'error');
     } finally {
       els.sealImport.disabled = false;
     }
@@ -2497,7 +2503,7 @@ async function applyBatchShare(): Promise<void> {
     const label = days == null ? t('dur.permanently') : t('dur.days', { n: days });
     toast(ok ? t('toast.sharedN', { n: ok, dur: label }) : t('toast.shareFail'), ok ? 'ok' : 'error');
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     els.batchShareConfirm.disabled = false;
     closeModal(els.batchShare);
@@ -2531,7 +2537,7 @@ async function batchUnshare(): Promise<void> {
     }
     toast(ok ? t('toast.stoppedSharingN', { n: ok }) : t('toast.updateFail'), ok ? 'info' : 'error');
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     updateSelBar();
   }
@@ -2609,7 +2615,7 @@ async function batchDelete(): Promise<void> {
     if (ok) loadStats(); // removed files shrink the total-downloaded readout
     toast(ok ? t('toast.deletedN', { n: ok }) : t('toast.deleteFail'), ok ? 'ok' : 'error');
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     updateSelBar();
   }
@@ -2643,7 +2649,7 @@ async function batchClean(): Promise<void> {
     toast(ok ? t('sel.cleanedN', { n: ok }) : t('toast.saveFail'), ok ? 'ok' : 'error');
     exitSelectMode();
   } catch (e) {
-    if (!e || !e.unauthorized) toast('Network error', 'error');
+    if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
     updateSelBar();
   }
@@ -3217,7 +3223,7 @@ async function softRefresh(): Promise<void> {
     }
     els.empty.classList.toggle('hidden', state.rows.size !== 0);
   } catch (e) {
-    if (!e || !e.unauthorized) { /* transient; the next tick or SSE will heal it */ }
+    if (!isUnauthorized(e)) { /* transient; the next tick or SSE will heal it */ }
   } finally {
     state.loading = false;
   }

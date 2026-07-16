@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-// Whale service worker. Built to ../web/sw.js by build.mjs. Registered at the
+// Whale service worker. Built to ../web/sw.js by build.ts. Registered at the
 // origin root (/sw.js) so its scope covers the whole app.
 export {};
 declare const self: ServiceWorkerGlobalScope;
