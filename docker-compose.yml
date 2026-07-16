@@ -11,6 +11,8 @@ services:
       # Total download-rate cap, split across concurrent jobs. "0"/"none" disables.
       WHALE_LIMIT_RATE: "10M"
       WHALE_CLIENT_TOFU: "false"
+      # Opt in on hosts using fake-IP DNS proxies (for example Clash/sing-box).
+      WHALE_ALLOW_PRIVATE_DNS: "${WHALE_ALLOW_PRIVATE_DNS:-false}"
     volumes:
       - ./data:/data
       - ./downloads:/downloads
