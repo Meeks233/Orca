@@ -81,7 +81,33 @@ pub async fn public_file(
     if is_fresh_access(&req) {
         let _ = state.db.bump_public_hits(item.id).await;
     }
-    serve_item(&state.cfg.download_dir, item, req).await
+    serve_item(&state.cfg.download_dir, cap_for_sharing(&state, item).await, req).await
+}
+
+/// Point an item at the copy a *share* link should serve: the tallest downloaded
+/// variant within the effective `stream_quality` cap (per-site, else global).
+///
+/// Only public sharing goes through here. The owner's own playback and downloads
+/// (`/api/items/:slug/file`) keep serving the primary — this cap exists to bound
+/// what strangers cost the operator in upstream bandwidth, not to degrade the
+/// library for the person who downloaded it.
+///
+/// Best-effort by design: if the variant lookup fails or the item has no recorded
+/// variants (an imported or pre-0011 row), the item is returned untouched and the
+/// primary is served. A share link must not 404 over a bandwidth preference.
+async fn cap_for_sharing(state: &AppState, mut item: Item) -> Item {
+    let variants = match state.db.list_resolutions(item.id).await {
+        Ok(v) if !v.is_empty() => v,
+        _ => return item,
+    };
+    let sites = state.db.list_websites().await.unwrap_or_default();
+    let quality = crate::queue::resolve_stream_quality(&state.db, &sites, &item.webpage_url).await;
+    if let Some(pick) = quality.pick(&variants) {
+        item.filepath = Some(pick.filepath.clone());
+        item.filesize = Some(pick.filesize);
+        item.height = Some(pick.height);
+    }
+    item
 }
 
 /// True when a public request is a fresh load rather than a range continuation:

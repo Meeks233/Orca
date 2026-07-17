@@ -29,6 +29,14 @@ pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String
     args
 }
 
+/// Hard cap for the name yt-dlp writes, in bytes. 255 is the smallest limit
+/// across the filesystems a download can land on (ext4 counts bytes; NTFS, APFS
+/// and exFAT count 255 characters, which is never tighter). We stop short of it
+/// so the suffixes yt-dlp adds *after* the template still fit: ` [2160p]` for a
+/// resolution variant, the container extension, a `.<lang>.vtt` subtitle
+/// sidecar, and the in-progress `.part`.
+const NAME_MAX_BYTES: usize = 231;
+
 /// Per-job filename/sidecar tag: `<id>` for a normal download, `<id>_<height>`
 /// for a specific-resolution variant, so concurrent variant downloads of one
 /// item don't collide on the `.last_path_*` / `.last_res_*` sidecars.
@@ -120,6 +128,17 @@ pub fn download_args(
     args.push("-o".into());
     args.push(output_template);
 
+    // Portability of the name yt-dlp writes. `--windows-filenames` applies the
+    // strictest common ruleset everywhere (strips <>:"/\|?* and control chars,
+    // trailing dots/spaces, and the reserved CON/PRN/AUX/NUL/COM#/LPT# names), so
+    // a file downloaded on the Linux container still copies to a Windows or
+    // exFAT/FAT32 volume. `--trim-filenames` is the backstop for the byte budget
+    // the output template already sizes for; note we do NOT pass
+    // `--restrict-filenames`, which would flatten CJK titles to ASCII.
+    args.push("--windows-filenames".into());
+    args.push("--trim-filenames".into());
+    args.push(NAME_MAX_BYTES.to_string());
+
     // Self-organise the download directory by site: each item's files land in a
     // per-platform subfolder (YouTube/, Twitter/, …) derived from its extractor.
     let site_dir = crate::platform::download_folder(&item.extractor);
@@ -201,7 +220,7 @@ mod tests {
             limit_rate: Some("10M".into()),
             container: Container::Mkv,
             container_user_set: false,
-            output_template: "%(uploader,channel|Unknown)s - %(title).150B [%(id)s].%(ext)s".into(),
+            output_template: crate::config::Config::DEFAULT_OUTPUT_TEMPLATE.into(),
             format: "bv*+ba/b".into(),
             format_user_set: false,
             max_height: None,
@@ -329,6 +348,58 @@ mod tests {
 
         // ends with the webpage_url
         assert_eq!(args.last().unwrap(), &item.webpage_url);
+    }
+
+    /// The name yt-dlp writes must survive the tightest filesystem we can land
+    /// on (ext4: 255 bytes). Sum the template's own per-field byte budgets, then
+    /// add every suffix yt-dlp can append after it, and check the total fits.
+    #[test]
+    fn output_template_fits_the_byte_budget() {
+        let tpl = Config::DEFAULT_OUTPUT_TEMPLATE;
+        // Literal separators in the template: " - ", " - ", " [", "]".
+        let literals = " - ".len() * 2 + " [".len() + "]".len();
+        // The `.NB` budget declared on each truncated field.
+        let field_budgets: usize = tpl
+            .match_indices(".")
+            .filter_map(|(i, _)| {
+                let rest = &tpl[i + 1..];
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                rest[digits.len()..]
+                    .starts_with('B')
+                    .then(|| digits.parse::<usize>().ok())
+                    .flatten()
+            })
+            .sum();
+        let date = "0000-00-00".len();
+        let base = literals + field_budgets + date;
+        assert_eq!(
+            base, NAME_MAX_BYTES,
+            "template budget ({base}) and NAME_MAX_BYTES ({NAME_MAX_BYTES}) drifted apart"
+        );
+
+        // Worst case yt-dlp appends: a resolution variant tag, the longest
+        // container extension, and the in-progress part suffix. A subtitle
+        // sidecar replaces `.%(ext)s` rather than stacking on it, so it is the
+        // alternative to — not additional to — the extension.
+        let worst = base + " [2160p]".len() + ".webm".len() + ".part".len();
+        let subtitle = base + ".zh-Hant.vtt".len();
+        assert!(worst <= 255, "worst-case name is {worst} bytes");
+        assert!(subtitle <= 255, "subtitle sidecar is {subtitle} bytes");
+    }
+
+    /// Portability flags travel with every download: the strict name ruleset, and
+    /// the byte cap that backstops the template's own truncation.
+    #[test]
+    fn download_args_force_portable_filenames() {
+        let cfg = test_config();
+        let item = test_item();
+        let args = download_args(&cfg, &item, None, None);
+
+        assert!(args.iter().any(|a| a == "--windows-filenames"));
+        let ti = pos(&args, "--trim-filenames");
+        assert_eq!(args[ti + 1], NAME_MAX_BYTES.to_string());
+        // CJK titles must survive — this would flatten them to ASCII.
+        assert!(!args.iter().any(|a| a == "--restrict-filenames"));
     }
 
     #[test]

@@ -114,13 +114,13 @@ pub async fn submit(
         *url_counts.entry(p.webpage_url.as_str()).or_insert(0) += 1;
     }
 
-    // "None" (no-download) mode: the global default (stored max_height sentinel
-    // "none", no env cap) OR a per-site stream-only flag. Such URLs are probed for
-    // metadata then kept as completed stream-only records (no local file).
-    let site_no_download = site.map(|w| w.no_download).unwrap_or(false);
-    let global_no_download = state.cfg.max_height.is_none()
-        && state.db.get_setting("max_height").await?.as_deref() == Some("none");
-    let no_download = site_no_download || global_no_download;
+    // The effective height set for this URL (env > per-site > global). The empty
+    // set is "None" / no-download mode: such URLs are probed for metadata then
+    // kept as completed stream-only records (no local file). Anything else names
+    // the copies to fetch — the tallest as the item's primary, the rest as
+    // variants enqueued once the row exists.
+    let heights = crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await;
+    let no_download = heights.is_empty();
 
     let mut items: Vec<Item> = Vec::new();
     let mut duplicates = 0u32;
@@ -159,7 +159,21 @@ pub async fn submit(
             let refreshed = state.db.get(item.id).await?.unwrap_or(item);
             items.push(refreshed);
         } else {
+            // The primary job fetches the tallest of the set (run_job re-derives
+            // that cap itself). Snap the rest against what this probe says the
+            // source actually offers, so picking e.g. {4320, 1080} on a 1080p
+            // source queues one download rather than two that race to write the
+            // same 1080p row. `resolve` already dropped the primary's twin, so
+            // skip its first element rather than filtering by value — two
+            // requests can legitimately snap to the same height only if they were
+            // the same file, which is exactly what dedup removed.
             state.queue.enqueue(item.id).await;
+            for &h in heights.resolve(&probe.available_heights).iter().skip(1) {
+                state
+                    .queue
+                    .enqueue_resolution_replacing(item.id, h, Vec::new())
+                    .await;
+            }
             items.push(item);
         }
     }
@@ -588,35 +602,31 @@ pub(super) async fn global_subs(state: &AppState) -> bool {
     }
 }
 
-/// GET /api/settings — runtime-adjustable settings. `max_height` is the current
-/// effective cap (`null` = highest); `max_height_locked` is true when it's
-/// pinned by the `ORCA_MAX_HEIGHT` env var and can't be changed from the UI.
-/// `container` / `subs` follow the same shape, pinned by `ORCA_CONTAINER` /
-/// `ORCA_SUBS` respectively.
+/// GET /api/settings — runtime-adjustable settings.
+///
+/// `max_heights` is the current set of heights to download per item (`[0]` =
+/// highest available, `[]` = stream-only / download nothing);
+/// `max_heights_locked` is true when it's pinned to a single height by the
+/// `ORCA_MAX_HEIGHT` env var and can't be changed from the UI. `container` /
+/// `subs` follow the same shape, pinned by `ORCA_CONTAINER` / `ORCA_SUBS`.
+/// `stream_quality` is the share-bandwidth cap and has no env pin.
 pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> {
     let locked = state.cfg.max_height.is_some();
     let container = global_container(&state).await;
     let subs = global_subs(&state).await;
-    // The stored `max_height` value can be the sentinel "none" — the no-download
-    // ("None" resolution) default, where a submitted URL is kept as a stream-only
-    // record and nothing is fetched. An env-pinned cap can't be "none".
-    let raw = if locked {
-        None
-    } else {
-        state.db.get_setting("max_height").await?
+    let heights = match state.cfg.max_height {
+        // An env pin is necessarily a single height and outranks the stored set.
+        Some(h) => crate::resolution::HeightSet::from_heights(&[h]).unwrap_or_default(),
+        None => match state.db.get_setting("max_heights").await? {
+            Some(csv) => crate::resolution::HeightSet::parse(&csv),
+            None => crate::resolution::HeightSet::parse("0"),
+        },
     };
-    let no_download = raw.as_deref() == Some("none");
-    let max_height = if locked {
-        state.cfg.max_height
-    } else if no_download {
-        None
-    } else {
-        raw.and_then(|v| v.parse::<i64>().ok()).filter(|h| *h > 0)
-    };
+    let stream_quality = global_stream_quality(&state).await;
     Ok(Json(json!({
-        "max_height": max_height,
-        "max_height_locked": locked,
-        "no_download": no_download,
+        "max_heights": heights.heights(),
+        "max_heights_locked": locked,
+        "stream_quality": stream_quality.as_str(),
         "container": container.ext(),
         "container_locked": state.cfg.container_user_set,
         "containers": crate::config::CONTAINERS.iter().map(|c| c.ext()).collect::<Vec<_>>(),
@@ -626,15 +636,29 @@ pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> 
     .into_response())
 }
 
+/// The stored global share-bandwidth cap, or the built-in default.
+async fn global_stream_quality(state: &AppState) -> crate::resolution::StreamQuality {
+    state
+        .db
+        .get_setting("stream_quality")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| crate::resolution::StreamQuality::parse(&v))
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SettingsRequest {
-    /// New max height cap; `null` / 0 means highest (clears the stored setting).
+    /// New set of download heights: `[0]` = highest available, `[]` = download
+    /// nothing (stream-only). Absent = leave as-is — which is why this is
+    /// `Option<Vec<_>>` and not a bare `Vec`: an empty list is a real choice the
+    /// user can make, and it must not be confused with "field not sent".
     #[serde(default)]
-    pub max_height: Option<i64>,
-    /// When true, store the "None" (no-download) default: submitted URLs are kept
-    /// as stream-only records and nothing is downloaded. Overrides `max_height`.
+    pub max_heights: Option<Vec<i64>>,
+    /// New global share-bandwidth cap. Absent = leave as-is.
     #[serde(default)]
-    pub no_download: Option<bool>,
+    pub stream_quality: Option<String>,
     /// New global merge container (`"mkv"`, `"mp4"`, …). Absent = leave as-is.
     #[serde(default)]
     pub container: Option<String>,
@@ -651,27 +675,32 @@ pub async fn put_settings(
     State(state): State<AppState>,
     Json(req): Json<SettingsRequest>,
 ) -> AppResult<Response> {
-    // A body carrying neither key isn't touching the cap at all — only guard and
-    // write when it actually is.
-    if req.max_height.is_some() || req.no_download.is_some() {
+    if let Some(heights) = req.max_heights.as_deref() {
         if state.cfg.max_height.is_some() {
             return Err(AppError::BadRequest(
-                "max_height is pinned by the ORCA_MAX_HEIGHT environment variable".into(),
+                "max_heights is pinned by the ORCA_MAX_HEIGHT environment variable".into(),
             ));
         }
-        // "None" (no-download) wins when set; otherwise a missing / 0 / negative value
-        // is "highest" (clear the setting), and a positive value is the pixel cap.
-        let stored = if req.no_download.unwrap_or(false) {
-            Some("none".to_string())
-        } else {
-            match req.max_height {
-                Some(h) if h > 0 => Some(h.to_string()),
-                _ => None,
-            }
-        };
+        let set = crate::resolution::HeightSet::from_heights(heights)
+            .map_err(AppError::BadRequest)?;
+        // Always store, even for the empty set: "" is the stream-only choice, and
+        // clearing the row instead would silently reinstate the "highest" default.
         state
             .db
-            .set_setting("max_height", stored.as_deref())
+            .set_setting("max_heights", Some(&set.to_csv()))
+            .await?;
+    }
+
+    if let Some(raw) = req.stream_quality.as_deref() {
+        let q = crate::resolution::StreamQuality::parse(raw).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "stream_quality '{raw}' is invalid; valid options: {}",
+                crate::resolution::StreamQuality::valid_list()
+            ))
+        })?;
+        state
+            .db
+            .set_setting("stream_quality", Some(q.as_str()))
             .await?;
     }
 

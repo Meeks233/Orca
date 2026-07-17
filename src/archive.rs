@@ -114,6 +114,77 @@ impl Archive {
         }
         Ok(())
     }
+
+    /// Path of the single previous version kept beside the archive.
+    fn backup_path(&self) -> PathBuf {
+        let mut name = self.inner.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".bak");
+        self.inner.path.with_file_name(name)
+    }
+
+    /// Whether there is a previous version to roll back to.
+    pub async fn has_backup(&self) -> bool {
+        fs::metadata(self.backup_path()).await.is_ok()
+    }
+
+    /// Replace the whole set with `keys`, copying the current version aside first.
+    ///
+    /// The archive decides what Orca will and won't re-download, so a bad hand
+    /// edit is destructive and not otherwise recoverable — the copy is what backs
+    /// the UI's Restore. Returns the number of keys now recorded.
+    pub async fn replace(&self, keys: Vec<String>) -> anyhow::Result<usize> {
+        let mut set = self.inner.set.lock().await;
+        self.snapshot().await?;
+        *set = keys.into_iter().collect();
+        write_sorted(&self.inner.path, &set).await?;
+        Ok(set.len())
+    }
+
+    /// Roll back to the previous version. The version being rolled back *from*
+    /// becomes the new backup, so Restore is itself undoable. Returns the
+    /// restored keys, sorted.
+    pub async fn restore(&self) -> anyhow::Result<Vec<String>> {
+        let backup = self.backup_path();
+        let body = fs::read_to_string(&backup)
+            .await
+            .with_context(|| format!("reading archive backup {}", backup.display()))?;
+        let restored: HashSet<String> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        let mut set = self.inner.set.lock().await;
+        self.snapshot().await?;
+        *set = restored;
+        write_sorted(&self.inner.path, &set).await?;
+
+        let mut keys: Vec<String> = set.iter().cloned().collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Copy the archive as it stands on disk to the backup slot. A missing
+    /// archive (nothing recorded yet) leaves any existing backup alone rather
+    /// than erasing the only recoverable version with an empty one.
+    async fn snapshot(&self) -> anyhow::Result<()> {
+        match fs::read(&self.inner.path).await {
+            Ok(body) => {
+                let backup = self.backup_path();
+                fs::write(&backup, body)
+                    .await
+                    .with_context(|| format!("writing archive backup {}", backup.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("reading archive {} for backup", self.inner.path.display())
+                })
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Write `keys` to `path`, one per line, sorted for deterministic output.
@@ -213,6 +284,77 @@ mod tests {
             after.lines().all(|l| l != "twitter x"),
             "delete frees the key"
         );
+    }
+
+    #[tokio::test]
+    async fn replace_swaps_the_set_and_backs_up_the_previous_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.txt");
+        let archive = Archive::load(&path, vec!["youtube aaa".into(), "youtube bbb".into()])
+            .await
+            .unwrap();
+        assert!(!archive.has_backup().await, "nothing to roll back to yet");
+
+        // A hand edit that drops a key and adds another.
+        let count = archive
+            .replace(vec!["youtube bbb".into(), "twitter ccc".into()])
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        assert!(!archive.contains("youtube aaa").await, "dropped key frees up");
+        assert!(archive.contains("twitter ccc").await);
+        assert_eq!(
+            fs::read_to_string(&path).await.unwrap().lines().collect::<Vec<_>>(),
+            vec!["twitter ccc", "youtube bbb"]
+        );
+
+        // The version that was replaced is recoverable.
+        assert!(archive.has_backup().await);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("archive.txt.bak"))
+                .await
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["youtube aaa", "youtube bbb"]
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_rolls_back_and_is_itself_undoable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.txt");
+        let archive = Archive::load(&path, vec!["youtube aaa".into()]).await.unwrap();
+
+        archive.replace(vec!["twitter ccc".into()]).await.unwrap();
+
+        // Regret medicine: back to the pre-edit version.
+        let keys = archive.restore().await.unwrap();
+        assert_eq!(keys, vec!["youtube aaa".to_string()]);
+        assert!(archive.contains("youtube aaa").await);
+        assert!(!archive.contains("twitter ccc").await);
+        // …and the version we rolled back FROM is now the backup, so a second
+        // Restore returns to it rather than dead-ending.
+        assert_eq!(archive.restore().await.unwrap(), vec!["twitter ccc".to_string()]);
+
+        // The set survives a reload from disk, not just in memory.
+        let reloaded = Archive::load(&path, vec![]).await.unwrap();
+        assert!(reloaded.contains("twitter ccc").await);
+    }
+
+    #[tokio::test]
+    async fn snapshot_of_a_missing_archive_keeps_the_existing_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.txt");
+        let archive = Archive::load(&path, vec!["youtube aaa".into()]).await.unwrap();
+        archive.replace(vec!["youtube bbb".into()]).await.unwrap();
+
+        // Archive file goes missing (wiped volume, manual delete). Replacing must
+        // not overwrite the only recoverable version with an empty snapshot.
+        fs::remove_file(&path).await.unwrap();
+        archive.replace(vec!["youtube ccc".into()]).await.unwrap();
+
+        assert_eq!(archive.restore().await.unwrap(), vec!["youtube aaa".to_string()]);
     }
 
     #[tokio::test]

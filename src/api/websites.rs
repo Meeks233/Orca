@@ -29,8 +29,16 @@ pub struct WebsiteBody {
     pub hosts: Option<String>,
     pub login_url: Option<String>,
     pub enabled: Option<bool>,
-    /// Per-site resolution cap; `0`/negative clears it (follow global).
-    pub max_height: Option<i64>,
+    /// Per-site set of download heights (`[0]` = highest, `[]` = stream-only).
+    /// An empty list is a real choice, so — as with `subs` — clearing back to
+    /// "follow global" needs its own flag rather than `null`.
+    pub max_heights: Option<Vec<i64>>,
+    #[serde(default)]
+    pub max_heights_global: bool,
+    /// Per-site share-bandwidth cap; `stream_quality_global` clears it.
+    pub stream_quality: Option<String>,
+    #[serde(default)]
+    pub stream_quality_global: bool,
     /// Per-site merge container; an empty string clears it (follow global).
     pub container: Option<String>,
     /// Per-site subtitle capture; `null` is indistinguishable from "absent" in
@@ -38,7 +46,6 @@ pub struct WebsiteBody {
     pub subs: Option<bool>,
     #[serde(default)]
     pub subs_global: bool,
-    pub no_download: Option<bool>,
     pub blur: Option<bool>,
     pub sort: Option<i64>,
 }
@@ -58,10 +65,10 @@ pub async fn upsert(
         hosts: Vec::new(),
         login_url: String::new(),
         enabled: true,
-        max_height: None,
+        max_heights: None,
+        stream_quality: None,
         container: None,
         subs: None,
-        no_download: false,
         blur: false,
         sort: 999,
         cookie: None,
@@ -79,10 +86,35 @@ pub async fn upsert(
         hosts,
         login_url: body.login_url.unwrap_or(base.login_url),
         enabled: body.enabled.unwrap_or(base.enabled),
-        max_height: match body.max_height {
-            Some(h) if h > 0 => Some(h),
-            Some(_) => None, // 0/negative explicitly clears the per-site cap
-            None => base.max_height,
+        max_heights: if body.max_heights_global {
+            None // explicitly back to "follow global"
+        } else {
+            match body.max_heights.as_deref() {
+                Some(hs) => Some(
+                    crate::resolution::HeightSet::from_heights(hs)
+                        .map_err(AppError::BadRequest)?
+                        .to_csv(),
+                ),
+                None => base.max_heights,
+            }
+        },
+        stream_quality: if body.stream_quality_global {
+            None
+        } else {
+            match body.stream_quality.as_deref() {
+                Some(raw) => Some(
+                    crate::resolution::StreamQuality::parse(raw)
+                        .ok_or_else(|| {
+                            AppError::BadRequest(format!(
+                                "stream_quality '{raw}' is invalid; valid options: {}",
+                                crate::resolution::StreamQuality::valid_list()
+                            ))
+                        })?
+                        .as_str()
+                        .to_string(),
+                ),
+                None => base.stream_quality,
+            }
         },
         container: match body.container.as_deref().map(str::trim) {
             // Empty string explicitly clears the per-site container.
@@ -106,7 +138,6 @@ pub async fn upsert(
             // Absent means "leave as-is"; present means pin it on/off.
             body.subs.or(base.subs)
         },
-        no_download: body.no_download.unwrap_or(base.no_download),
         blur: body.blur.unwrap_or(base.blur),
         sort: body.sort.unwrap_or(base.sort),
         cookie: None,

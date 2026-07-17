@@ -171,8 +171,16 @@ pub struct Website {
     pub hosts: Vec<String>,
     pub login_url: String,
     pub enabled: bool,
-    /// Per-site resolution cap; `None` follows the global `max_height` setting.
-    pub max_height: Option<i64>,
+    /// Per-site set of download heights as CSV (see `crate::resolution::HeightSet`);
+    /// `None` follows the global `max_heights` setting. `Some("")` is the empty
+    /// set — stream-only, no local files — which is why this is the sole source
+    /// of truth for what used to be the separate `no_download` flag.
+    #[serde(default)]
+    pub max_heights: Option<String>,
+    /// Per-site share-bandwidth cap (`"lowest"`/`"lower"`/`"higher"`/`"highest"`);
+    /// `None` follows the global `stream_quality` setting.
+    #[serde(default)]
+    pub stream_quality: Option<String>,
     /// Per-site merge container (`"mkv"`, `"mp4"`, …); `None` follows the global
     /// container setting.
     #[serde(default)]
@@ -180,9 +188,6 @@ pub struct Website {
     /// Per-site subtitle capture; `None` follows the global `subs` setting.
     #[serde(default)]
     pub subs: Option<bool>,
-    /// Per-site stream-only default (no local downloads for this site).
-    #[serde(default)]
-    pub no_download: bool,
     /// Per-site privacy blur: when set, this site's cards are blurred by default
     /// in the history and revealed on hover (web) / tap (app).
     #[serde(default)]

@@ -20,14 +20,34 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 
 private const val NOTIFICATIONS = "notifications"
+private const val STORAGE = "storage"
 
 @InvokeArg
 class SlugArgs {
   var slug: String? = null
 }
 
+@InvokeArg
+class SaveArgs {
+  var url: String? = null
+  var name: String? = null
+  /** Item slug, so the saved file can be found again for local playback. */
+  var slug: String? = null
+  /** Pixel height being saved; 0 when unknown. Lets a later, taller save
+   *  recognise itself as an upgrade of this one. */
+  var height: Int = 0
+}
+
+@InvokeArg
+class HideArgs {
+  var hidden: Boolean = false
+}
+
 @TauriPlugin(
-  permissions = [Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = NOTIFICATIONS)]
+  permissions = [
+    Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = NOTIFICATIONS),
+    Permission(strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE], alias = STORAGE),
+  ]
 )
 class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
   private fun notificationsGranted(): Boolean =
@@ -43,6 +63,8 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
   private fun statusObject(): JSObject = JSObject().apply {
     put("notifications", notificationsGranted())
     put("background", backgroundGranted())
+    put("storage", MediaSaver.granted(activity))
+    put("hideDownloads", MediaSaver.isHidden(activity))
   }
 
   @Command
@@ -117,6 +139,126 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve(statusObject())
   }
 
+  /**
+   * Ask for permission to write shared storage.
+   *
+   * On API 30+ "All files access" is NOT a runtime dialog — the only way to get
+   * it is to send the user to a Settings screen and re-check on resume. On 28/29
+   * it is an ordinary runtime grant. Returning the (unchanged) status here is
+   * correct in the Settings case: the frontend re-reads status on resume, which
+   * is when the real answer arrives.
+   */
+  @Command
+  fun requestStorage(invoke: Invoke) {
+    if (MediaSaver.granted(activity)) {
+      invoke.resolve(statusObject())
+      return
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      openAllFilesAccessSettings()
+      invoke.resolve(statusObject())
+      return
+    }
+
+    // Same "already permanently denied" guard as notifications: once the OS
+    // stops showing the dialog, a request is a no-op, so go to Settings instead
+    // of leaving the button looking broken.
+    val prefs = activity.getSharedPreferences("orca_permissions", Context.MODE_PRIVATE)
+    val requestedBefore = prefs.getBoolean("storage_requested", false)
+    if (requestedBefore &&
+      !activity.shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    ) {
+      openAppDetailsSettings()
+      invoke.resolve(statusObject())
+      return
+    }
+    prefs.edit().putBoolean("storage_requested", true).apply()
+    requestPermissionForAlias(STORAGE, invoke, "storageCallback")
+  }
+
+  @PermissionCallback
+  private fun storageCallback(invoke: Invoke) {
+    if (!MediaSaver.granted(activity) &&
+      !activity.shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    ) {
+      openAppDetailsSettings()
+    }
+    invoke.resolve(statusObject())
+  }
+
+  /**
+   * Save a finished item to shared storage. Handed to [DownloadService] rather
+   * than done here: the transfer must not run on the main thread, and must
+   * outlive the WebView being backgrounded.
+   */
+  @Command
+  fun saveMedia(invoke: Invoke) {
+    val args = invoke.parseArgs(SaveArgs::class.java)
+    val url = args.url
+    if (url.isNullOrEmpty()) {
+      invoke.reject("missing url")
+      return
+    }
+    if (!MediaSaver.granted(activity)) {
+      invoke.reject("storage_denied")
+      return
+    }
+    DownloadService.save(activity, url, args.name.orEmpty(), args.slug.orEmpty(), args.height)
+    invoke.resolve(statusObject())
+  }
+
+  /**
+   * Where an item's local copy lives, or null if we don't have one. Backs the
+   * player's "play the file on this device rather than stream it back from the
+   * server" path.
+   */
+  @Command
+  fun localFile(invoke: Invoke) {
+    val slug = invoke.parseArgs(SlugArgs::class.java).slug
+    if (slug.isNullOrEmpty()) {
+      invoke.reject("missing slug")
+      return
+    }
+    // Not gated on the storage permission: a file we saved while permitted stays
+    // readable, and refusing to report it would strand playback if the grant is
+    // later revoked.
+    val local = MediaSaver.localFile(activity, slug)
+    if (local == null) {
+      invoke.resolve(JSObject())
+      return
+    }
+    invoke.resolve(JSObject().apply {
+      put("path", local.path)
+      put("height", local.height)
+      // The URL is what the player actually uses; `path` is retained for
+      // diagnostics. See LocalMediaServer for why a plain asset:// URL can't work.
+      put("url", LocalMediaServer.urlFor(activity, slug).orEmpty())
+    })
+  }
+
+  /**
+   * Flip the hidden-folder setting, migrating everything already saved. The move
+   * is filesystem work, so it runs off the main thread; the frontend awaits the
+   * resolve to report how many files moved.
+   */
+  @Command
+  fun setHideDownloads(invoke: Invoke) {
+    val hidden = invoke.parseArgs(HideArgs::class.java).hidden
+    if (!MediaSaver.granted(activity)) {
+      invoke.reject("storage_denied")
+      return
+    }
+    Thread {
+      try {
+        val moved = MediaSaver.setHidden(activity, hidden)
+        invoke.resolve(statusObject().apply { put("moved", moved) })
+      } catch (e: Exception) {
+        invoke.reject(e.message ?: "could not move downloads")
+      }
+    }.start()
+  }
+
   @Command
   fun requestBackground(invoke: Invoke) {
     if (!backgroundGranted()) {
@@ -136,17 +278,43 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve(statusObject())
   }
 
+  /**
+   * The API 30+ "All files access" screen, targeted at this app. The generic
+   * list (no package uri) is the documented fallback for OEM builds that reject
+   * the targeted intent — the user then picks Orca from the list themselves.
+   */
+  private fun openAllFilesAccessSettings() {
+    try {
+      activity.startActivity(
+        Intent(
+          Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+          Uri.parse("package:${activity.packageName}"),
+        )
+      )
+    } catch (_: Exception) {
+      try {
+        activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+      } catch (_: Exception) {
+        openAppDetailsSettings()
+      }
+    }
+  }
+
+  private fun openAppDetailsSettings() {
+    try {
+      activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+        data = Uri.parse("package:${activity.packageName}")
+      })
+    } catch (_: Exception) { /* The returned status remains authoritative. */ }
+  }
+
   private fun openNotificationSettings() {
     try {
       activity.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
         putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
       })
     } catch (_: Exception) {
-      try {
-        activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-          data = Uri.parse("package:${activity.packageName}")
-        })
-      } catch (_: Exception) { /* The returned status remains authoritative. */ }
+      openAppDetailsSettings()
     }
   }
 }

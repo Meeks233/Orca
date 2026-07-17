@@ -72,6 +72,20 @@ class DownloadService : Service() {
       Thread { submitAndTrack(url) }.start()
     }
 
+    // "Save to device": copy a finished item out of the server and into shared
+    // storage. Runs here, not on a bare thread in the WebView, so a multi-minute
+    // save of a large video survives the user leaving the app.
+    val saveUrl = intent?.getStringExtra(EXTRA_SAVE_URL)?.takeIf { it.isNotEmpty() }
+    if (saveUrl != null) {
+      val name = intent.getStringExtra(EXTRA_SAVE_NAME).orEmpty()
+      // Not `slug`: that name is taken above by the download being *tracked*,
+      // which is a different item from the one being saved.
+      val saveSlug = intent.getStringExtra(EXTRA_SAVE_SLUG).orEmpty()
+      val height = intent.getIntExtra(EXTRA_SAVE_HEIGHT, 0)
+      submitting.incrementAndGet()
+      Thread { saveToDevice(saveUrl, name, saveSlug, height) }.start()
+    }
+
     if (tracked.isEmpty() && submitting.get() == 0) stopSelf()
     // Re-delivering a stale intent would resurrect finished downloads; the app
     // re-tracks anything still running on next launch.
@@ -264,6 +278,45 @@ class DownloadService : Service() {
     }
   }
 
+  /**
+   * Stream one finished item into shared storage, reporting progress in its own
+   * notification. Every outcome is surfaced: a silent failure here is exactly
+   * the bug this feature exists to fix.
+   */
+  private fun saveToDevice(url: String, name: String, slug: String, height: Int) {
+    val notif = SAVE_NOTIF_BASE + (url.hashCode() and 0x0ffffff)
+    val title = name.ifEmpty { "Orca" }
+    try {
+      if (!MediaSaver.granted(applicationContext)) {
+        // Should be unreachable (the UI gates on the same check), but a grant can
+        // be revoked between the check and the tap.
+        postNotif(applicationContext, notif, title, "Storage permission needed", null, false, -1)
+        toast(applicationContext, "Orca · Allow storage access to save downloads")
+        return
+      }
+      postNotif(applicationContext, notif, title, "Saving to device…", null, true, 0)
+      var lastShown = -1
+      val saved = MediaSaver.save(applicationContext, url, name, slug, height) { pct ->
+        // Repaint at most once per whole percent (MediaSaver already dedupes)
+        // and never re-alert — a progress bar that buzzes is a bug.
+        if (pct != lastShown) {
+          lastShown = pct
+          postNotif(applicationContext, notif, title, "Saving to device… $pct%", null, true, pct)
+        }
+      }
+      val folder = saved.parentFile?.name ?: MediaSaver.VISIBLE_DIR
+      postNotif(applicationContext, notif, title, "Saved to Downloads/$folder", null, false, -1)
+      toast(applicationContext, "Orca · Saved to Downloads/$folder")
+    } catch (e: Exception) {
+      Log.e(TAG, "save failed", e)
+      val why = e.message ?: "Save failed"
+      postNotif(applicationContext, notif, title, why, null, false, -1)
+      toast(applicationContext, "Orca · Save failed: $why")
+    } finally {
+      if (submitting.decrementAndGet() == 0 && tracked.isEmpty()) stopSelf()
+    }
+  }
+
   private fun postItem(slug: String, title: String, body: String, pct: Int, ongoing: Boolean) {
     // Skip a redundant re-post: identical text would be a no-op repaint.
     val key = "$title|$body|$pct|$ongoing"
@@ -298,7 +351,13 @@ class DownloadService : Service() {
    */
   private fun summaryNotification(): Notification {
     val n = tracked.size
-    val text = if (n == 1) "Downloading 1 item" else "Downloading $n items"
+    // The service also runs saves/submits, which track nothing. Claiming
+    // "Downloading 0 items" while one of those is in flight reads as a bug.
+    val text = when {
+      n == 1 -> "Downloading 1 item"
+      n > 1 -> "Downloading $n items"
+      else -> "Working…"
+    }
     return builder(applicationContext)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentTitle("Orca")
@@ -318,10 +377,18 @@ class DownloadService : Service() {
     private const val SUMMARY_ID = 199999
     private const val EXTRA_SLUG = "orca.slug"
     private const val EXTRA_URL = "orca.url"
+    private const val EXTRA_SAVE_URL = "orca.saveUrl"
+    private const val EXTRA_SAVE_NAME = "orca.saveName"
+    private const val EXTRA_SAVE_SLUG = "orca.saveSlug"
+    private const val EXTRA_SAVE_HEIGHT = "orca.saveHeight"
 
     /** Notification id namespace: one stable slot per item, derived from its
      *  private slug, so progress updates replace in place instead of stacking. */
     private const val NOTIF_BASE = 200000
+
+    /** Separate slot per save, so a save's progress can't overwrite the
+     *  download-progress notification for the same item. */
+    private const val SAVE_NOTIF_BASE = 300000
     private const val POLL_MS = 2000L
 
     /** ~10 min of polling per item at [POLL_MS]. */
@@ -418,6 +485,24 @@ class DownloadService : Service() {
     fun submit(ctx: Context, url: String) {
       if (url.isEmpty()) return
       start(ctx, Intent(ctx, DownloadService::class.java).putExtra(EXTRA_URL, url))
+    }
+
+    /**
+     * Save a finished item's file into shared storage. `url` is the same
+     * tokenised `/file?download=1` link the browser would have followed;
+     * `name` is a human title used only if the server sends no filename.
+     * Must be called from a foreground context (see [track]).
+     */
+    fun save(ctx: Context, url: String, name: String, slug: String = "", height: Int = 0) {
+      if (url.isEmpty()) return
+      start(
+        ctx,
+        Intent(ctx, DownloadService::class.java)
+          .putExtra(EXTRA_SAVE_URL, url)
+          .putExtra(EXTRA_SAVE_NAME, name)
+          .putExtra(EXTRA_SAVE_SLUG, slug)
+          .putExtra(EXTRA_SAVE_HEIGHT, height),
+      )
     }
 
     /**

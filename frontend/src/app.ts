@@ -51,6 +51,9 @@ interface LogEntry {
   url: string;
   platform: string;
   message: string;
+  /// Whose fault it was, classified by the backend (errlog::classify): "warn" =
+  /// a dead end the user drove into, "error" = Orca broke. Older servers omit it.
+  severity?: 'warn' | 'error';
 }
 
 // Typed getElementById: every id below is present in index.html.
@@ -205,29 +208,33 @@ const els = {
   siteEditHosts: byId<HTMLTextAreaElement>('site-edit-hosts'),
   siteEditErr: byId('site-edit-err'),
   token: byId<HTMLInputElement>('token'),
-  tokenSave: byId<HTMLButtonElement>('token-save'),
   tokenHint: byId('token-hint'),
   server: byId<HTMLInputElement>('server'),
-  serverSave: byId<HTMLButtonElement>('server-save'),
   permRow: byId('perm-row'),
+  hideDlRow: byId('hide-dl-row'),
+  hideDlToggle: byId<HTMLButtonElement>('hide-dl-toggle'),
+  hideDlNeedsPerm: byId('hide-dl-needs-perm'),
   permissionsPrompt: byId('permissions-prompt'),
   permissionsPromptClose: byId<HTMLButtonElement>('permissions-prompt-close'),
   permissionsPromptLater: byId<HTMLButtonElement>('permissions-prompt-later'),
   permissionsPromptNever: byId<HTMLButtonElement>('permissions-prompt-never'),
-  maxRes: byId<HTMLSelectElement>('max-res'),
-  maxResSave: byId<HTMLButtonElement>('max-res-save'),
-  maxResHint: byId('max-res-hint'),
+  // The four global-default rows are containers now, not controls: JS fills each
+  // with the same markup the site cards use, so the two can't drift apart.
+  sitesGlobal: document.querySelector<HTMLElement>('.sites-global')!,
+  maxRes: byId('max-res'),
   maxResLocked: byId('max-res-locked'),
-  format: byId<HTMLSelectElement>('format'),
-  formatSave: byId<HTMLButtonElement>('format-save'),
+  streamQuality: byId('stream-quality'),
+  format: byId('format'),
   formatLocked: byId('format-locked'),
-  subsToggle: byId<HTMLButtonElement>('subs-toggle'),
-  subsSave: byId<HTMLButtonElement>('subs-save'),
+  subs: byId('subs'),
   subsLocked: byId('subs-locked'),
   pasteBtn: byId<HTMLButtonElement>('paste-btn'),
   toTop: byId<HTMLButtonElement>('to-top'),
   sealArchive: byId<HTMLTextAreaElement>('seal-archive'),
-  sealImport: byId<HTMLButtonElement>('seal-import'),
+  archiveRestore: byId<HTMLButtonElement>('archive-restore'),
+  settingsSaveBar: byId('settings-save-bar'),
+  settingsSave: byId<HTMLButtonElement>('settings-save'),
+  settingsRevert: byId<HTMLButtonElement>('settings-revert'),
   logList: byId('log-list'),
   logEmpty: byId('log-empty'),
   logsRefresh: byId<HTMLButtonElement>('logs-refresh'),
@@ -257,11 +264,12 @@ const els = {
   selClean: byId<HTMLButtonElement>('sel-clean'),
   selDelete: byId<HTMLButtonElement>('sel-delete'),
   selCancel: byId<HTMLButtonElement>('sel-cancel'),
-  deleteConfirm: byId('delete-confirm'),
-  deleteConfirmSub: byId('delete-confirm-sub'),
-  deleteConfirmClose: byId<HTMLButtonElement>('delete-confirm-close'),
-  deleteConfirmCancel: byId<HTMLButtonElement>('delete-confirm-cancel'),
-  deleteConfirmYes: byId<HTMLButtonElement>('delete-confirm-yes'),
+  confirmBox: byId('confirm'),
+  confirmTitle: byId('confirm-title'),
+  confirmSub: byId('confirm-sub'),
+  confirmClose: byId<HTMLButtonElement>('confirm-close'),
+  confirmCancel: byId<HTMLButtonElement>('confirm-cancel'),
+  confirmYes: byId<HTMLButtonElement>('confirm-yes'),
   batchShare: byId('batch-share'),
   batchShareSub: byId('batch-share-sub'),
   batchShareConfirm: byId<HTMLButtonElement>('batch-share-confirm'),
@@ -284,9 +292,7 @@ const els = {
   shareCancel: byId('share-cancel-confirm'),
   shareCancelBack: byId<HTMLButtonElement>('share-cancel-back'),
   shareCancelYes: byId<HTMLButtonElement>('share-cancel-yes'),
-  langToggle: byId<HTMLButtonElement>('lang-toggle'),
-  langMenu: byId('lang-menu'),
-  themeToggle: byId<HTMLButtonElement>('theme-toggle'),
+  langSelect: byId<HTMLSelectElement>('lang-select'),
   themeColorMeta: byId<HTMLMetaElement>('theme-color-meta'),
   serverStatus: byId('server-status'),
   dlStats: byId('dl-stats'),
@@ -528,7 +534,7 @@ function hitsHtml(item: Item): string {
   if (!item.public) return '';
   const n = item.public_hits || 0;
   if (n <= 0) return '';
-  return `<span class="hits" title="External link accesses">${EYE_SVG}<span class="hits-n">${n}</span></span>`;
+  return `<span class="chip" title="External link accesses">${EYE_SVG}<span class="hits-n">${n}</span></span>`;
 }
 
 // A file-size capsule at the LEFT of a card's action row (e.g. "20.4 MB").
@@ -547,7 +553,7 @@ function metaChipsHtml(item: Item): string {
 function metaChip(res: string, size: string): string {
   const parts = [res, size].filter(Boolean);
   if (!parts.length) return '';
-  return `<span class="meta-chip">${esc(parts.join(' | '))}</span>`;
+  return `<span class="chip">${esc(parts.join(' | '))}</span>`;
 }
 
 // Stacked "layers" glyph — the industry-standard affordance for "multiple
@@ -566,7 +572,7 @@ function resButtonHtml(item: Item): string {
   if (item.height && item.height > 0) label = resLabel(item.height);
   else if (!item.local_available) label = t('res.noneLabel');
   const labelSpan = label ? `<span class="res-btn-label">${esc(label)}</span>` : '';
-  return `<button class="act res-btn" data-act="resolutions" data-id="${item.id}" aria-label="${esc(t('res.pick'))}" title="${esc(t('res.pick'))}">${LAYERS_SVG}${labelSpan}</button>`;
+  return `<button class="chip chip-btn" data-act="resolutions" data-id="${item.id}" aria-label="${esc(t('res.pick'))}" title="${esc(t('res.pick'))}">${LAYERS_SVG}${labelSpan}</button>`;
 }
 
 function actionsHtml(item: Item): string {
@@ -574,7 +580,7 @@ function actionsHtml(item: Item): string {
   // of the Save button — but right of the size chip + resolution button) so any
   // item — queued, running, failed or completed — can be removed. It always
   // routes through the confirm dialog (openDeleteConfirm).
-  const del = `<button class="act act-icon act-del" data-act="delete" data-id="${item.id}" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>`;
+  const del = `<button class="act act-del" data-act="delete" data-id="${item.id}" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>`;
   // Save / share only make sense for a completed item with a file. Local file
   // present: Save (download icon) + Share icon. Local file gone (backed away):
   // plays from upstream, no save/share. Sharing state lives in the share dialog.
@@ -583,9 +589,9 @@ function actionsHtml(item: Item): string {
     const local = !!item.local_available;
     const pub = !!item.public;
     mediaActions = local
-      ? `<a class="act act-icon act-save" href="${fileUrl(item, true)}" download aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
-      <button class="act act-icon act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
-      : `<span class="act act-cloud" title="Streams from source — no local copy">${esc(t('cloud.only'))}</span>`;
+      ? `<a class="act act-save" href="${fileUrl(item, true)}" download data-id="${item.id}" aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
+      <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
+      : `<span class="chip act-cloud" title="Streams from source — no local copy">${esc(t('cloud.only'))}</span>`;
   }
   // Order: size chip · resolution button · delete · save/share.
   return `<div class="actions">${metaChipsHtml(item)}${resButtonHtml(item)}${del}${mediaActions}</div>`;
@@ -817,8 +823,8 @@ function updateGroupHeader(gkey: string): void {
     ? `<button class="play-badge group-play" data-act="play-list" aria-label="${esc(t('group.playAll'))}" title="${esc(t('group.playAll'))}">${PLAY_ICON}</button>`
     : '';
   const dlShare = items.some((it) => isPlayable(it) && it.local_available)
-    ? `<button class="act act-icon" data-act="dl-list" aria-label="${esc(t('group.downloadAll'))}" title="${esc(t('group.downloadAll'))}">${DOWNLOAD_SVG}</button>
-        <button class="act act-icon" data-act="share-list" aria-label="${esc(t('group.shareAll'))}" title="${esc(t('group.shareAll'))}">${SHARE_SVG}</button>`
+    ? `<button class="act" data-act="dl-list" aria-label="${esc(t('group.downloadAll'))}" title="${esc(t('group.downloadAll'))}">${DOWNLOAD_SVG}</button>
+        <button class="act" data-act="share-list" aria-label="${esc(t('group.shareAll'))}" title="${esc(t('group.shareAll'))}">${SHARE_SVG}</button>`
     : '';
   // Aggregate size of the whole post, shown left of the list actions (mirrors
   // the per-video size chip). Dropped when no child has a known size yet.
@@ -826,7 +832,7 @@ function updateGroupHeader(gkey: string): void {
   const sizeChip = metaChip('', fmtSize(totalBytes));
   const listActions = `<div class="actions group-actions">
         ${sizeChip}
-        <button class="act act-icon act-del" data-act="del-list" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>
+        <button class="act act-del" data-act="del-list" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>
         ${dlShare}
       </div>`;
   const head = g.li.querySelector('.group-head') as HTMLElement;
@@ -1004,7 +1010,13 @@ function patchRow(ev: ProgressEv): void {
       badge?.classList.add('flash');
       apiFetch(itemPath(ev.id))
         .then((r) => (r.ok ? r.json() : null))
-        .then((it) => { if (it) upsertRow(it, false); })
+        .then((it) => {
+          if (!it) return;
+          upsertRow(it, false);
+          // The server now holds the taller file this item was upgraded for —
+          // pull it down to replace the local copy (see pendingLocalUpgrade).
+          runPendingLocalUpgrade(it);
+        })
         .catch(() => { /* ignore */ });
       loadStats(); // a fresh file changes the total-downloaded readout
     }
@@ -1253,12 +1265,15 @@ interface Website {
   hosts: string[];
   login_url: string;
   enabled: boolean;
-  max_height: number | null;
+  /// Per-site download heights as CSV; null = follow the global default, ''
+  /// = the empty set (stream-only, download nothing).
+  max_heights: string | null;
+  /// Per-site share-bandwidth cap; null = follow the global default.
+  stream_quality: string | null;
   /// Per-site container; null = follow the global default.
   container: string | null;
   /// Per-site subtitle capture; null = follow the global default.
   subs: boolean | null;
-  no_download: boolean;
   blur: boolean;
   sort: number;
   cookie?: CookieStatus;
@@ -1304,20 +1319,186 @@ let siteQuery = '';
 let siteSelectMode = false;
 const siteSelected = new Set<string>();
 
-// The per-site maximum-resolution ladder, offered as a single dropdown (not a chip
-// row): one unambiguous "cap" control per card.
-const SITE_RES_LADDER = [4320, 2160, 1440, 1080, 720, 480, 360];
+// The maximum-resolution ladder, mirroring the backend's HEIGHT_LADDER. `0` is
+// the "highest available" sentinel — a distinct intent from any concrete height,
+// so it is an option rather than an absence of one.
+const RES_LADDER = [0, 4320, 2160, 1440, 1080, 720, 480, 360];
+
+// ---- Multi-select ----------------------------------------------------------
+// Resolution is a *set*: picking {1080, 480} downloads both copies. A native
+// <select multiple> renders as an always-open scrolling listbox that would dwarf
+// every other row, and a chip row for 8 options wraps to three lines — so this is
+// the pattern the rest of the industry converged on (Linear/GitHub/Notion): a
+// trigger that looks exactly like the neighbouring <select>, summarising the
+// selection on ONE line, opening a checkable popover on click.
+//
+// Emits a bubbling `multiselect-change` CarrierEvent so the global row and the
+// site cards share this one implementation and only differ in what they persist.
+interface MultiSelectOpts {
+  act: string;               // routing key, read back off the element
+  heights: number[] | null;  // null = follow global (per-site only)
+  followable: boolean;       // cards offer "Follow global"; the global itself can't
+  ariaLabel: string;
+  disabled?: boolean;
+}
+
+/** Short label for the trigger — long enough to identify, short enough to fit. */
+function heightLabel(h: number): string {
+  return h > 0 ? resLabel(h) || h + 'p' : t('res.highestShort');
+}
+
+/** Full label for the menu, where there's room to be unambiguous. */
+function heightOptLabel(h: number): string {
+  return h > 0 ? `${resLabel(h) || h + 'p'}${h >= 1440 ? ` (${h}p)` : ''}` : t('res.highest');
+}
+
+/**
+ * One-line summary of the selection. Never lists more than the tallest pick: the
+ * point of the control is to be readable at a glance, and "1080p +2" answers
+ * "what will this download" without the reader parsing a list.
+ */
+function multiSelectSummary(heights: number[] | null): string {
+  if (heights === null) return t('sites.followGlobal');
+  const [tallest, ...rest] = heights;
+  if (tallest === undefined) return t('res.noneLabel');
+  return rest.length ? `${heightLabel(tallest)} +${rest.length}` : heightLabel(tallest);
+}
+
+function multiSelectHtml(o: MultiSelectOpts): string {
+  const sel = o.heights;
+  const follow = sel === null;
+  const opt = (value: string, label: string, on: boolean): string =>
+    `<button type="button" class="multiselect-opt" role="option" data-value="${value}" aria-selected="${on}">${esc(label)}</button>`;
+  const opts: string[] = [];
+  if (o.followable) {
+    opts.push(opt('global', t('sites.followGlobal'), follow));
+    opts.push('<div class="multiselect-sep" role="separator"></div>');
+  }
+  for (const h of RES_LADDER) {
+    opts.push(opt(String(h), heightOptLabel(h), !follow && sel.includes(h)));
+  }
+  return `<div class="multiselect" data-act="${o.act}">
+    <button type="button" class="select site-res-select multiselect-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="${esc(o.ariaLabel)}"${o.disabled ? ' disabled' : ''}>
+      <span class="multiselect-value">${esc(multiSelectSummary(sel))}</span>
+    </button>
+    <div class="multiselect-menu hidden" role="listbox" aria-multiselectable="true">${opts.join('')}</div>
+  </div>`;
+}
+
+/** Read the current selection back out of the DOM. `null` = follow global. */
+function multiSelectValue(root: HTMLElement): number[] | null {
+  const opts = Array.from(root.querySelectorAll<HTMLElement>('.multiselect-opt'));
+  const followOn = opts.some((o) => o.dataset.value === 'global' && o.getAttribute('aria-selected') === 'true');
+  if (followOn) return null;
+  return opts
+    .filter((o) => o.dataset.value !== 'global' && o.getAttribute('aria-selected') === 'true')
+    .map((o) => Number(o.dataset.value))
+    // Descending, but HIGHEST (0) first — mirrors the backend's ordering so the
+    // summary names the same "tallest" the server will treat as primary.
+    .sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : b - a));
+}
+
+function closeMultiSelects(except?: Element): void {
+  document.querySelectorAll<HTMLElement>('.multiselect').forEach((m) => {
+    if (m === except) return;
+    m.querySelector('.multiselect-menu')?.classList.add('hidden');
+    m.querySelector('.multiselect-trigger')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+/** Repaint a multi-select in place (after a save echo or a failed write). */
+function setMultiSelect(root: HTMLElement, heights: number[] | null): void {
+  const follow = heights === null;
+  root.querySelectorAll<HTMLElement>('.multiselect-opt').forEach((o) => {
+    const v = o.dataset.value;
+    const on = v === 'global' ? follow : !follow && heights.includes(Number(v));
+    o.setAttribute('aria-selected', String(on));
+  });
+  const value = root.querySelector('.multiselect-value');
+  if (value) value.textContent = multiSelectSummary(heights);
+}
+
+document.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+  const root = target.closest('.multiselect') as HTMLElement | null;
+  if (!root) { closeMultiSelects(); return; }
+
+  const trigger = target.closest('.multiselect-trigger') as HTMLButtonElement | null;
+  if (trigger) {
+    if (trigger.disabled) return;
+    const menu = root.querySelector('.multiselect-menu') as HTMLElement;
+    const open = menu.classList.contains('hidden');
+    closeMultiSelects(root);
+    menu.classList.toggle('hidden', !open);
+    trigger.setAttribute('aria-expanded', String(open));
+    return;
+  }
+
+  const opt = target.closest('.multiselect-opt') as HTMLElement | null;
+  if (!opt) return;
+  // "Follow global" is a mode, not a member: choosing it clears the set, and
+  // choosing any height leaves it. The menu stays open on a height so several can
+  // be picked in one visit — closing after each would make picking three
+  // resolutions a three-trip errand.
+  if (opt.dataset.value === 'global') {
+    setMultiSelect(root, null);
+    closeMultiSelects();
+  } else {
+    const current = multiSelectValue(root) ?? [];
+    const h = Number(opt.dataset.value);
+    const next = current.includes(h) ? current.filter((x) => x !== h) : current.concat(h);
+    setMultiSelect(root, next.sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : b - a)));
+  }
+  root.dispatchEvent(new CustomEvent('multiselect-change', {
+    bubbles: true,
+    detail: { act: root.dataset.act, heights: multiSelectValue(root) },
+  }));
+});
+
+// Escape closes the open popover before the modal's own Escape handler would
+// close the whole sheet — dismissing a menu should not also discard the screen.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const open = document.querySelector('.multiselect .multiselect-menu:not(.hidden)');
+  if (!open) return;
+  e.stopPropagation();
+  closeMultiSelects();
+});
 
 function siteResSelectHtml(w: Website): string {
-  // Current value: 'none' (stream-only) → a pinned height → 'global' (follow the
-  // global default). The <select> is the whole control; `data-act="res"` routes its
-  // change event.
-  const active = w.no_download ? 'none' : (w.max_height && w.max_height > 0 ? String(w.max_height) : 'global');
+  return multiSelectHtml({
+    act: 'res',
+    heights: w.max_heights === null || w.max_heights === undefined
+      ? null
+      : parseHeights(w.max_heights),
+    followable: true,
+    ariaLabel: t('sites.maxRes'),
+  });
+}
+
+/** CSV → heights, mirroring the backend's HeightSet::parse leniency. */
+function parseHeights(csv: string): number[] {
+  return csv
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && RES_LADDER.includes(n));
+}
+
+// The share-bandwidth tiers, mirroring the backend's STREAM_QUALITIES. Named in
+// tiers rather than pixel heights because it's a policy applied across sources
+// whose ladders differ.
+const STREAM_QUALITIES: Array<[string, string]> = [
+  ['lowest', 'stream.lowest'], ['lower', 'stream.lower'],
+  ['higher', 'stream.higher'], ['highest', 'stream.highest'],
+];
+
+function siteStreamSelectHtml(w: Website): string {
+  const active = w.stream_quality || '';
   const opt = (val: string, label: string): string =>
     `<option value="${val}"${active === val ? ' selected' : ''}>${esc(label)}</option>`;
-  const opts = [opt('global', t('sites.followGlobal')), opt('none', t('res.noneLabel'))]
-    .concat(SITE_RES_LADDER.map((h) => opt(String(h), resLabel(h) || h + 'p')));
-  return `<select class="select site-res-select" data-act="res" aria-label="${esc(t('sites.maxRes'))}">${opts.join('')}</select>`;
+  const opts = [opt('', t('sites.followGlobal'))]
+    .concat(STREAM_QUALITIES.map(([val, key]) => opt(val, t(key))));
+  return `<select class="select site-res-select" data-act="stream" aria-label="${esc(t('settings.streamQuality'))}">${opts.join('')}</select>`;
 }
 
 // The containers offered per site, mirroring the global picker's list (and the
@@ -1412,30 +1593,34 @@ function websiteCardHtml(w: Website): string {
       ${siteMenuHtml(w)}
     </div>
     <div class="site-settings">
-      <div class="site-row">
-        <span class="site-row-label">${esc(t('sites.maxRes'))}</span>
-        <div class="site-row-ctl">${siteResSelectHtml(w)}</div>
+      <div class="form-row">
+        <span class="form-row-label">${esc(t('sites.maxRes'))}</span>
+        <div class="form-row-ctl">${siteResSelectHtml(w)}</div>
       </div>
-      <div class="site-row">
-        <span class="site-row-label">${esc(t('sites.format'))}</span>
-        <div class="site-row-ctl">${siteFormatSelectHtml(w)}</div>
+      <div class="form-row">
+        <span class="form-row-label">${esc(t('settings.streamQuality'))}</span>
+        <div class="form-row-ctl">${siteStreamSelectHtml(w)}</div>
       </div>
-      <div class="site-row">
-        <span class="site-row-label">${esc(t('sites.subs'))}</span>
-        <div class="site-row-ctl">${siteSubsSelectHtml(w)}</div>
+      <div class="form-row">
+        <span class="form-row-label">${esc(t('sites.format'))}</span>
+        <div class="form-row-ctl">${siteFormatSelectHtml(w)}</div>
       </div>
-      <div class="site-row">
-        <span class="site-row-label">
+      <div class="form-row">
+        <span class="form-row-label">${esc(t('sites.subs'))}</span>
+        <div class="form-row-ctl">${siteSubsSelectHtml(w)}</div>
+      </div>
+      <div class="form-row">
+        <span class="form-row-label">
           <span class="ck-dot ck-dot-${dot.cls}" title="${esc(dot.label)}" aria-label="${esc(dot.label)}" role="img"></span>${esc(t('sites.cookie'))}
         </span>
-        <div class="site-row-ctl">
+        <div class="form-row-ctl">
           ${present ? `<button class="site-cookie-btn" data-act="ck-import">${esc(t('cookie.replace'))}</button>` : ''}
           <button class="site-cookie-toggle ${cookieOn ? 'on' : 'off'}" data-act="ck-switch" role="switch" aria-checked="${cookieOn}" title="${esc(t('sites.cookie'))}"><span class="knob"></span></button>
         </div>
       </div>
-      <div class="site-row">
-        <span class="site-row-label">${esc(t('sites.blur'))}</span>
-        <div class="site-row-ctl">
+      <div class="form-row">
+        <span class="form-row-label">${esc(t('sites.blur'))}</span>
+        <div class="form-row-ctl">
           <button class="site-blur-toggle ${w.blur ? 'on' : 'off'}" data-act="blur" role="switch" aria-checked="${w.blur}" title="${esc(t('sites.blur'))}"><span class="knob"></span></button>
         </div>
       </div>
@@ -1527,12 +1712,12 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
       // list's blur state is recomputed on the next render.
       if (await saveWebsite(key, { blur: !w.blur })) applyBlurToRows();
       return;
-    case 'res': {
-      // The card's maximum-resolution dropdown (change event).
-      const cap = (el as HTMLSelectElement).value;
-      if (cap === 'global') await saveWebsite(key, { max_height: 0, no_download: false });
-      else if (cap === 'none') await saveWebsite(key, { no_download: true, max_height: 0 });
-      else await saveWebsite(key, { max_height: Number(cap), no_download: false });
+    case 'stream': {
+      // The card's share-quality dropdown (change event). '' clears back to
+      // follow-global, via the same flag pattern `subs` uses below.
+      const v = (el as HTMLSelectElement).value;
+      if (v === '') await saveWebsite(key, { stream_quality_global: true });
+      else await saveWebsite(key, { stream_quality: v });
       return;
     }
     case 'fmt': {
@@ -1562,7 +1747,12 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
       openSiteEdit(w);
       return;
     case 'site-delete':
-      if (!confirm(t('sites.deleteConfirm', { name: w.name }))) return;
+      if (!(await askConfirm({
+        title: t('sites.deleteTitle'),
+        sub: t('sites.deleteConfirm', { name: w.name }),
+        confirm: t('cookie.delete'),
+        danger: true,
+      }))) return;
       try {
         const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
         if (res.ok) { siteSelected.delete(key); websitesLoaded = websitesLoaded.filter((x) => x.key !== key); renderWebsites(); }
@@ -1723,7 +1913,12 @@ async function batchSetEnabled(enabled: boolean): Promise<void> {
 async function batchDeleteSites(): Promise<void> {
   const keys = selectedSiteKeys();
   if (!keys.length) return;
-  if (!confirm(t('sites.deleteN', { n: keys.length }))) return;
+  if (!(await askConfirm({
+    title: t('sites.deleteTitle'),
+    sub: t('sites.deleteN', { n: keys.length }),
+    confirm: t('cookie.delete'),
+    danger: true,
+  }))) return;
   for (const key of keys) {
     try {
       const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
@@ -1741,7 +1936,12 @@ async function batchMergeSites(): Promise<void> {
   const target = keys[0]!;
   const sources = keys.slice(1);
   const targetName = websitesLoaded.find((w) => w.key === target)?.name || target;
-  if (!confirm(t('sites.mergeConfirm', { n: sources.length, name: targetName }))) return;
+  if (!(await askConfirm({
+    title: t('sites.mergeTitle'),
+    sub: t('sites.mergeConfirm', { n: sources.length, name: targetName }),
+    confirm: t('sites.merge'),
+    danger: true,
+  }))) return;
   try {
     const res = await apiFetch('/api/websites/merge', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, sources }),
@@ -1906,13 +2106,61 @@ function closeModal(el: HTMLElement): void {
   el.setAttribute('aria-hidden', 'true');
 }
 
+// ---- The one confirmation dialog -------------------------------------------
+// Every irreversible action asks through here — deleting items, wiping local
+// files, revoking public links, rewriting the archive. One box, filled in per
+// call, so the wording, layout and the red-for-destructive rule are decided once
+// instead of drifting apart across a dialog per action.
+//
+//   if (!(await askConfirm({ title: …, sub: …, confirm: …, danger: true }))) return;
+//
+// Resolves false on Cancel, the ✕, a backdrop tap or Escape (see dismissTopLayer).
+let confirmResolve: ((ok: boolean) => void) | null = null;
+
+function askConfirm(opts: {
+  title: string;
+  sub: string;
+  confirm: string;
+  danger?: boolean;
+}): Promise<boolean> {
+  settleConfirm(false); // a second ask supersedes any dialog still open
+  els.confirmTitle.textContent = opts.title;
+  els.confirmSub.textContent = opts.sub;
+  els.confirmYes.textContent = opts.confirm;
+  // Red is reserved for actions that destroy something. Toggled per call, so a
+  // reused box never keeps the previous action's colour.
+  els.confirmYes.classList.toggle('btn-danger', !!opts.danger);
+  openModal(els.confirmBox);
+  return new Promise<boolean>((resolve) => { confirmResolve = resolve; });
+}
+
+// Close the dialog and answer whoever is awaiting it. Safe to call when nothing
+// is pending, which is what lets the generic dismiss paths just call it.
+function settleConfirm(ok: boolean): void {
+  if (!confirmResolve) return;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  closeModal(els.confirmBox);
+  resolve(ok);
+}
+
+els.confirmYes.addEventListener('click', () => settleConfirm(true));
+els.confirmCancel.addEventListener('click', () => settleConfirm(false));
+els.confirmClose.addEventListener('click', () => settleConfirm(false));
+els.confirmBox.addEventListener('click', (e) => {
+  if (e.target === els.confirmBox) settleConfirm(false); // backdrop dismiss
+});
+
 // ---- Wire up UI -----------------------------------------------------------
 els.settingsToggle.addEventListener('click', () => {
   closeModal(els.websites);
   els.token.value = getToken();
   if (els.server) els.server.value = apiBase();
   openModal(els.settings);
+  // Whichever platform we're on: one of these owns the permission block, and the
+  // other returns immediately.
   refreshAppPermissions();
+  refreshWebPermissions();
   loadArchive();
   loadLogs();
 });
@@ -1943,20 +2191,39 @@ els.websiteList.addEventListener('click', (e) => {
   // controls are pointer-events:none in this mode (CSS) so they never fire.
   if (siteSelectMode) { toggleSiteSelect(card.dataset.key!); return; }
   const btn = (e.target as HTMLElement).closest('[data-act]') as HTMLElement | null;
-  // The max-resolution <select> also carries data-act="res", but it must report
-  // via its 'change' event only. Handling its click here would immediately
-  // re-render the card (saveWebsite → renderWebsites) and destroy the native
-  // dropdown before it can open — the "can't open the resolution picker" bug.
-  if (!btn || btn.tagName === 'SELECT') return;
+  // The per-site <select>s also carry data-act, but must report via their
+  // 'change' event only. Handling their click here would immediately re-render
+  // the card (saveWebsite → renderWebsites) and destroy the native dropdown
+  // before it can open — the "can't open the resolution picker" bug. The
+  // resolution multi-select is excluded for the same reason: it reports via
+  // `multiselect-change` once, after the popover is done being clicked in.
+  if (!btn || btn.tagName === 'SELECT' || btn.classList.contains('multiselect')) return;
   websiteAction(card.dataset.key!, btn.dataset.act!, btn);
 });
-// The per-site dropdowns (resolution / format / subtitles) report via change,
+// The per-site dropdowns (share quality / format / subtitles) report via change,
 // not click — the click handler above deliberately ignores SELECTs.
 els.websiteList.addEventListener('change', (e) => {
   const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
   if (!sel || siteSelectMode) return;
   const card = sel.closest('.website-card') as HTMLElement;
   websiteAction(card.dataset.key!, sel.dataset.act!, sel);
+});
+// The per-site resolution multi-select. Fires once per option toggled, carrying
+// the whole set — so each pick is saved, matching how every other control on the
+// card treats "changing it" as "saving it".
+els.websiteList.addEventListener('multiselect-change', (e) => {
+  const root = e.target as HTMLElement;
+  if (siteSelectMode) return;
+  const card = root.closest('.website-card') as HTMLElement | null;
+  if (!card) return;
+  const heights = (e as CustomEvent).detail.heights as number[] | null;
+  // `render: false` — re-rendering the card would rebuild the popover the user is
+  // still clicking in and slam it shut after the first pick, which is exactly what
+  // a multi-select must not do. The control already painted itself optimistically;
+  // websitesLoaded is still updated, so the next full render agrees with the DOM.
+  saveWebsite(card.dataset.key!, heights === null
+    ? { max_heights_global: true }
+    : { max_heights: heights }, false);
 });
 // Click outside any open kebab menu closes it.
 document.addEventListener('click', (e) => {
@@ -1979,43 +2246,65 @@ els.siteEdit.addEventListener('click', (e) => {
 });
 els.siteEditSave.addEventListener('click', saveSiteEdit);
 
-els.tokenSave.addEventListener('click', () => {
+// Commit the typed token, then re-pull everything that was gated behind it.
+// Called by the sheet's one Save (see saveSettings).
+async function applyToken(): Promise<boolean> {
   setToken(els.token.value.trim());
   els.tokenHint.classList.add('hidden');
-  closeModal(els.settings);
   connectEvents();
   loadItems(true);
   loadStats();
-  if (getToken()) loadWebsites();
-});
-
-// Server URL (app only): persist, then reconnect the SSE + reload against it.
-if (els.serverSave) {
-  els.serverSave.addEventListener('click', () => {
-    // Refuse a plain-http public-IP server: it would ship the token + cookies in
-    // the clear over the internet. Use https, or a private/LAN address.
-    if (isInsecurePublicBase(els.server.value)) {
-      toast(t('toast.insecureServer'), 'error');
-      return;
-    }
-    setApiBase(els.server.value);
-    closeModal(els.settings);
-    loadServerConfig();
-    connectEvents();
-    loadItems(true);
-  });
+  if (getToken()) {
+    loadWebsites();
+    loadArchive();
+  }
+  return true;
 }
 
-type AppPermissionStatus = { notifications: boolean; background: boolean };
+// Server URL (app only): persist, then reconnect the SSE + reload against it.
+async function applyServerUrl(): Promise<boolean> {
+  // Refuse a plain-http public-IP server: it would ship the token + cookies in
+  // the clear over the internet. Use https, or a private/LAN address.
+  if (isInsecurePublicBase(els.server.value)) {
+    toast(t('toast.insecureServer'), 'error');
+    return false;
+  }
+  setApiBase(els.server.value);
+  loadServerConfig();
+  connectEvents();
+  loadItems(true);
+  return true;
+}
+
+// `storage` is "may write shared storage" — on Android 11+ that is the "All
+// files access" grant, which is the only way to write Downloads/Orca (and the
+// only way at all to create the hidden .Orca folder; MediaStore refuses a
+// dot-prefixed directory).
+type AppPermissionStatus = { notifications: boolean; background: boolean; storage: boolean };
 let appPermissions: AppPermissionStatus | null = null;
+// Not a permission — where saves land. Mirrored from the native side, which
+// owns the setting, so it survives reinstall-free app restarts.
+let hideDownloads = false;
 const requestingPermissions = new Set<keyof AppPermissionStatus>();
 const PERMISSION_PROMPT_NEVER = 'orca_permissions_prompt_never';
 migrateLegacyStorage(PERMISSION_PROMPT_NEVER, 'permissions_prompt_never');
 
+// The glyph at the end of a permission row, per state. Granted is a real check
+// mark rather than the "✓" character — the text glyph rendered at whatever weight
+// and baseline the system font felt like, which is what made the row look
+// unfinished next to its icon. Colour comes from the row's [data-state] (see
+// .permission-result in style.css), so the green lives in one place.
+type PermissionState = 'granted' | 'missing' | 'checking';
+const PERMISSION_RESULT: Record<PermissionState, string> = {
+  granted: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`,
+  missing: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>`,
+  checking: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`,
+};
+
 function renderAppPermission(kind: keyof AppPermissionStatus): void {
   const granted = appPermissions?.[kind] ?? null;
   const requesting = requestingPermissions.has(kind);
-  const state = requesting ? 'checking' : granted == null ? 'checking' : granted ? 'granted' : 'missing';
+  const state: PermissionState = requesting || granted == null ? 'checking' : granted ? 'granted' : 'missing';
   document.querySelectorAll<HTMLButtonElement>(`.permission-item[data-permission="${kind}"]`).forEach((button) => {
     button.dataset.state = state;
     button.disabled = requesting;
@@ -2024,24 +2313,85 @@ function renderAppPermission(kind: keyof AppPermissionStatus): void {
     if (status) status.textContent = t(requesting
       ? 'settings.permRequesting'
       : granted == null ? 'settings.permChecking' : granted ? 'settings.permGranted' : 'settings.permMissing');
-    if (result) result.textContent = state === 'granted' ? '✓' : state === 'missing' ? '›' : '…';
+    if (result) result.innerHTML = PERMISSION_RESULT[state];
   });
+}
+
+/**
+ * Which permission rows still have something to ask for. Empty → the whole block
+ * hides (see renderAppPermissions): a list of green ticks is furniture, and the
+ * section only earns its space while it has an action to offer.
+ *
+ * The two platforms genuinely differ. Android needs all three and cannot work
+ * without storage. The web build has exactly one worth asking about —
+ * notifications, for download-finished alerts — and never insists: everything
+ * works without it. A hard `denied` there is also filtered out, because script
+ * cannot re-request it, so the row would be a button that does nothing.
+ */
+function pendingPermissions(): Array<keyof AppPermissionStatus> {
+  if (!appPermissions) return [];
+  if (isAndroidApp()) {
+    return (['notifications', 'background', 'storage'] as const)
+      .filter((k) => !appPermissions![k]);
+  }
+  return webNotificationsPending() ? ['notifications'] : [];
+}
+
+function webNotificationsPending(): boolean {
+  return 'Notification' in window && Notification.permission === 'default';
 }
 
 function renderAppPermissions(): void {
   renderAppPermission('notifications');
   renderAppPermission('background');
+  renderAppPermission('storage');
+  renderHideDownloads();
+  els.permRow.classList.toggle('hidden', pendingPermissions().length === 0);
+}
+
+/**
+ * The browser build's permission state. Mirrors the Android shape so the one
+ * renderer serves both; `background`/`storage` are reported granted because they
+ * have no browser equivalent and must never count as pending.
+ */
+function refreshWebPermissions(): void {
+  if (isNativeApp) return;
+  if (!('Notification' in window)) { els.permRow.classList.add('hidden'); return; }
+  appPermissions = {
+    notifications: Notification.permission === 'granted',
+    background: true,
+    storage: true,
+  };
+  renderAppPermissions();
+}
+
+// The hide toggle is meaningless without storage access (we couldn't move the
+// files), so it follows that grant.
+function renderHideDownloads(): void {
+  const allowed = !!appPermissions?.storage;
+  // Android-only: the folder it switches between exists only there.
+  els.hideDlRow.classList.toggle('hidden', !isAndroidApp());
+  setSwitch(els.hideDlToggle, hideDownloads);
+  els.hideDlToggle.disabled = !allowed;
+  els.hideDlNeedsPerm.classList.toggle('hidden', allowed);
 }
 
 async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
   const T = window.__TAURI__;
   if (!T?.core?.invoke) return null;
   try {
-    const status = await T.core.invoke('android_permission_status') as AppPermissionStatus;
-    appPermissions = { notifications: !!status.notifications, background: !!status.background };
-    els.permRow.classList.remove('hidden');
+    const status = await T.core.invoke('android_permission_status') as AppPermissionStatus & { hideDownloads?: boolean };
+    appPermissions = {
+      notifications: !!status.notifications,
+      background: !!status.background,
+      storage: !!status.storage,
+    };
+    hideDownloads = !!status.hideDownloads;
+    // Visibility is renderAppPermissions' call now — it hides the block once
+    // nothing is left to grant, and unhiding here would fight it.
     renderAppPermissions();
-    if (appPermissions.notifications && appPermissions.background && !els.permissionsPrompt.classList.contains('hidden')) {
+    if (appPermissions.notifications && appPermissions.background && appPermissions.storage
+      && !els.permissionsPrompt.classList.contains('hidden')) {
       closeModal(els.permissionsPrompt);
     }
     return appPermissions;
@@ -2052,7 +2402,13 @@ async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
   }
 }
 
-async function requestAppPermission(kind: 'notifications' | 'background'): Promise<void> {
+const PERMISSION_COMMANDS: Record<keyof AppPermissionStatus, string> = {
+  notifications: 'request_notification_permission',
+  background: 'request_background_permission',
+  storage: 'request_storage_permission',
+};
+
+async function requestAppPermission(kind: keyof AppPermissionStatus): Promise<void> {
   const T = window.__TAURI__;
   if (!T?.core?.invoke) return;
   const current = await refreshAppPermissions();
@@ -2060,21 +2416,51 @@ async function requestAppPermission(kind: 'notifications' | 'background'): Promi
   requestingPermissions.add(kind);
   renderAppPermission(kind);
   try {
-    if (kind === 'notifications') {
-      await T.core.invoke('request_notification_permission');
-    } else {
-      await T.core.invoke('request_background_permission');
-    }
+    await T.core.invoke(PERMISSION_COMMANDS[kind]);
   } catch (_) { /* the next state read shows the actual result */ }
   requestingPermissions.delete(kind);
   await refreshAppPermissions();
 }
 
+function isPermissionKind(v: string | undefined): v is keyof AppPermissionStatus {
+  return v === 'notifications' || v === 'background' || v === 'storage';
+}
+
 document.addEventListener('click', (e) => {
   const button = (e.target as HTMLElement).closest<HTMLButtonElement>('.permission-item[data-permission]');
   const kind = button?.dataset.permission;
-  if (kind === 'notifications' || kind === 'background') requestAppPermission(kind);
+  if (!isPermissionKind(kind)) return;
+  if (isNativeApp) { requestAppPermission(kind); return; }
+  // Web: the browser's own prompt. Whatever the user answers, re-render — a
+  // grant hides the block, a denial does too (it can't be asked again).
+  if (kind === 'notifications' && 'Notification' in window) {
+    Notification.requestPermission().finally(() => refreshWebPermissions());
+  }
 });
+
+// Flipping "hide my downloads" also MOVES everything already saved, so the
+// setting applies retroactively rather than stranding old files in the folder
+// the user just chose to stop using.
+if (els.hideDlToggle) {
+  els.hideDlToggle.addEventListener('click', async () => {
+    const T = window.__TAURI__;
+    if (!T?.core?.invoke || els.hideDlToggle.disabled) return;
+    const next = !hideDownloads;
+    els.hideDlToggle.disabled = true;
+    setSwitch(els.hideDlToggle, next);
+    try {
+      const status = await T.core.invoke('set_hide_downloads', { hidden: next }) as
+        { hideDownloads?: boolean; moved?: number };
+      hideDownloads = !!status.hideDownloads;
+      const moved = status.moved || 0;
+      toast(moved > 0 ? t('toast.hideDlMoved', { n: moved })
+        : t(hideDownloads ? 'toast.hideDlOn' : 'toast.hideDlOff'), 'ok');
+    } catch (_) {
+      toast(t('toast.hideDlFail'), 'error');
+    }
+    await refreshAppPermissions();
+  });
+}
 
 function dismissPermissionPrompt(never: boolean): void {
   if (never) localStorage.setItem(PERMISSION_PROMPT_NEVER, '1');
@@ -2089,6 +2475,7 @@ els.permissionsPromptNever.addEventListener('click', () => dismissPermissionProm
 // user can edit history in place. Save reconciles the edited list against what
 // was loaded — added lines are imported, removed lines are deleted.
 let sealLoaded = new Set<string>(); // keys present when the editor was last loaded
+let archiveHasBackup = false;       // server holds a previous version to roll back to
 
 // Parse the textarea into a Set of valid `extractor id` keys (space-bearing).
 function parseArchiveKeys(): Set<string> {
@@ -2108,42 +2495,117 @@ async function loadArchive(): Promise<void> {
     const data = await res.json();
     const keys = (data.keys || []).slice().sort();
     sealLoaded = new Set(keys);
+    archiveHasBackup = !!data.has_backup;
     els.sealArchive.value = keys.join('\n');
+    renderSaveBar();
   } catch (e) {
     if (!isUnauthorized(e)) toast(t('toast.loadArchiveFail'), 'error');
   }
 }
 
-// ---- Max-resolution setting -----------------------------------------------
-// Server-side cap on the resolution yt-dlp downloads. Highest by default; a
-// ORCA_MAX_HEIGHT env var pins it (the control then reads locked/disabled).
+// ---- Global download defaults ----------------------------------------------
+// The fallback for any site that doesn't pin its own: which resolutions to
+// download, what shares may cost, the container, and subtitles. Each can be
+// independently pinned by an env var (the control then reads locked/disabled).
+//
+// Rendered from the same builders the site cards use — `followable: false` is the
+// only difference, since the global has nothing to follow. Sharing the builders is
+// what makes the two sets of rows identical rather than merely similar.
+interface GlobalSettings {
+  max_heights: number[];
+  max_heights_locked: boolean;
+  stream_quality: string;
+  container: string;
+  container_locked: boolean;
+  subs: boolean;
+  subs_locked: boolean;
+}
+let globalSettings: GlobalSettings | null = null;
+
+function renderGlobalDefaults(d: GlobalSettings): void {
+  els.maxRes.innerHTML = multiSelectHtml({
+    act: 'g-res',
+    heights: d.max_heights,
+    followable: false,
+    ariaLabel: t('settings.maxRes'),
+    disabled: d.max_heights_locked,
+  });
+  els.maxResLocked.classList.toggle('hidden', !d.max_heights_locked);
+
+  const opt = (val: string, label: string, on: boolean): string =>
+    `<option value="${val}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+
+  // No env pin for share quality: it's a sharing policy, not a deployment
+  // constant, so there is no locked state to render.
+  els.streamQuality.innerHTML =
+    `<select class="select site-res-select" data-act="g-stream" aria-label="${esc(t('settings.streamQuality'))}">${
+      STREAM_QUALITIES.map(([v, k]) => opt(v, t(k), d.stream_quality === v)).join('')
+    }</select>`;
+
+  els.format.innerHTML =
+    `<select class="select site-res-select" data-act="g-fmt" aria-label="${esc(t('settings.format'))}"${d.container_locked ? ' disabled' : ''}>${
+      SITE_FORMATS.map(([v, label]) => opt(v, label, d.container === v)).join('')
+    }</select>`;
+  els.formatLocked.classList.toggle('hidden', !d.container_locked);
+
+  // A two-state select rather than the pill switch it used to be: the site cards
+  // express subtitles as a dropdown, and this row sits directly above them.
+  els.subs.innerHTML =
+    `<select class="select site-res-select" data-act="g-subs" aria-label="${esc(t('settings.subs'))}"${d.subs_locked ? ' disabled' : ''}>${
+      opt('on', t('sites.subsOn'), d.subs) + opt('off', t('sites.subsOff'), !d.subs)
+    }</select>`;
+  els.subsLocked.classList.toggle('hidden', !d.subs_locked);
+}
+
 async function loadSettings(): Promise<void> {
   if (!els.maxRes || !getToken()) return;
   try {
     const res = await apiFetch('/api/settings');
     if (!res.ok) return;
     const data = await res.json();
-    // "None" (no-download) is the sentinel value "none"; otherwise the numeric cap
-    // (0 = highest). See put_settings.
-    els.maxRes.value = data.no_download ? 'none' : String(data.max_height || 0);
-    const locked = !!data.max_height_locked;
-    els.maxRes.disabled = locked;
-    els.maxResSave.disabled = locked;
-    els.maxResLocked.classList.toggle('hidden', !locked);
+    globalSettings = {
+      max_heights: Array.isArray(data.max_heights) ? data.max_heights : [0],
+      max_heights_locked: !!data.max_heights_locked,
+      stream_quality: String(data.stream_quality || 'higher'),
+      container: String(data.container || 'mkv'),
+      container_locked: !!data.container_locked,
+      subs: !!data.subs,
+      subs_locked: !!data.subs_locked,
+    };
+    renderGlobalDefaults(globalSettings);
+  } catch (_) { /* offline / unauthorized — leave the controls as-is */ }
+}
 
-    // Global container + subtitle defaults; each can be independently env-pinned.
-    els.format.value = String(data.container || 'mkv');
-    const fLocked = !!data.container_locked;
-    els.format.disabled = fLocked;
-    els.formatSave.disabled = fLocked;
-    els.formatLocked.classList.toggle('hidden', !fLocked);
-
-    setSwitch(els.subsToggle, !!data.subs);
-    const sLocked = !!data.subs_locked;
-    els.subsToggle.disabled = sLocked;
-    els.subsSave.disabled = sLocked;
-    els.subsLocked.classList.toggle('hidden', !sLocked);
-  } catch (_) { /* offline / unauthorized — leave the control as-is */ }
+/** PUT one global default, repainting from the server's echo. */
+async function commitGlobal(patch: Record<string, unknown>): Promise<void> {
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      // Snap back to the last known-good state rather than leaving the UI
+      // asserting a value the server rejected.
+      if (globalSettings) renderGlobalDefaults(globalSettings);
+      return;
+    }
+    globalSettings = {
+      max_heights: Array.isArray(data.max_heights) ? data.max_heights : [0],
+      max_heights_locked: !!data.max_heights_locked,
+      stream_quality: String(data.stream_quality || 'higher'),
+      container: String(data.container || 'mkv'),
+      container_locked: !!data.container_locked,
+      subs: !!data.subs,
+      subs_locked: !!data.subs_locked,
+    };
+    toast(t('toast.settingsSaved'), 'ok');
+  } catch (e) {
+    if (!isUnauthorized(e)) toast('Network error', 'error');
+    if (globalSettings) renderGlobalDefaults(globalSettings);
+  }
 }
 
 // Paint a pill switch's on/off state (class + ARIA together, so the two can't
@@ -2178,7 +2640,12 @@ function renderLogs(entries: LogEntry[]): void {
   if (els.logEmpty) els.logEmpty.classList.toggle('hidden', entries.length > 0);
   for (const e of entries) {
     const d = document.createElement('details');
-    d.className = 'log-entry log-entry--' + (e.stage === 'download' ? 'download' : 'probe');
+    // Two independent axes: which stage failed (drives the badge's default hue)
+    // and whose fault it was (drives the severity rule). A server that predates
+    // classification sends no severity — treat it as an error rather than
+    // silently painting real bugs amber.
+    d.className = 'log-entry log-entry--' + (e.stage === 'download' ? 'download' : 'probe')
+      + ' log-entry--' + (e.severity === 'warn' ? 'warn' : 'error');
 
     const summary = document.createElement('summary');
     summary.innerHTML =
@@ -2342,6 +2809,11 @@ async function saveResolutions(): Promise<void> {
     const queued = ((data && data.queued) || []).length;
     toast(!heights.length ? t('res.cleared') : queued ? t('res.queued', { n: queued }) : t('res.updated'), 'ok');
     closeModal(els.resolution);
+    // Asking the server for a taller copy of something already on this device is
+    // implicitly asking for the device's copy to get taller too — otherwise the
+    // upgrade is invisible where the user actually watches it. Flag it now; the
+    // pull happens once the download lands (see runPendingLocalUpgrade).
+    void flagLocalUpgrade(target, heights);
     // Refetch so the card's resolution label/size reflect the new highest kept
     // version immediately (removals repoint the primary server-side; Req 3).
     apiFetch(itemPath(target))
@@ -2353,6 +2825,38 @@ async function saveResolutions(): Promise<void> {
   } finally {
     els.resolutionSave.disabled = false;
   }
+}
+
+// Items whose on-device copy should be refreshed once the server finishes
+// fetching a taller version. Ids, not slugs, to match the SSE event key. Held in
+// memory only: if the app dies mid-download the upgrade is forgotten, which is
+// the right trade — a surprise multi-hundred-MB save on next launch is worse
+// than the user tapping Save again.
+const pendingLocalUpgrade = new Set<number>();
+
+/**
+ * Note that `id` should have its local copy replaced, if there's a local copy at
+ * all and the newly-requested set actually beats it. Both conditions matter:
+ * without the first we'd save files the user never asked to have offline, and
+ * without the second, *removing* a resolution would trigger a pointless re-save
+ * of a file the device already has.
+ */
+async function flagLocalUpgrade(id: number, heights: number[]): Promise<void> {
+  if (!isAndroidApp() || !heights.length) return;
+  const local = await localFileFor(state.items.get(id)?.slug);
+  if (!local) return;
+  // 0 ("highest available") always counts as an upgrade: we can't know what it
+  // resolves to until the download lands, and the server only ever repoints the
+  // primary at something taller.
+  const wantsTaller = heights.some((h) => h === 0 || h > local.height);
+  if (wantsTaller) pendingLocalUpgrade.add(id);
+}
+
+/** Re-save an upgraded item over its local copy. MediaSaver deletes the old one. */
+function runPendingLocalUpgrade(it: Item): void {
+  if (!pendingLocalUpgrade.delete(it.id)) return;
+  if (it.status !== 'completed' || !it.local_available) return;
+  void saveItemsNative([it]);
 }
 
 els.resolutionClose.addEventListener('click', () => closeModal(els.resolution));
@@ -2373,118 +2877,193 @@ els.resolutionList.addEventListener('keydown', (e) => {
   if (opt) { ev.preventDefault(); toggleResOpt(opt); }
 });
 
-if (els.maxResSave) {
-  els.maxResSave.addEventListener('click', async () => {
-    els.maxResSave.disabled = true;
-    try {
-      const none = els.maxRes.value === 'none';
-      const res = await apiFetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(none ? { no_download: true } : { max_height: Number(els.maxRes.value) || 0 }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
-      els.maxRes.value = data.no_download ? 'none' : String(data.max_height || 0);
-      toast(t('toast.settingsSaved'), 'ok');
-    } catch (e) {
-      if (!isUnauthorized(e)) toast('Network error', 'error');
-    } finally {
-      els.maxResSave.disabled = false;
+// ---- Global site defaults (Website management) ----------------------------
+// Picking a value IS the save — no Save button per control, which is how the
+// per-site dropdowns on the cards below have always behaved. PUT /api/settings
+// is a partial patch, so each control sends only its own field. Delegated,
+// because renderGlobalDefaults rebuilds these controls on every load and echo;
+// a listener bound to the element itself would die with it.
+if (els.sitesGlobal) {
+  els.sitesGlobal.addEventListener('change', (e) => {
+    const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
+    if (!sel) return;
+    switch (sel.dataset.act) {
+      case 'g-stream': commitGlobal({ stream_quality: sel.value }); break;
+      case 'g-fmt': commitGlobal({ container: sel.value }); break;
+      case 'g-subs': commitGlobal({ subs: sel.value === 'on' }); break;
     }
+  });
+  els.sitesGlobal.addEventListener('multiselect-change', (e) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.act !== 'g-res') return;
+    // The global has no "follow global" option, so heights is never null here.
+    commitGlobal({ max_heights: detail.heights ?? [] });
   });
 }
 
-// The global container + subtitle saves. PUT /api/settings is a partial patch, so
-// each sends only its own field and leaves the others untouched.
-if (els.formatSave) {
-  els.formatSave.addEventListener('click', async () => {
-    els.formatSave.disabled = true;
-    try {
-      const res = await apiFetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ container: els.format.value }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
-      els.format.value = String(data.container || 'mkv');
-      toast(t('toast.settingsSaved'), 'ok');
-    } catch (e) {
-      if (!isUnauthorized(e)) toast('Network error', 'error');
-    } finally {
-      els.formatSave.disabled = false;
-    }
+// ---- The one Save ----------------------------------------------------------
+// Settings holds three things the user types rather than picks — the server URL,
+// the API token and the archive — so unlike the pick-is-the-save controls above
+// they need an explicit commit. That commit is ONE bar, docked at the bottom of
+// the sheet and shown only while something is genuinely different from what is
+// stored (dirtyFields below), instead of a Save button beside each field.
+
+// What each tracked field currently holds vs. what is committed. Compared as
+// strings so "same value retyped" doesn't count as dirty.
+function committedSettings(): Record<string, string> {
+  return {
+    server: apiBase(),
+    token: getToken(),
+    archive: [...sealLoaded].sort().join('\n'),
+  };
+}
+function draftSettings(): Record<string, string> {
+  return {
+    server: (els.server.value || '').trim().replace(/\/+$/, ''),
+    token: (els.token.value || '').trim(),
+    archive: [...parseArchiveKeys()].sort().join('\n'),
+  };
+}
+function dirtyFields(): string[] {
+  const now = draftSettings();
+  const saved = committedSettings();
+  return Object.keys(now).filter((k) => now[k] !== saved[k]);
+}
+
+function renderSaveBar(): void {
+  if (!els.settingsSaveBar) return;
+  els.settingsSaveBar.classList.toggle('hidden', dirtyFields().length === 0);
+  renderArchiveRestore();
+}
+
+// Restore is the archive's undo, and what it undoes depends on where you are:
+// while the box is dirty it throws away YOUR edits (back to the recorded
+// version); once clean it rolls the server back to the version before the last
+// save. One button, because from the user's side it's one intent — "undo".
+function renderArchiveRestore(): void {
+  if (!els.archiveRestore) return;
+  const dirty = dirtyFields().includes('archive');
+  const show = dirty || archiveHasBackup;
+  els.archiveRestore.classList.toggle('hidden', !show);
+  if (!show) return;
+  const key = dirty ? 'settings.archiveDiscard' : 'settings.archiveRestore';
+  els.archiveRestore.textContent = t(key);
+  els.archiveRestore.dataset.mode = dirty ? 'discard' : 'restore';
+}
+
+// Rewriting the archive decides what Orca will and won't fetch again and a slip
+// isn't otherwise recoverable, so a save that touches it is confirmed first —
+// showing exactly how many keys are being added and dropped.
+function confirmArchiveSave(): Promise<boolean> {
+  const now = parseArchiveKeys();
+  const added = [...now].filter((k) => !sealLoaded.has(k)).length;
+  const removed = [...sealLoaded].filter((k) => !now.has(k)).length;
+  return askConfirm({
+    title: t('archiveConfirm.title'),
+    sub: t('archiveConfirm.sub', { add: added, rem: removed }),
+    confirm: t('btn.save'),
+    // Not red: the previous version is kept and Restore brings it straight back,
+    // so this is a checkpoint, not a one-way door.
   });
 }
 
-// The toggle only stages the choice; Save commits it (same shape as the pickers
-// beside it, so the whole block reads consistently).
-if (els.subsToggle) {
-  els.subsToggle.addEventListener('click', () => {
-    if (els.subsToggle.disabled) return;
-    setSwitch(els.subsToggle, els.subsToggle.getAttribute('aria-checked') !== 'true');
+async function saveSettings(): Promise<void> {
+  const dirty = dirtyFields();
+  if (!dirty.length) return;
+  // Confirm the destructive part BEFORE committing any of it, so cancelling
+  // leaves the whole sheet untouched rather than half-saved.
+  if (dirty.includes('archive') && !(await confirmArchiveSave())) return;
+
+  els.settingsSave.disabled = true;
+  try {
+    if (dirty.includes('server')) {
+      if (!(await applyServerUrl())) return;
+    }
+    if (dirty.includes('token')) {
+      if (!(await applyToken())) return;
+    }
+    if (dirty.includes('archive')) {
+      if (!(await applyArchive())) return;
+    }
+    toast(t('toast.settingsSaved'), 'ok');
+  } finally {
+    els.settingsSave.disabled = false;
+    renderSaveBar();
+  }
+}
+
+// Push the edited archive as a whole. The server replaces rather than merges (so
+// a deleted line really does free the key) and keeps the previous version aside
+// for Restore — see PUT /api/archive.
+async function applyArchive(): Promise<boolean> {
+  try {
+    const res = await apiFetch('/api/archive', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archive: [...parseArchiveKeys()].join('\n') }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      return false;
+    }
+    sealLoaded = parseArchiveKeys();
+    els.sealArchive.value = [...sealLoaded].sort().join('\n');
+    archiveHasBackup = true;
+    return true;
+  } catch (e) {
+    if (!isUnauthorized(e)) toast('Network error', 'error');
+    return false;
+  }
+}
+
+async function restoreArchive(): Promise<void> {
+  els.archiveRestore.disabled = true;
+  try {
+    const res = await apiFetch('/api/archive/restore', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      return;
+    }
+    const keys = ((data.keys || []) as string[]).slice().sort();
+    sealLoaded = new Set(keys);
+    els.sealArchive.value = keys.join('\n');
+    archiveHasBackup = true; // the version we rolled back FROM is the new backup
+    toast(t('toast.archiveRestored', { n: keys.length }), 'ok');
+  } catch (e) {
+    if (!isUnauthorized(e)) toast('Network error', 'error');
+  } finally {
+    els.archiveRestore.disabled = false;
+    renderSaveBar();
+  }
+}
+
+if (els.archiveRestore) {
+  els.archiveRestore.addEventListener('click', () => {
+    if (els.archiveRestore.dataset.mode === 'discard') {
+      // Local edits only — nothing was sent, so just repaint from what's recorded.
+      els.sealArchive.value = [...sealLoaded].sort().join('\n');
+      renderSaveBar();
+      return;
+    }
+    restoreArchive();
   });
 }
 
-if (els.subsSave) {
-  els.subsSave.addEventListener('click', async () => {
-    els.subsSave.disabled = true;
-    try {
-      const res = await apiFetch('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subs: els.subsToggle.getAttribute('aria-checked') === 'true' }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
-      setSwitch(els.subsToggle, !!data.subs);
-      toast(t('toast.settingsSaved'), 'ok');
-    } catch (e) {
-      if (!isUnauthorized(e)) toast('Network error', 'error');
-    } finally {
-      els.subsSave.disabled = false;
-    }
+if (els.settingsSave) {
+  els.settingsSave.addEventListener('click', saveSettings);
+  els.settingsRevert.addEventListener('click', () => {
+    els.server.value = apiBase();
+    els.token.value = getToken();
+    els.sealArchive.value = [...sealLoaded].sort().join('\n');
+    renderSaveBar();
   });
-}
-
-if (els.sealImport) {
-  els.sealImport.addEventListener('click', async () => {
-    const now = parseArchiveKeys();
-    const toAdd = [...now].filter((k) => !sealLoaded.has(k));
-    const toRemove = [...sealLoaded].filter((k) => !now.has(k));
-    if (!toAdd.length && !toRemove.length) { toast(t('toast.noChanges'), 'info'); return; }
-    els.sealImport.disabled = true;
-    try {
-      if (toAdd.length) {
-        const res = await apiFetch('/api/archive/import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ archive: toAdd.join('\n') }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
-          return;
-        }
-      }
-      for (const key of toRemove) {
-        const res = await apiFetch('/api/archive', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key }),
-        });
-        if (!res.ok) { toast(t('toast.removeFail', { key }), 'error'); return; }
-      }
-      sealLoaded = now;
-      els.sealArchive.value = [...now].sort().join('\n');
-      toast(t('toast.archiveSaved', { add: toAdd.length, rem: toRemove.length }), 'ok');
-    } catch (e) {
-      if (!isUnauthorized(e)) toast('Network error', 'error');
-    } finally {
-      els.sealImport.disabled = false;
-    }
-  });
+  // Track every tracked field. `input` fires on typing AND on paste/undo, which
+  // a `change` listener would miss until blur.
+  for (const el of [els.server, els.token, els.sealArchive]) {
+    el.addEventListener('input', renderSaveBar);
+  }
 }
 
 els.submitForm.addEventListener('submit', (e) => {
@@ -2640,6 +3219,16 @@ els.history.addEventListener('click', (e) => {
   const play = target.closest('.thumb-play') as HTMLElement | null;
   if (play) { e.preventDefault(); openPlayer(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play)); return; }
 
+  // Save stays a real <a download> so the browser keeps its native behaviour;
+  // only the Android app (where that anchor is inert) is intercepted.
+  const save = target.closest('.act-save') as HTMLAnchorElement | null;
+  if (save && isAndroidApp()) {
+    e.preventDefault();
+    const item = state.items.get(Number(save.dataset.id));
+    if (item) saveItemsNative([item]);
+    return;
+  }
+
   const btn = target.closest('[data-act]') as HTMLElement | null;
   if (!btn) return;
   const id = Number(btn.dataset.id);
@@ -2674,17 +3263,37 @@ function toggleSelect(id: number): void {
   if (li) li.classList.toggle('selected', state.selected.has(id));
   updateSelBar();
 }
+// The bar shows only the actions the CURRENT selection can actually take, rather
+// than every action always, greyed out. Nine permanently-present buttons made the
+// bar hard to read and hid which of them were live; a contextual toolbar is the
+// familiar answer (Finder, Photos, Gmail) and it shrinks the bar on a phone,
+// where all nine wrapped onto three cramped rows.
+//
+// Nothing is enabled-but-hidden: if a button is on screen it works.
 function updateSelBar(): void {
   const n = state.selected.size;
+  const loaded = state.rows.size;
+  const picked = selectedItems();
+  const done = picked.filter((it) => it.status === 'completed');
+  const local = done.filter((it) => it.local_available);
+
   els.selCount.textContent = n ? t('sel.countN', { n }) : t('sel.count0');
   els.selBar.classList.toggle('hidden', !state.selectMode);
-  [els.selDownload, els.selShare, els.selUnshare, els.selCopy, els.selClean, els.selDelete].forEach((b) => { b.disabled = n === 0; });
-  // Select-all / invert act on the loaded rows, so they're live whenever any
-  // row exists; "Select all" reads "Clear" once everything loaded is selected.
-  const loaded = state.rows.size;
-  els.selAll.disabled = loaded === 0;
-  els.selInvert.disabled = loaded === 0;
+
+  const show = (b: HTMLElement, on: boolean): void => { b.classList.toggle('hidden', !on); };
+  // Pickers: live as soon as there's anything to pick from. "Select all" flips to
+  // "Clear" once everything loaded is selected.
+  show(els.selAll, loaded > 0);
+  show(els.selInvert, loaded > 0);
   els.selAll.textContent = loaded > 0 && n >= loaded ? t('sel.clear') : t('sel.all');
+
+  // Verbs: each needs something it can act ON.
+  show(els.selDownload, local.length > 0);   // needs a file to hand over
+  show(els.selCopy, done.length > 0);        // needs a finished item to link to
+  show(els.selClean, local.length > 0);      // needs a file to erase
+  show(els.selShare, done.length > 0);       // needs a finished item to publish
+  show(els.selUnshare, picked.some((it) => it.public)); // needs a LIVE share
+  show(els.selDelete, n > 0);                // any record can be deleted
   refreshGroupHeaders(); // keep fold headers' selected/partial state in sync
 }
 
@@ -2760,12 +3369,67 @@ function copyText(text: string, okMsg: string): void {
   }
 }
 
+// ---- Saving to the device -------------------------------------------------
+// In a browser, saving is `<a href download>` and the browser does the rest.
+// An Android WebView has NO download manager and Tauri registers no
+// DownloadListener, so that anchor click is swallowed silently — which is why
+// the Save button did nothing at all in the app. There, hand the same tokenised
+// URL to the native saver (Downloads/Orca, or the hidden .Orca).
+//
+// Scoped to Android on purpose: desktop Tauri's webview does honour `download`,
+// and the native saver is Android-only.
+function isAndroidApp(): boolean {
+  return !!window.__TAURI__?.core?.invoke && /Android/i.test(navigator.userAgent);
+}
+
+// Only a fallback: the server sends the real filename in Content-Disposition,
+// which the native side prefers. This is what a notification shows meanwhile.
+function saveLabel(item: Item): string {
+  return item.title || item.slug || 'Orca download';
+}
+
+/**
+ * Hand `items` to the native saver, guiding the user through the storage grant
+ * first if it's missing. Without that grant the write fails with an opaque
+ * EACCES — the "silently does nothing" failure this whole path exists to kill.
+ */
+async function saveItemsNative(items: Item[]): Promise<void> {
+  const T = window.__TAURI__;
+  if (!T?.core?.invoke) return;
+  let status = await refreshAppPermissions();
+  if (!status?.storage) {
+    toast(t('toast.storageNeeded'), 'info');
+    await requestAppPermission('storage');
+    status = await refreshAppPermissions();
+    // On Android 11+ the grant happens on a Settings screen, so it is normal to
+    // arrive here still ungranted; the user re-taps Save once they're back.
+    if (!status?.storage) return;
+  }
+  try {
+    for (const it of items) {
+      // slug + height let the native side file this under the item, so playback
+      // can find it later and a taller save can recognise itself as a
+      // replacement for this one rather than a second copy.
+      await T.core.invoke('save_media', {
+        url: fileUrl(it, true),
+        name: saveLabel(it),
+        slug: it.slug,
+        height: it.height || 0,
+      });
+    }
+    toast(t('toast.savingN', { n: items.length }), 'ok');
+  } catch (_) {
+    toast(t('toast.saveToDeviceFail'), 'error');
+  }
+}
+
 // Save every item that still has a local file (the current selection, or an
 // explicit list — used to download a whole fold). Staggered so the browser
 // doesn't drop rapid concurrent downloads.
 function batchDownload(source?: Item[]): void {
   const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available);
   if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
+  if (isAndroidApp()) { saveItemsNative(items); return; }
   items.forEach((it, i) => {
     setTimeout(() => {
       const a = document.createElement('a');
@@ -2841,6 +3505,16 @@ function downloadGroup(gkey: string): void {
 async function batchUnshare(): Promise<void> {
   const items = selectedItems().filter((it) => it.public);
   if (!items.length) { toast(t('toast.noShared'), 'info'); return; }
+  // Kills live links other people may be holding, and a new one won't have the
+  // old URL. The single-item Stop sharing has always confirmed; doing N at once
+  // is strictly worse to get wrong, so it confirms too.
+  const confirmed = await askConfirm({
+    title: t('unshareConfirm.title'),
+    sub: t('unshareConfirm.sub', { n: items.length }),
+    confirm: t('sel.unshare'),
+    danger: true,
+  });
+  if (!confirmed) return;
   els.selUnshare.disabled = true;
   let ok = 0;
   try {
@@ -2890,22 +3564,27 @@ function removeRow(id: number): void {
 // Ids awaiting the confirm dialog's Yes. Deletion is destructive (DB record +
 // any local files), so every path — a single card's trash icon, a whole fold,
 // or the multi-select selection — routes through this one confirm.
-let pendingDeleteIds: number[] = [];
-function openDeleteConfirm(ids: number[]): void {
-  const n = ids.length;
-  if (!n) return;
-  pendingDeleteIds = ids;
-  // Sum the local file sizes we'd reclaim so the confirm states how much space
-  // deleting frees (industry file-manager pattern for a destructive delete).
-  const freed = ids.reduce((sum, id) => {
+// Sum the local file sizes an action would reclaim, so its confirm can state how
+// much space it frees (the file-manager convention for a destructive delete).
+function freedBytes(ids: number[]): number {
+  return ids.reduce((sum, id) => {
     const it = state.items.get(id);
     return sum + (it?.total_filesize || it?.filesize || 0);
   }, 0);
+}
+
+async function openDeleteConfirm(ids: number[]): Promise<void> {
+  const n = ids.length;
+  if (!n) return;
+  const freed = freedBytes(ids);
   const sub = t('deleteConfirm.sub', { n });
-  els.deleteConfirmSub.textContent = freed > 0
-    ? sub + ' ' + t('deleteConfirm.frees', { size: fmtSize(freed) })
-    : sub;
-  openModal(els.deleteConfirm);
+  const ok = await askConfirm({
+    title: t('deleteConfirm.title'),
+    sub: freed > 0 ? sub + ' ' + t('deleteConfirm.frees', { size: fmtSize(freed) }) : sub,
+    confirm: t('deleteConfirm.confirm'),
+    danger: true,
+  });
+  if (ok) batchDelete(ids);
 }
 
 // Delete every video of a playlist fold (its child ids), behind the confirm.
@@ -2913,13 +3592,10 @@ function deleteGroup(gkey: string): void {
   openDeleteConfirm(groupChildIds(gkey));
 }
 
-// DELETE every pending item, removing its local file too (the backend no-ops
+// DELETE every confirmed item, removing its local file too (the backend no-ops
 // safely when there's no file, so this just clears the record then). Rows drop
 // from the list as they succeed.
-async function batchDelete(): Promise<void> {
-  const ids = pendingDeleteIds.slice();
-  pendingDeleteIds = [];
-  closeModal(els.deleteConfirm);
+async function batchDelete(ids: number[]): Promise<void> {
   if (!ids.length) return;
   els.selDelete.disabled = true;
   let ok = 0;
@@ -2945,6 +3621,17 @@ async function batchDelete(): Promise<void> {
 async function batchClean(): Promise<void> {
   const ids = [...state.selected];
   if (!ids.length) return;
+  // Erases the downloaded file of every selected item. Nothing about that is
+  // reversible without re-downloading, so it asks first — same as Delete does.
+  const freed = freedBytes(ids);
+  const sub = t('cleanConfirm.sub', { n: ids.length });
+  const confirmed = await askConfirm({
+    title: t('cleanConfirm.title'),
+    sub: freed > 0 ? sub + ' ' + t('deleteConfirm.frees', { size: fmtSize(freed) }) : sub,
+    confirm: t('sel.clean'),
+    danger: true,
+  });
+  if (!confirmed) return;
   els.selClean.disabled = true;
   let ok = 0;
   try {
@@ -2978,12 +3665,6 @@ els.selUnshare.addEventListener('click', batchUnshare);
 els.selCopy.addEventListener('click', batchCopyLinks);
 els.selClean.addEventListener('click', batchClean);
 els.selDelete.addEventListener('click', () => openDeleteConfirm([...state.selected]));
-els.deleteConfirmYes.addEventListener('click', batchDelete);
-els.deleteConfirmCancel.addEventListener('click', () => closeModal(els.deleteConfirm));
-els.deleteConfirmClose.addEventListener('click', () => closeModal(els.deleteConfirm));
-els.deleteConfirm.addEventListener('click', (e) => {
-  if (e.target === els.deleteConfirm) closeModal(els.deleteConfirm); // backdrop dismiss
-});
 els.batchShareConfirm.addEventListener('click', applyBatchShare);
 els.batchShareClose.addEventListener('click', () => closeModal(els.batchShare));
 els.batchShare.addEventListener('click', (e) => {
@@ -3063,23 +3744,67 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   // central back handler (below) does this via its own sentinel — don't stack.
   if (!isNativeApp && !(history.state && history.state.player)) history.pushState({ player: true }, '');
   const play = () => v.play().catch(() => { /* autoplay may need a tap */ });
-  if (cloud) {
-    // Online mode: play through the backend proxy, keyed by the item's slug (not
-    // its id). It resolves the upstream URL with cookies and streams the bytes
-    // back, so we never hand the browser a stale/IP-bound CDN URL. The resolve
-    // happens server-side (capped at 25s); the poster holds until the first bytes
-    // arrive, and the <video> 'error' handler surfaces a failed resolve.
-    const slug = state.items.get(id)?.slug;
-    if (!slug) { toast(t('toast.streamFail'), 'error'); closePlayer(true); return; }
-    v.src = streamUrl(slug);
-    v.load();
-    play();
-  } else {
-    v.src = fileUrl(id);
-    v.load();
-    play();
-    loadSubtitles(id);
+
+  // Prefer a copy already on this device: it starts instantly, costs no data,
+  // and works with the server unreachable. Async, so the poster covers the
+  // lookup; everything below is the fallback when there is no local file.
+  playLocal(id, v, play).then((played) => {
+    if (played) return;
+    if (cloud) {
+      // Online mode: play through the backend proxy, keyed by the item's slug (not
+      // its id). It resolves the upstream URL with cookies and streams the bytes
+      // back, so we never hand the browser a stale/IP-bound CDN URL. The resolve
+      // happens server-side (capped at 25s); the poster holds until the first bytes
+      // arrive, and the <video> 'error' handler surfaces a failed resolve.
+      const slug = state.items.get(id)?.slug;
+      if (!slug) { toast(t('toast.streamFail'), 'error'); closePlayer(true); return; }
+      v.src = streamUrl(slug);
+      v.load();
+      play();
+    } else {
+      v.src = fileUrl(id);
+      v.load();
+      play();
+      loadSubtitles(id);
+    }
+  });
+}
+
+/**
+ * The file saved on this device for an item, or null. Android app only —
+ * everywhere else there is no local-save path, so this is always null and the
+ * caller falls through to the server.
+ *
+ * `url` is a loopback address served by the app itself, NOT `convertFileSrc()`:
+ * Android's WebView routes <video> through a media stack that never consults the
+ * asset-protocol interceptor, so an asset:// URL fetches fine and plays never.
+ * See LocalMediaServer.kt.
+ */
+async function localFileFor(slug: string | undefined): Promise<{ url: string; height: number } | null> {
+  const T = window.__TAURI__;
+  if (!slug || !isAndroidApp() || !T?.core?.invoke) return null;
+  try {
+    const r = await T.core.invoke('local_file', { slug }) as { url?: string; height?: number };
+    return r?.url ? { url: r.url, height: r.height || 0 } : null;
+  } catch (_) {
+    return null;
   }
+}
+
+/**
+ * Point the player at the on-device copy, if there is one. Returns whether it
+ * took over, so the caller can fall back to the server when it didn't.
+ */
+async function playLocal(id: number, v: HTMLVideoElement, play: () => void): Promise<boolean> {
+  const local = await localFileFor(state.items.get(id)?.slug);
+  if (!local) return false;
+  // The player may have been closed (or moved to another clip) while we waited.
+  if (els.player.classList.contains('hidden')) return false;
+  v.src = local.url;
+  v.load();
+  play();
+  loadSubtitles(id);
+  return true;
 }
 
 // Attach the item's subtitle sidecars as <track> elements. Local playback only:
@@ -3189,7 +3914,7 @@ els.playerClose.addEventListener('click', () => closePlayer(true));
 function dismissTopLayer(): boolean {
   if (!els.player.classList.contains('hidden')) { closePlayer(false); return true; }
   if (!els.permissionsPrompt.classList.contains('hidden')) { closeModal(els.permissionsPrompt); return true; }
-  if (!els.deleteConfirm.classList.contains('hidden')) { closeModal(els.deleteConfirm); return true; }
+  if (!els.confirmBox.classList.contains('hidden')) { settleConfirm(false); return true; }
   if (!els.batchShare.classList.contains('hidden')) { closeModal(els.batchShare); return true; }
   if (!els.shareOverlay.classList.contains('hidden')) { closeShare(); return true; }
   if (!els.siteEdit.classList.contains('hidden')) { closeModal(els.siteEdit); return true; }
@@ -3435,62 +4160,40 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// ---- Language picker (topbar popover) -------------------------------------
-// Auto-detected from the browser/OS on first load (see i18n.ts). The languages
-// icon in the topbar opens a small popover menu — the standard header-menu
-// pattern — to override the current page; "Auto (system)" clears the override.
-function renderLangMenu(): void {
-  if (!els.langMenu) return;
+// ---- Language (Settings › Appearance) -------------------------------------
+// The app already follows the OS: i18n.ts picks the closest supported locale out
+// of navigator.languages on load, which in the Android WebView tracks the system
+// language. This picker only exists to override that, so it defaults to "Auto
+// (system)" and lives in Settings rather than costing a permanent topbar button.
+function renderLangSelect(): void {
+  if (!els.langSelect) return;
   const pref = window.i18n.langPref();
   const langs = window.i18n.supported();
   const rows: [string, string][] = [
     ['auto', t('lang.auto')],
     ...Object.keys(langs).map((code) => [code, langs[code]!.label] as [string, string]),
   ];
-  els.langMenu.innerHTML = rows.map(([code, label]) =>
-    `<button class="popover-item${code === pref ? ' active' : ''}" role="menuitemradio"
-       aria-checked="${code === pref}" data-lang="${code}">${esc(label)}</button>`).join('');
+  els.langSelect.innerHTML = rows
+    .map(([code, label]) => `<option value="${esc(code)}">${esc(label)}</option>`)
+    .join('');
+  els.langSelect.value = pref;
 }
 
-function toggleLangMenu(open?: boolean): void {
-  const willOpen = open != null ? open : els.langMenu.classList.contains('hidden');
-  if (willOpen) renderLangMenu();
-  els.langMenu.classList.toggle('hidden', !willOpen);
-  els.langToggle.setAttribute('aria-expanded', String(willOpen));
-  els.langToggle.classList.toggle('active', willOpen);
+if (els.langSelect) {
+  // Applied on the spot: a language you have to press Save to see would be a
+  // worse experience than the topbar button this replaced.
+  els.langSelect.addEventListener('change', () => window.i18n.setLang(els.langSelect.value));
 }
 
-if (els.langToggle) {
-  els.langToggle.addEventListener('click', (e) => { e.stopPropagation(); toggleLangMenu(); });
-  els.langMenu.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest('[data-lang]') as HTMLElement | null;
-    if (!btn) return;
-    window.i18n.setLang(btn.dataset.lang!);
-    toggleLangMenu(false);
-  });
-  // Click / tap anywhere else closes the popover.
-  document.addEventListener('click', (e) => {
-    if (els.langMenu.classList.contains('hidden')) return;
-    if (!els.langMenu.contains(e.target as Node) && e.target !== els.langToggle) toggleLangMenu(false);
-  });
-}
-
-// ---- Theme toggle (system-aware, manual override) -------------------------
-// Follows the OS by default; the sun/moon button cycles System → Light → Dark.
-// A forced choice sets html[data-theme] (see style.css); "system" removes it so
-// prefers-color-scheme governs again. The glyph shows the *effective* theme.
+// ---- Theme (Settings › Appearance) ----------------------------------------
+// Follows the OS by default via prefers-color-scheme (see style.css) — including
+// in the Android WebView, which tracks the system dark-mode setting. The
+// segmented picker only overrides that: a forced choice sets html[data-theme],
+// and "System" removes it so prefers-color-scheme governs again.
 const THEME_KEY = 'orca_theme';
 migrateLegacyStorage(THEME_KEY, 'theme');
-const THEME_ORDER = ['system', 'light', 'dark'];
-const SUN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`;
-const MOON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>`;
 
 function themePref(): string { return localStorage.getItem(THEME_KEY) || 'system'; }
-function systemDark(): boolean { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); }
-function effectiveTheme(): string {
-  const p = themePref();
-  return p === 'system' ? (systemDark() ? 'dark' : 'light') : p;
-}
 
 // Apply the preference: force via data-theme, or clear it to follow the system.
 // Also keep the status-bar theme-color meta in sync with the resolved bg.
@@ -3505,35 +4208,35 @@ function applyTheme(): void {
   }
 }
 
-function renderThemeToggle(): void {
-  if (!els.themeToggle) return;
-  els.themeToggle.innerHTML = effectiveTheme() === 'dark' ? MOON_SVG : SUN_SVG;
-  const label = t('aria.theme') + ': ' + t('theme.' + themePref());
-  els.themeToggle.setAttribute('aria-label', label);
-  els.themeToggle.setAttribute('title', label);
+function renderThemePicker(): void {
+  const pref = themePref();
+  document.querySelectorAll<HTMLInputElement>('input[name="theme-pref"]').forEach((r) => {
+    r.checked = r.value === pref;
+  });
 }
 
-if (els.themeToggle) {
-  els.themeToggle.addEventListener('click', () => {
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(themePref()) + 1) % THEME_ORDER.length]!;
-    localStorage.setItem(THEME_KEY, next);
+document.querySelectorAll<HTMLInputElement>('input[name="theme-pref"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    if (!radio.checked) return;
+    localStorage.setItem(THEME_KEY, radio.value);
     applyTheme();
-    renderThemeToggle();
   });
-  // Re-resolve when the system theme flips while we're following it.
-  if (window.matchMedia) {
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-      if (themePref() === 'system') { applyTheme(); renderThemeToggle(); }
-    });
-  }
+});
+
+// Re-resolve when the system theme flips while we're following it. Without this
+// the WebView repaints its own colours but our theme-color meta goes stale.
+if (window.matchMedia) {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (themePref() === 'system') applyTheme();
+  });
 }
 
 // Re-render everything that isn't covered by static [data-i18n] markup whenever
-// the language changes: the theme toggle's mode label, the server-status label,
-// live list rows (badges), and the cookie list if it's open. (The language menu
-// is rebuilt on open.)
+// the language changes: the server-status label, live list rows (badges), the
+// language picker's own "Auto (system)" row, and the website list if it's open.
 document.addEventListener('i18n:changed', () => {
-  renderThemeToggle();
+  renderLangSelect();
+  renderArchiveRestore();
   renderAppPermissions();
   setServerStatus(serverUp);
   renderDlStats(); // re-localize the "N items · X GB" summary
@@ -3602,7 +4305,8 @@ document.addEventListener('visibilitychange', () => {
 // ---- Boot -----------------------------------------------------------------
 applyTheme();                // resolve theme before first paint work
 window.i18n.apply(document); // localize the static markup before anything shows
-renderThemeToggle();
+renderThemePicker();
+renderLangSelect();
 setServerStatus(false);      // start red; SSE onopen flips it green when live
 if (!getToken()) showTokenField(false);
 loadServerConfig();

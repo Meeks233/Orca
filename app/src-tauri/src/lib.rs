@@ -8,6 +8,15 @@ use tauri::Manager;
 struct AndroidPermissionStatus {
     notifications: bool,
     background: bool,
+    /// Whether the app may write Downloads/ ("All files access" on API 30+).
+    #[serde(default)]
+    storage: bool,
+    /// Whether saves go to the hidden `Downloads/.Orca` instead of `Downloads/Orca`.
+    #[serde(default, rename = "hideDownloads")]
+    hide_downloads: bool,
+    /// Files relocated by the last `set_hide_downloads` call; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved: Option<u32>,
 }
 
 #[cfg(target_os = "android")]
@@ -88,6 +97,108 @@ fn request_notification_permission<R: tauri::Runtime>(
     Err("Android permissions are unavailable on this platform".into())
 }
 
+/// Send the user to the OS screen that grants access to shared storage, so
+/// "save to device" can write Downloads/Orca. On API 30+ this is a Settings
+/// screen rather than a dialog, so the returned status is usually still
+/// `storage: false` — the frontend re-reads it on resume.
+#[tauri::command]
+fn request_storage_permission<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<AndroidPermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin("requestStorage", ())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("Android permissions are unavailable on this platform".into())
+}
+
+/// Save a finished item's file to Downloads/Orca. `url` is the same tokenised
+/// `/file?download=1` link the browser would follow — an Android WebView just
+/// ignores `<a download>`, which is why this exists.
+#[tauri::command]
+fn save_media<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    _url: String,
+    _name: String,
+    _slug: String,
+    _height: i64,
+) -> Result<AndroidPermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin(
+                "saveMedia",
+                serde_json::json!({
+                    "url": _url, "name": _name, "slug": _slug, "height": _height,
+                }),
+            )
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("Saving to device is only available in the Android app".into())
+}
+
+/// Where an item's locally-saved file lives, so the player can play it off this
+/// device instead of streaming it back from the server. `path` is empty when
+/// there is no local copy (or it has since been deleted).
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct LocalFile {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    height: i64,
+    /// Loopback URL the WebView can actually play (see LocalMediaServer.kt —
+    /// Android's media stack ignores the asset protocol, so a real HTTP origin
+    /// is required). Empty when there is no local copy.
+    #[serde(default)]
+    url: String,
+}
+
+#[tauri::command]
+fn local_file<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    _slug: String,
+) -> Result<LocalFile, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin("localFile", serde_json::json!({ "slug": _slug }))
+            .map_err(|e| e.to_string());
+    }
+    // Desktop has no local-save path at all, so "no local copy" is the honest
+    // answer — and lets the caller use one code path on every platform.
+    #[cfg(not(target_os = "android"))]
+    Ok(LocalFile::default())
+}
+
+/// Move saved downloads between `Downloads/Orca` and the hidden
+/// `Downloads/.Orca`, and pin where future saves land.
+#[tauri::command]
+fn set_hide_downloads<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    _hidden: bool,
+) -> Result<AndroidPermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin("setHideDownloads", serde_json::json!({ "hidden": _hidden }))
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("Saving to device is only available in the Android app".into())
+}
+
 /// Hand a download submitted from inside the app to the Android foreground
 /// service that owns download notifications, so an in-app download notifies the
 /// same way a shared link does. No-op off Android.
@@ -140,6 +251,10 @@ pub fn run() {
             android_permission_status,
             request_notification_permission,
             request_background_permission,
+            request_storage_permission,
+            save_media,
+            local_file,
+            set_hide_downloads,
             track_download,
             take_pending_deeplink
         ]);

@@ -143,6 +143,21 @@ fn env_opt(key: &str) -> Option<String> {
 }
 
 impl Config {
+    /// Default name yt-dlp writes: "<uploader> - <date> - <title> [<id>].<ext>".
+    ///
+    /// Every field is truncated in BYTES (`.NB`), not characters: ext4 caps a
+    /// name at 255 *bytes*, the tightest limit across the filesystems a download
+    /// can land on (NTFS, APFS and exFAT count 255 characters instead), so a CJK
+    /// title at 3 bytes/char runs out of room on ext4 first. The fields below sum
+    /// to 231 bytes, which is what `ytdlp::options::NAME_MAX_BYTES` enforces —
+    /// the slack covers what yt-dlp appends *after* the template (see there).
+    ///
+    /// The date falls back from upload_date to release_date to "0000-00-00" so
+    /// the field never collapses and shift the rest of the name around.
+    pub const DEFAULT_OUTPUT_TEMPLATE: &'static str = "%(uploader,channel,creator|Unknown).32B - \
+         %(upload_date>%Y-%m-%d,release_date>%Y-%m-%d|0000-00-00)s - \
+         %(title,description|Untitled).150B [%(id).30B].%(ext)s";
+
     pub fn from_env() -> anyhow::Result<Self> {
         let (token, token_generated) = match env_opt("ORCA_TOKEN") {
             Some(t) => (t, false),
@@ -213,10 +228,19 @@ impl Config {
             )
         })?;
 
-        let output_template = env_or(
-            "ORCA_OUTPUT_TEMPLATE",
-            "%(uploader,channel|Unknown)s - %(title).150B [%(id)s].%(ext)s",
-        );
+        // Default name: "<uploader> - <date> - <title> [<id>].<ext>".
+        //
+        // Every field is truncated in BYTES (`.NB`), not characters: ext4 caps a
+        // name at 255 *bytes*, which is the tightest of the filesystems we can
+        // land on (NTFS/APFS/exFAT count 255 UTF-16/UTF-8 characters), so a CJK
+        // title at 3 bytes/char hits ext4 first. The budget below sums to 231
+        // bytes, leaving room for what yt-dlp appends after the template:
+        // ` [2160p]` for a resolution variant (8), the longest container ext (5),
+        // a `.zh-Hant.vtt` subtitle sidecar (12), and a `.part` suffix (5).
+        //
+        // The date comes from upload_date, falling back to release_date, and is
+        // dropped to "0000-00-00" when the extractor reports neither.
+        let output_template = env_or("ORCA_OUTPUT_TEMPLATE", Config::DEFAULT_OUTPUT_TEMPLATE);
         let format_user_set = env_opt("ORCA_FORMAT").is_some();
         let format = env_or("ORCA_FORMAT", "bv*+ba/b");
         // Highest by default (unset). A value of 0 / "highest"/"best"/"none"

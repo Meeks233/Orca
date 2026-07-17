@@ -19,6 +19,9 @@
 <body>
   <header class="topbar">
     <div class="brand-wrap">
+      <!-- Brand mark. Black line art on a transparent ground, inverted to white
+           in dark mode by CSS — see .brand-logo in style.css. -->
+      <img id="brand-logo" class="brand-logo" src="/icons/logo.png" width="26" height="26" alt="Orca">
       <!-- Server status heartbeat: green + breathing while the SSE stream is
             live, red when it drops. Driven by the EventSource lifecycle in app.js. -->
       <span id="server-status" class="server-status down" role="status" aria-label="Server status" data-i18n-aria="aria.serverStatus"></span>
@@ -27,36 +30,38 @@
       <span id="dl-stats" class="dl-stats hidden" role="status" aria-live="polite"></span>
     </div>
     <div class="topbar-actions">
-      <!-- Language picker: a topbar popover (industry-standard header menu),
-           sitting to the left of the cookies button. -->
-      <div class="menu-wrap">
-        <button id="lang-toggle" class="icon-btn" aria-label="Language" title="Language" aria-haspopup="menu" aria-expanded="false" data-i18n-aria="aria.language" data-i18n-title="aria.language"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg></button>
-        <div id="lang-menu" class="popover-menu hidden" role="menu"></div>
-      </div>
-      <!-- Theme toggle: follows the system by default, cycles System → Light →
-           Dark. The sun/moon glyph reflects the currently-effective theme. -->
-      <button id="theme-toggle" class="icon-btn" aria-label="Theme" title="Theme"></button>
-      <button id="websites-toggle" class="icon-btn" aria-label="Websites" title="Websites" data-i18n-aria="aria.websites" data-i18n-title="aria.websites"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v4"/><path d="m14.305 7.53.923-.382"/><path d="m15.228 4.852-.923-.383"/><path d="m16.852 3.228-.383-.924"/><path d="m16.852 8.772-.383.923"/><path d="m19.148 3.228.383-.924"/><path d="m19.53 9.696-.382-.924"/><path d="m20.772 4.852.924-.383"/><path d="m20.772 7.148.924.383"/><path d="M22 13v2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><path d="M8 21h8"/><circle cx="18" cy="6" r="3"/></svg></button>
+      <!-- Language and Theme are NOT here: both follow the OS on their own
+           (navigator.languages / prefers-color-scheme), so a permanent topbar
+           control for each was two buttons spent on something already correct by
+           default. The manual overrides live in Settings › Appearance. -->
+      <button id="websites-toggle" class="icon-btn" aria-label="Websites" title="Websites" data-i18n-aria="aria.websites" data-i18n-title="aria.websites"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/></svg></button>
       <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings" data-i18n-aria="aria.settings" data-i18n-title="aria.settings"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg></button>
     </div>
   </header>
 
   <section class="submit">
     <form id="submit-form" class="row">
-      <!-- type=text, not url: the box accepts several links at once (see
-           parseLinks), which native url validation would reject outright. -->
-      <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" data-i18n-ph="ph.url" required>
-      <button id="paste-btn" class="icon-btn paste-btn" type="button" aria-label="Paste" title="Paste" data-i18n-aria="aria.paste" data-i18n-title="aria.paste"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></svg></button>
+      <!-- The URL box and its Paste affordance share ONE field shell (.field)
+           that lights up as a whole on focus, so the row reads as "a field and
+           its action" rather than three unrelated boxes. -->
+      <div class="field">
+        <!-- type=text, not url: the box accepts several links at once (see
+             parseLinks), which native url validation would reject outright. -->
+        <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" data-i18n-ph="ph.url" required>
+        <button id="paste-btn" class="field-btn" type="button" aria-label="Paste" title="Paste" data-i18n-aria="aria.paste" data-i18n-title="aria.paste"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></svg></button>
+      </div>
       <button id="submit-btn" class="btn" type="submit" data-i18n="btn.download">Download</button>
     </form>
   </section>
 
   <section class="controls">
     <button id="select-toggle" class="icon-btn sel-toggle" aria-label="Select multiple" title="Select multiple" data-i18n-aria="aria.selectMultiple" data-i18n-title="aria.selectMultiple"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
-    <input id="search" type="search"
-           placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
-           data-i18n-ph="ph.search" data-i18n-title="title.search"
-           title="e621-style syntax: id: user:/uploader: title: platform:/site: status: — prefix a term with - to exclude. Bare words match title, uploader OR platform; a bare status word (queued/running/completed/failed) filters by status.">
+    <div class="field">
+      <input id="search" type="search"
+             placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
+             data-i18n-ph="ph.search" data-i18n-title="title.search"
+             title="e621-style syntax: id: user:/uploader: title: platform:/site: status: — prefix a term with - to exclude. Bare words match title, uploader OR platform; a bare status word (queued/running/completed/failed) filters by status.">
+    </div>
   </section>
 
   <div id="ptr" class="ptr" aria-hidden="true">
@@ -76,36 +81,39 @@
   <!-- Floating "back to top" affordance: revealed once the page is scrolled well
        past the fold (see setupBackToTop), hidden again near the top. -->
   <button id="to-top" class="to-top hidden" type="button" aria-label="Back to top" title="Back to top" data-i18n-aria="aria.toTop" data-i18n-title="aria.toTop">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/></svg>
   </button>
 
   <!-- Batch action bar: shown in multi-select mode (toolbar toggle or long-press
-       a card). Acts on the checked items — download / share / copy links. -->
+       a card). Every button here is hidden unless the current selection can
+       actually take that action — see updateSelBar — so nothing arrives
+       greyed-out and the bar stays short enough to read on a phone. -->
   <div id="select-bar" class="select-bar hidden" role="toolbar" aria-label="Batch actions">
     <span id="select-count" class="select-count" data-i18n="sel.count0">Select items</span>
     <div class="select-actions">
-      <button id="sel-all" class="btn btn-ghost" data-i18n="sel.all">Select all</button>
-      <button id="sel-invert" class="btn btn-ghost" data-i18n="sel.invert">Invert</button>
-      <button id="sel-download" class="btn btn-ghost" data-i18n="sel.download" disabled>Download</button>
-      <button id="sel-share" class="btn btn-ghost" data-i18n="sel.share" disabled>Share</button>
-      <button id="sel-unshare" class="btn btn-ghost" data-i18n="sel.unshare" disabled>Unshare</button>
-      <button id="sel-copy" class="btn btn-ghost" data-i18n="sel.copy" disabled>Copy links</button>
-      <button id="sel-clean" class="btn btn-ghost" data-i18n="sel.clean" disabled>Clean downloads</button>
-      <button id="sel-delete" class="btn btn-danger" data-i18n="sel.delete" disabled>Delete</button>
+      <button id="sel-all" class="btn btn-ghost hidden" data-i18n="sel.all">Select all</button>
+      <button id="sel-invert" class="btn btn-ghost hidden" data-i18n="sel.invert">Invert</button>
+      <button id="sel-download" class="btn btn-ghost hidden" data-i18n="sel.download">Download</button>
+      <button id="sel-share" class="btn btn-ghost hidden" data-i18n="sel.share">Share</button>
+      <button id="sel-unshare" class="btn btn-ghost hidden" data-i18n="sel.unshare">Unshare</button>
+      <button id="sel-copy" class="btn btn-ghost hidden" data-i18n="sel.copy">Copy links</button>
+      <button id="sel-clean" class="btn btn-ghost hidden" data-i18n="sel.clean">Clean downloads</button>
+      <button id="sel-delete" class="btn btn-danger hidden" data-i18n="sel.delete">Delete</button>
       <button id="sel-cancel" class="btn" data-i18n="sel.done">Done</button>
     </div>
   </div>
 
-  <!-- Delete confirmation: batch delete is destructive (removes records and any
-       downloaded files), so require an explicit confirm. -->
-  <div id="delete-confirm" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
-    <div class="modal-card">
-      <button id="delete-confirm-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
-      <h2 id="delete-confirm-title" class="modal-heading" data-i18n="deleteConfirm.title">Delete selected?</h2>
-      <p id="delete-confirm-sub" class="hint-muted"></p>
+  <!-- The one confirmation dialog. Every irreversible action routes through it
+       via askConfirm() in app.js, which fills in the title/body/verb — so they
+       all look and behave the same instead of each growing its own box. -->
+  <div id="confirm" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal-card modal-card-narrow">
+      <button id="confirm-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="confirm-title" class="modal-heading"></h2>
+      <p id="confirm-sub" class="hint-muted"></p>
       <div class="share-actions">
-        <button id="delete-confirm-cancel" class="btn btn-ghost" data-i18n="deleteConfirm.cancel">Cancel</button>
-        <button id="delete-confirm-yes" class="btn btn-danger" data-i18n="deleteConfirm.confirm">Delete</button>
+        <button id="confirm-cancel" class="btn btn-ghost" data-i18n="deleteConfirm.cancel">Cancel</button>
+        <button id="confirm-yes" class="btn"></button>
       </div>
     </div>
   </div>
@@ -117,11 +125,11 @@
       <button id="batch-share-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="batch-share-title" class="modal-heading" data-i18n="batchShare.title">Share selected</h2>
       <p id="batch-share-sub" class="hint-muted"></p>
-      <p class="share-windows-label" data-i18n="share.duration">Link duration</p>
-      <div class="share-windows" role="radiogroup" aria-label="Link duration">
-        <label class="share-opt"><input type="radio" name="batch-share-window" value="7" checked><span data-i18n="share.days7">7 days</span></label>
-        <label class="share-opt"><input type="radio" name="batch-share-window" value="30"><span data-i18n="share.days30">30 days</span></label>
-        <label class="share-opt"><input type="radio" name="batch-share-window" value="permanent"><span data-i18n="share.permanent">Permanent</span></label>
+      <p class="field-label" data-i18n="share.duration">Link duration</p>
+      <div class="segmented" role="radiogroup" aria-label="Link duration">
+        <label class="segment"><input type="radio" name="batch-share-window" value="7" checked><span data-i18n="share.days7">7 days</span></label>
+        <label class="segment"><input type="radio" name="batch-share-window" value="30"><span data-i18n="share.days30">30 days</span></label>
+        <label class="segment"><input type="radio" name="batch-share-window" value="permanent"><span data-i18n="share.permanent">Permanent</span></label>
       </div>
       <div class="share-actions">
         <button id="batch-share-confirm" class="btn" data-i18n="batchShare.create">Create links</button>
@@ -138,17 +146,22 @@
     <div class="modal-card permission-prompt-card">
       <button id="permissions-prompt-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="permissions-prompt-title" class="modal-heading" data-i18n="permissionsPrompt.title">App permissions</h2>
-      <p class="hint-muted" data-i18n="permissionsPrompt.hint">Allow these so Orca can report downloads reliably in the background.</p>
+      <p class="hint-muted" data-i18n="permissionsPrompt.hint">Orca needs these to report downloads while in the background.</p>
       <div class="permission-box">
         <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
           <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
           <span class="permission-copy"><strong data-i18n="settings.permNotifications">Notifications</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
-          <span class="permission-result" aria-hidden="true">…</span>
+          <span class="permission-result" aria-hidden="true"></span>
         </button>
         <button class="permission-item" type="button" data-permission="background" data-state="checking">
-          <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7h1a2 2 0 0 1 2 2v2"/><path d="M6 7h1"/><path d="M6 11h8"/><path d="M6 15h8"/><rect width="16" height="16" x="2" y="4" rx="2"/><path d="M22 11v2"/></svg></span>
+          <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 9v6"/><path d="M12.543 6H16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3.605"/><path d="M22 14v-4"/><path d="M7 12h6"/><path d="M7.606 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3.606"/></svg></span>
           <span class="permission-copy"><strong data-i18n="settings.permBackground">Background activity</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
-          <span class="permission-result" aria-hidden="true">…</span>
+          <span class="permission-result" aria-hidden="true"></span>
+        </button>
+        <button class="permission-item" type="button" data-permission="storage" data-state="checking">
+          <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
+          <span class="permission-copy"><strong data-i18n="settings.permStorage">Storage access</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+          <span class="permission-result" aria-hidden="true"></span>
         </button>
       </div>
       <div class="share-actions permission-prompt-actions">
@@ -175,11 +188,11 @@
 
       <!-- Main view: pick a window, create / update / copy the link. -->
       <div id="share-main">
-        <p class="share-windows-label" data-i18n="share.duration">Link duration</p>
-        <div class="share-windows" role="radiogroup" aria-label="Link duration">
-          <label class="share-opt"><input type="radio" name="share-window" value="7" checked><span data-i18n="share.days7">7 days</span></label>
-          <label class="share-opt"><input type="radio" name="share-window" value="30"><span data-i18n="share.days30">30 days</span></label>
-          <label class="share-opt"><input type="radio" name="share-window" value="permanent"><span data-i18n="share.permanent">Permanent</span></label>
+        <p class="field-label" data-i18n="share.duration">Link duration</p>
+        <div class="segmented" role="radiogroup" aria-label="Link duration">
+          <label class="segment"><input type="radio" name="share-window" value="7" checked><span data-i18n="share.days7">7 days</span></label>
+          <label class="segment"><input type="radio" name="share-window" value="30"><span data-i18n="share.days30">30 days</span></label>
+          <label class="segment"><input type="radio" name="share-window" value="permanent"><span data-i18n="share.permanent">Permanent</span></label>
         </div>
 
         <div id="share-link-row" class="share-link-row hidden">
@@ -206,59 +219,120 @@
     </div>
   </div>
 
-  <!-- Settings dialog. Server URL + API token + the Seal/yt-dlp download
-       archive editor (loaded live, edited in place, saved — not just imported). -->
+  <!-- Settings dialog. Appearance + connection (server URL / API token) + the
+       Seal/yt-dlp download archive editor (loaded live, edited in place).
+
+       There is ONE Save here, in a bar that appears only once something is
+       actually dirty (see the Dirty-tracked save bar in app.ts) — not a button
+       per field. -->
   <div id="settings" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-card">
       <button id="settings-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="settings-title" class="modal-heading" data-i18n="settings.title">Settings</h2>
 
-      <!-- App-only: hidden in browsers (same-origin), shown in the native
-           Tauri shell where the UI must be pointed at a remote server. See
-           `html:not(.app-native) #server-row` in style.css. -->
-      <div id="server-row">
-        <label for="server" data-i18n="settings.serverUrl">Server URL</label>
-        <div class="row">
-          <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
-          <button id="server-save" class="btn" data-i18n="btn.save">Save</button>
+      <!-- Appearance. Both controls default to "Auto": the app already follows
+           the OS language (navigator.languages) and the OS light/dark setting
+           (prefers-color-scheme) with no help. These only exist to override it,
+           which is why they live here rather than in the topbar. Applied on the
+           spot — a theme or language you have to Save to see is just wrong. -->
+      <label data-i18n="settings.appearance">Appearance</label>
+      <div class="form-row">
+        <span class="form-row-label" data-i18n="settings.theme">Theme</span>
+        <div class="form-row-ctl">
+          <div class="segmented" role="radiogroup" aria-label="Theme" data-i18n-aria="aria.theme">
+            <label class="segment"><input type="radio" name="theme-pref" value="system" checked><span data-i18n="theme.system">System</span></label>
+            <label class="segment"><input type="radio" name="theme-pref" value="light"><span data-i18n="theme.light">Light</span></label>
+            <label class="segment"><input type="radio" name="theme-pref" value="dark"><span data-i18n="theme.dark">Dark</span></label>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <label class="form-row-label" for="lang-select" data-i18n="settings.language">Language</label>
+        <div class="form-row-ctl">
+          <!-- A <select>, not a segmented control: the language list grows with
+               every locale added and would burst a segmented track. -->
+          <select id="lang-select" class="select"></select>
         </div>
       </div>
 
-      <!-- Android-only permission state. Each row reads the current OS state,
-           requests only what is missing, then refreshes again on app resume. -->
+      <hr class="sep">
+
+      <!-- Connection: which server, and the token to talk to it. Kept adjacent
+           because they are one thought — you cannot use one without the other,
+           and a token failure is usually really a wrong-URL failure. Both are
+           single-line label/field rows (the shape every settings sheet uses for
+           short scalar values) rather than stacked label-over-input blocks.
+           #server-row is app-only: hidden in browsers, where the origin already
+           IS the server. See `html:not(.app-native) #server-row` in style.css. -->
+      <label data-i18n="settings.connection">Connection</label>
+      <div id="server-row" class="form-row">
+        <label class="form-row-label" for="server" data-i18n="settings.serverUrl">Server URL</label>
+        <div class="form-row-ctl">
+          <input id="server" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
+        </div>
+      </div>
+      <div class="form-row">
+        <label class="form-row-label" for="token" data-i18n="settings.token">API token</label>
+        <div class="form-row-ctl">
+          <input id="token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+        </div>
+      </div>
+      <p id="token-hint" class="hint hidden" data-i18n="settings.tokenInvalid">Invalid token.</p>
+
+      <!-- Permission state. Shown only while something is still missing — a list
+           of green ticks is furniture, so once every permission is granted the
+           whole block hides itself (see renderAppPermissions). The rows differ by
+           platform: Android needs all three, the web build asks only about
+           notifications and never insists. -->
       <div id="perm-row" class="hidden">
         <label data-i18n="settings.permissions">App permissions</label>
         <div class="permission-box">
           <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
             <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
             <span class="permission-copy"><strong data-i18n="settings.permNotifications">Notifications</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
-            <span class="permission-result" aria-hidden="true">…</span>
+            <span class="permission-result" aria-hidden="true"></span>
           </button>
           <button class="permission-item" type="button" data-permission="background" data-state="checking">
-            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7h1a2 2 0 0 1 2 2v2"/><path d="M6 7h1"/><path d="M6 11h8"/><path d="M6 15h8"/><rect width="16" height="16" x="2" y="4" rx="2"/><path d="M22 11v2"/></svg></span>
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 9v6"/><path d="M12.543 6H16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3.605"/><path d="M22 14v-4"/><path d="M7 12h6"/><path d="M7.606 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3.606"/></svg></span>
             <span class="permission-copy"><strong data-i18n="settings.permBackground">Background activity</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
-            <span class="permission-result" aria-hidden="true">…</span>
+            <span class="permission-result" aria-hidden="true"></span>
+          </button>
+          <!-- Storage: needed before Save can write anything at all. On Android
+               11+ this opens the "All files access" screen, not a dialog. -->
+          <button class="permission-item" type="button" data-permission="storage" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permStorage">Storage access</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true"></span>
           </button>
         </div>
       </div>
 
-      <label for="token" data-i18n="settings.token">API token</label>
-      <div class="row">
-        <input id="token" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
-        <button id="token-save" class="btn" data-i18n="btn.save">Save</button>
+      <!-- App-only: where "Save" puts files, and whether that folder is hidden. -->
+      <div id="hide-dl-row" class="hidden">
+        <div class="form-row">
+          <span class="form-row-label" data-i18n="settings.hideDl">Hide my downloads</span>
+          <div class="form-row-ctl">
+            <button id="hide-dl-toggle" class="site-subs-toggle off" type="button" role="switch" aria-checked="false" data-i18n-title="settings.hideDl" title="Hide my downloads"><span class="knob"></span></button>
+          </div>
+        </div>
+        <p class="hint-muted" data-i18n="settings.hideDlHint">Saves to Downloads/.Orca instead of Downloads/Orca, out of the gallery. Existing files move too.</p>
+        <p id="hide-dl-needs-perm" class="hint hidden" data-i18n="settings.hideDlNeedsPerm">Allow storage access first.</p>
       </div>
-      <p id="token-hint" class="hint hidden" data-i18n="settings.tokenInvalid">Invalid token.</p>
 
       <hr class="sep">
-      <label for="seal-archive" data-i18n="settings.archive">Seal / yt-dlp download archive</label>
+      <div class="logs-head">
+        <label for="seal-archive" data-i18n="settings.archive">Download archive</label>
+        <div class="logs-actions">
+          <!-- Regret medicine. Reads "Discard changes" while the box is dirty and
+               "Restore previous" once it's clean — see renderArchiveRestore. -->
+          <button id="archive-restore" class="btn btn-ghost hidden" data-i18n="settings.archiveDiscard">Discard changes</button>
+        </div>
+      </div>
       <p class="hint-muted" data-i18n-html="settings.archiveHint">
-        Every entry Orca has ever recorded, one <code>extractor id</code> per line
-        (e.g. <code>youtube dQw4w9WgXcQ</code>). Edit freely — add lines to mark items
-        as already downloaded, or delete lines to let them re-download — then Save.
+        One <code>extractor id</code> per line. Delete a line to let it download again.
       </p>
       <textarea id="seal-archive" class="ta" rows="8"
                 placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..." data-i18n-ph="ph.archive"></textarea>
-      <button id="seal-import" class="btn wide" data-i18n="settings.archiveSave">Save archive</button>
 
       <!-- Diagnostics log: the backend's bounded ring buffer of recent probe /
            download errors. Each row is a native <details> disclosure (industry-
@@ -272,7 +346,6 @@
           <button id="logs-copy" class="btn btn-ghost" data-i18n="logs.copyAll">Copy all</button>
         </div>
       </div>
-      <p class="hint-muted" data-i18n="settings.logsHint">The most recent errors Orca hit while reading or downloading links. Tap a row to expand.</p>
       <div id="log-list" class="log-list"></div>
       <p id="log-empty" class="hint-muted hidden" data-i18n="settings.logsEmpty">No errors recorded yet.</p>
 
@@ -282,8 +355,20 @@
         <a href="https://github.com/Meeks233/Orca/issues" target="_blank" rel="noopener noreferrer">github.com/Meeks233/Orca</a>
       </p>
       <p class="settings-footer"><a href="https://github.com/Meeks233/Orca/blob/main/docs/PRIVACY.md" target="_blank" rel="noopener noreferrer">Privacy policy</a> · <a href="https://github.com/Meeks233/Orca" target="_blank" rel="noopener noreferrer">Source code</a> · <a href="/third-party-notices.txt" target="_blank" rel="noopener noreferrer">Licenses</a></p>
+
+      <!-- The one Save. Sticks to the bottom of the sheet and only appears once
+           a field is actually dirty (see setupSettingsSaveBar) — the pattern
+           GitHub/Vercel settings use, instead of a Save button per field. -->
+      <div id="settings-save-bar" class="save-bar hidden">
+        <span class="save-bar-msg" data-i18n="settings.unsaved">Unsaved changes</span>
+        <div class="save-bar-actions">
+          <button id="settings-revert" class="btn btn-ghost" data-i18n="settings.revert">Revert</button>
+          <button id="settings-save" class="btn" data-i18n="btn.save">Save</button>
+        </div>
+      </div>
     </div>
   </div>
+
 
   <!-- Website Management. The editable site registry: per-site cookies, resolution
        cap, enable/disable, alternate domains, and merging duplicates. -->
@@ -292,55 +377,40 @@
       <button id="websites-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="websites-title" class="modal-heading" data-i18n="sites.title">Website management</h2>
 
-      <!-- Global default resolution (moved here from Settings): the fallback cap
-           for any site that doesn't pin its own. -->
+      <!-- Global defaults: the fallback for any site that doesn't pin its own.
+           None of these carry a Save button — picking a value IS the save, which
+           is how the per-site controls on the cards below have always worked, so
+           the whole sheet now behaves the same way.
+           Deliberately no explainer text under these rows: they are the same four
+           controls each site card repeats below, and a hint here that the cards
+           don't have made the two read as different features. The `*-locked`
+           notices stay — those are conditional, and a disabled control with no
+           stated reason is worse than no control. Every field is built by JS
+           (renderGlobalDefaults) so it shares one code path with the cards. -->
       <div class="sites-global">
-        <label for="max-res" data-i18n="settings.maxRes">Maximum resolution</label>
-        <div class="row">
-          <select id="max-res" class="select">
-            <option value="none" data-i18n="res.noneOpt">None (no download)</option>
-            <option value="0" data-i18n="res.highest">Highest available</option>
-            <option value="4320">8K (4320p)</option>
-            <option value="2160">4K (2160p)</option>
-            <option value="1440">2K (1440p)</option>
-            <option value="1080">1080p</option>
-            <option value="720">720p</option>
-            <option value="480">480p</option>
-            <option value="360">360p</option>
-          </select>
-          <button id="max-res-save" class="btn" data-i18n="btn.save">Save</button>
+        <label data-i18n="sites.defaults">Defaults for every site</label>
+        <div class="form-row">
+          <span class="form-row-label" data-i18n="settings.maxRes">Maximum resolution</span>
+          <div class="form-row-ctl" id="max-res"></div>
         </div>
-        <p id="max-res-hint" class="hint-muted" data-i18n="settings.maxResHint">Caps the quality yt-dlp downloads. Highest picks the best available.</p>
         <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the ORCA_MAX_HEIGHT environment variable.</p>
-      </div>
 
-      <!-- Global default container: the fallback format for any site that doesn't
-           pin its own. -->
-      <div class="sites-global">
-        <label for="format" data-i18n="settings.format">Video format</label>
-        <div class="row">
-          <select id="format" class="select">
-            <option value="mkv">MKV</option>
-            <option value="mp4">MP4</option>
-            <option value="webm">WebM</option>
-            <option value="mov">MOV</option>
-            <option value="avi">AVI</option>
-            <option value="flv">FLV</option>
-          </select>
-          <button id="format-save" class="btn" data-i18n="btn.save">Save</button>
+        <div class="form-row">
+          <span class="form-row-label" data-i18n="settings.streamQuality">Share quality</span>
+          <div class="form-row-ctl" id="stream-quality"></div>
         </div>
-        <p id="format-hint" class="hint-muted" data-i18n="settings.formatHint">The container downloads are merged into. MKV fits every codec and any number of subtitle tracks; MP4 is the most widely compatible.</p>
+
+        <div class="form-row">
+          <span class="form-row-label" data-i18n="settings.format">Video format</span>
+          <div class="form-row-ctl" id="format"></div>
+        </div>
         <p id="format-locked" class="hint hidden" data-i18n="settings.formatLocked">Pinned by the ORCA_CONTAINER environment variable.</p>
-      </div>
 
-      <!-- Global default subtitle capture; each site can opt out on its own card. -->
-      <div class="sites-global">
-        <label for="subs-toggle" data-i18n="settings.subs">Subtitles</label>
-        <div class="row row-toggle">
-          <button id="subs-toggle" class="site-subs-toggle off" type="button" role="switch" aria-checked="false" data-i18n-title="settings.subs" title="Subtitles"><span class="knob"></span></button>
-          <button id="subs-save" class="btn" data-i18n="btn.save">Save</button>
+        <!-- Each site can still opt out of subtitles on its own card. -->
+        <div class="form-row">
+          <span class="form-row-label" data-i18n="settings.subs">Subtitles</span>
+          <div class="form-row-ctl" id="subs"></div>
         </div>
-        <p id="subs-hint" class="hint-muted" data-i18n="settings.subsHint">Downloads subtitles, embeds them in the video for offline playback, and keeps the original subtitle files alongside it.</p>
         <p id="subs-locked" class="hint hidden" data-i18n="settings.subsLocked">Pinned by the ORCA_SUBS environment variable.</p>
       </div>
 
@@ -378,10 +448,10 @@
       <input id="site-edit-name" class="input" type="text" autocomplete="off" placeholder="Example">
       <label data-i18n="sites.key">Key</label>
       <input id="site-edit-key" class="input" type="text" autocomplete="off" placeholder="example" pattern="[a-z0-9_]+">
-      <p class="hint-muted" data-i18n="sites.keyHint">Lowercase letters, digits, underscore. Used for the cookie file and folder.</p>
+      <p class="hint-muted" data-i18n="sites.keyHint">Lowercase letters, digits and underscore.</p>
       <label data-i18n="sites.domains">Alternate domains</label>
       <textarea id="site-edit-hosts" class="ta" rows="3" placeholder="example.com, exmpl.co, ex.tv"></textarea>
-      <p class="hint-muted" data-i18n="sites.domainsHint">Comma / space / newline separated. Duplicates are removed automatically.</p>
+      <p class="hint-muted" data-i18n="sites.domainsHint">Comma or newline separated.</p>
       <p id="site-edit-err" class="hint hidden"></p>
       <div class="share-actions">
         <button id="site-edit-cancel" class="btn btn-ghost" data-i18n="res.cancel">Cancel</button>
@@ -397,7 +467,7 @@
     <div class="modal-card">
       <button id="resolution-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="resolution-title" class="modal-heading" data-i18n="res.title">Download resolutions</h2>
-      <p class="hint-muted" data-i18n="res.hint">Tap the resolution versions to keep. Selecting a new one downloads it; deselecting a downloaded one deletes its local file.</p>
+      <p class="hint-muted" data-i18n="res.hint">Unticking a downloaded version deletes its file.</p>
       <div id="resolution-list" class="res-list" role="group" aria-labelledby="resolution-title"></div>
       <p id="resolution-empty" class="hint-muted hidden" data-i18n="res.none">No resolution info for this item.</p>
       <div class="share-actions">

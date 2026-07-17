@@ -78,10 +78,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/archive",
             get(archive::list)
+                .put(archive::replace)
                 .post(archive::add)
                 .delete(archive::remove),
         )
         .route("/api/archive/import", post(archive::import))
+        .route("/api/archive/restore", post(archive::restore))
         .route("/api/clients", get(clients::list))
         .route("/api/clients/:id/trust", post(clients::trust))
         .route("/api/clients/:id", axum::routing::delete(clients::delete))
