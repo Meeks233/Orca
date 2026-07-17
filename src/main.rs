@@ -16,6 +16,7 @@ mod error;
 mod net_guard;
 mod platform;
 mod queue;
+mod resolution;
 mod safepath;
 mod seal_import;
 mod types;

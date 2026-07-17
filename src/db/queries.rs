@@ -379,11 +379,11 @@ fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
         hosts: crate::websites::parse_hosts(&hosts_csv),
         login_url: row.try_get("login_url")?,
         enabled: row.try_get::<i64, _>("enabled")? != 0,
-        max_height: row.try_get("max_height")?,
+        max_heights: row.try_get("max_heights")?,
+        stream_quality: row.try_get("stream_quality")?,
         container: row.try_get("container")?,
         // NULL stays None ("follow global") rather than collapsing to false.
         subs: row.try_get::<Option<i64>, _>("subs")?.map(|v| v != 0),
-        no_download: row.try_get::<i64, _>("no_download")? != 0,
         blur: row.try_get::<i64, _>("blur")? != 0,
         sort: row.try_get("sort")?,
         cookie: None,
@@ -393,7 +393,7 @@ fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
 /// All websites, in display order (then name).
 pub(super) async fn list_websites(db: &Db) -> anyhow::Result<Vec<Website>> {
     let rows = sqlx::query(
-        "SELECT key, name, hosts, login_url, enabled, max_height, container, subs, no_download, blur, sort \
+        "SELECT key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, blur, sort \
          FROM websites ORDER BY sort, name",
     )
     .fetch_all(&db.pool)
@@ -404,12 +404,18 @@ pub(super) async fn list_websites(db: &Db) -> anyhow::Result<Vec<Website>> {
 /// Insert or update a website (keyed by `key`). `hosts` is stored as CSV.
 pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
     let hosts = crate::websites::hosts_to_csv(&w.hosts);
+    // `no_download` is no longer read back (migration 0019 made `max_heights` the
+    // source of truth, where the empty set means stream-only), but it is still a
+    // NOT NULL column and still what a pre-0019 build would read. Keep writing it
+    // as a mirror so the two can't disagree and a downgrade stays coherent.
+    let no_download = w.max_heights.as_deref() == Some("");
     sqlx::query(
-        "INSERT INTO websites (key, name, hosts, login_url, enabled, max_height, container, subs, no_download, blur, sort, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO websites (key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, no_download, blur, sort, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(key) DO UPDATE SET \
            name = excluded.name, hosts = excluded.hosts, login_url = excluded.login_url, \
-           enabled = excluded.enabled, max_height = excluded.max_height, \
+           enabled = excluded.enabled, max_heights = excluded.max_heights, \
+           stream_quality = excluded.stream_quality, \
            container = excluded.container, subs = excluded.subs, \
            no_download = excluded.no_download, blur = excluded.blur, sort = excluded.sort",
     )
@@ -418,10 +424,11 @@ pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
     .bind(hosts)
     .bind(&w.login_url)
     .bind(w.enabled as i64)
-    .bind(w.max_height)
+    .bind(&w.max_heights)
+    .bind(&w.stream_quality)
     .bind(&w.container)
     .bind(w.subs.map(|v| v as i64))
-    .bind(w.no_download as i64)
+    .bind(no_download as i64)
     .bind(w.blur as i64)
     .bind(w.sort)
     .bind(now_unix())
@@ -433,7 +440,7 @@ pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
 /// Fetch one website by key.
 pub(super) async fn get_website(db: &Db, key: &str) -> anyhow::Result<Option<Website>> {
     let row = sqlx::query(
-        "SELECT key, name, hosts, login_url, enabled, max_height, container, subs, no_download, blur, sort \
+        "SELECT key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, blur, sort \
          FROM websites WHERE key = ?",
     )
     .bind(key)
@@ -1022,6 +1029,75 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::connect(dir.path()).await.unwrap();
         (db, dir)
+    }
+
+    fn website(key: &str) -> Website {
+        Website {
+            key: key.to_string(),
+            name: key.to_string(),
+            hosts: vec!["example.com".to_string()],
+            login_url: String::new(),
+            enabled: true,
+            max_heights: None,
+            stream_quality: None,
+            container: None,
+            subs: None,
+            blur: false,
+            sort: 0,
+            cookie: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn website_follow_global_is_distinct_from_the_empty_set() {
+        let (db, _d) = temp_db().await;
+
+        // NULL = follow global. Some("") = pinned stream-only. Collapsing these
+        // two would silently turn "use the global default" into "download
+        // nothing", so they must survive a round-trip apart.
+        let mut follow = website("follow");
+        follow.max_heights = None;
+        db.upsert_website(&follow).await.unwrap();
+
+        let mut pinned = website("pinned");
+        pinned.max_heights = Some(String::new());
+        db.upsert_website(&pinned).await.unwrap();
+
+        let mut set = website("set");
+        set.max_heights = Some("1080,480".to_string());
+        set.stream_quality = Some("lower".to_string());
+        db.upsert_website(&set).await.unwrap();
+
+        assert_eq!(db.get_website("follow").await.unwrap().unwrap().max_heights, None);
+        assert_eq!(
+            db.get_website("pinned").await.unwrap().unwrap().max_heights,
+            Some(String::new())
+        );
+        let got = db.get_website("set").await.unwrap().unwrap();
+        assert_eq!(got.max_heights, Some("1080,480".to_string()));
+        assert_eq!(got.stream_quality, Some("lower".to_string()));
+    }
+
+    #[tokio::test]
+    async fn website_no_download_mirrors_the_empty_height_set() {
+        // The legacy NOT NULL column is written from max_heights so a downgrade
+        // (or any pre-0019 reader) still sees the same intent.
+        let (db, _d) = temp_db().await;
+        for (key, heights, expect) in [
+            ("stream_only", Some(String::new()), 1),
+            ("downloads", Some("1080".to_string()), 0),
+            ("follows", None, 0),
+        ] {
+            let mut w = website(key);
+            w.max_heights = heights;
+            db.upsert_website(&w).await.unwrap();
+            let flag: i64 = sqlx::query_scalar("SELECT no_download FROM websites WHERE key = ?")
+                .bind(key)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(flag, expect, "no_download mirror for {key}");
+        }
     }
 
     #[tokio::test]

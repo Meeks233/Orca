@@ -8,6 +8,33 @@
      block below.
    =========================================================================== */
 
+/* ---- Corner radius scale --------------------------------------------------
+   One Apple-style ramp, used by every rounded surface in the app. Apple's HIG
+   pairs a radius to a control's SIZE rather than its role, so the concentric
+   rule holds: a child's radius is the parent's minus the padding between them,
+   and nothing ever nests a rounder box inside a squarer one.
+
+     xs  6px  badges and pills painted on a thumbnail
+     sm  8px  small chips / inline actions / log rows
+     md  12px inputs, buttons, selects, field shells
+     lg  16px content cards (history items, website cards, floating bars)
+     xl  20px modal + share sheets (the outermost surface)
+     full     capsules — pills whose height defines the curve
+
+   Add a size to the ramp rather than a one-off px value; a stray 9px or 14px is
+   what made the corners read as inconsistent before. */
+:root {
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 20px;
+  --r-full: 999px;
+  /* Checkmark glyph, masked so it inherits its colour from the element (a data
+     URI can't reference a var, but a mask can be tinted by background-color). */
+  --check-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+}
+
 /* ---- Browser DARK (default): OLED true black ---- */
 :root {
   --bg: #000000;
@@ -139,11 +166,31 @@ body {
    "breathing" is an expanding, fading halo (box-shadow) — the standard
    connection-heartbeat indicator. See setServerStatus() in app.ts. */
 .brand-wrap { display: flex; align-items: center; gap: 9px; }
+/* ---- Brand mark ----
+   The orca, as black line art on a transparent ground (web/icons/logo.png), so
+   it sits on the topbar rather than in a chip of its own. Being pure ink, the
+   dark themes just invert it to white — one asset, both themes, no second file
+   to keep in sync. Sized to the topbar's cap height, not the icon buttons'. */
+.brand-logo {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: block;
+  object-fit: contain;
+  /* Dark is the default theme, so the black ink inverts to white by default and
+     the two light cases below put it back — the same shape as the palette
+     declarations at the top of this file. */
+  filter: invert(1);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .brand-logo { filter: none; }
+}
+:root[data-theme="light"] .brand-logo { filter: none; }
 .server-status {
   flex: 0 0 auto;
   width: 9px;
   height: 9px;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   background: var(--muted);
   transition: background .3s ease;
 }
@@ -205,7 +252,7 @@ body {
   padding: 6px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
   display: flex;
   flex-direction: column;
@@ -220,7 +267,7 @@ body {
   padding: 9px 10px;
   background: none;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font-size: 14px;
   text-align: left;
@@ -236,7 +283,7 @@ body {
 
 input, .btn {
   font-size: 15px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid var(--border);
 }
 
@@ -250,15 +297,27 @@ input {
 input::placeholder { color: var(--muted); }
 input:focus { outline: none; border-color: var(--accent); }
 
-/* Settings <select> (e.g. max resolution): match the text-input shell. */
+/* Settings <select> (e.g. max resolution): match the text-input shell.
+   The native arrow is drawn hard against the field's right edge with no optical
+   padding, so it reads as falling out of the control. Drop it (appearance:none)
+   and paint our own chevron inset from the edge on the same 12px rhythm as the
+   field's text padding — the Tailwind Forms / Bootstrap approach. The stroke is
+   a fixed mid-gray that reads on both the OLED-black and white surfaces (a data
+   URI can't reference var(--muted)). */
 .select {
   flex: 1;
   min-width: 0;
   font-size: 15px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid var(--border);
-  padding: 10px 12px;
-  background: var(--surface);
+  padding: 10px 34px 10px 12px;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b90a0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px 16px;
+  appearance: none;
+  -webkit-appearance: none;
   color: var(--text);
   cursor: pointer;
 }
@@ -272,6 +331,12 @@ input:focus { outline: none; border-color: var(--accent); }
   padding: 10px 16px;
   cursor: pointer;
   white-space: nowrap;
+  /* Every .btn lives in a flex row beside a field that is free to shrink. As a
+     flex item the button defaults to shrinkable, so a tight row (narrow phone,
+     or a longer translated label) squeezed it under its own nowrap label: the
+     text kept its left padding and clipped on the right, reading as "off
+     centre". The label is the intrinsic size — never shrink it. */
+  flex: 0 0 auto;
 }
 .btn:disabled { opacity: .5; cursor: default; }
 .btn.wide { display: block; width: 100%; margin: 12px 0; background: var(--surface-2); }
@@ -302,7 +367,7 @@ input:focus { outline: none; border-color: var(--accent); }
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--r-xl);
   padding: 22px;
   box-shadow: 0 12px 40px rgba(0,0,0,.35);
   /* Firefox: thin themed bar instead of the chunky native one. */
@@ -314,9 +379,17 @@ input:focus { outline: none; border-color: var(--accent); }
    list no longer shows the heavy OS scrollbar. Track stays transparent; the
    thumb is padded via a card-coloured border for the floating-pill look. */
 .modal-card::-webkit-scrollbar { width: 12px; }
-.modal-card::-webkit-scrollbar-track { background: transparent; }
+/* Inset the track by the card's own corner radius. The scrollbar is painted in
+   the padding box, which the radius only *clips* — so a thumb scrolled hard to
+   either end sat inside the corner arc and its rounded cap poked over the curve.
+   Holding the track off both ends by exactly one radius keeps the thumb on the
+   card's straight edge, where it can never cross the curve. */
+.modal-card::-webkit-scrollbar-track {
+  background: transparent;
+  margin: var(--r-xl) 0;
+}
 .modal-card::-webkit-scrollbar-thumb {
-  background: var(--border); border-radius: 999px;
+  background: var(--border); border-radius: var(--r-full);
   border: 3px solid var(--surface); background-clip: padding-box;
 }
 .modal-card::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
@@ -327,7 +400,7 @@ input:focus { outline: none; border-color: var(--accent); }
   width: 32px;
   height: 32px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   background: var(--surface-2);
   color: var(--muted);
   font-size: 16px;
@@ -335,16 +408,83 @@ input:focus { outline: none; border-color: var(--accent); }
   cursor: pointer;
 }
 .modal-heading { margin: 0 0 16px; font-size: 18px; padding-right: 32px; }
-.modal-card label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+/* A section heading inside a sheet. It names the thing below it, so it reads at
+   full text brightness — muted grey made these look disabled next to the
+   controls they label. --muted stays for genuinely secondary copy (.hint-muted). */
+.modal-card label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
 .modal-card .row { margin-bottom: 4px; }
+
+/* ---- Settings form row (shared) -------------------------------------------
+   The iOS-Settings / GNOME-preferences list row: a label hard left, its control
+   hard right, both on ONE line, hairline-separated from its neighbours. Every
+   settings surface builds from this — the Settings sheet, the Website-management
+   globals, and the per-site cards — so a new setting is marked up the same way
+   everywhere instead of stacking a block <label> above its control and wrapping.
+
+     <div class="form-row">
+       <span class="form-row-label">Subtitles</span>
+       <div class="form-row-ctl"> …switch / select / segmented… </div>
+     </div>
+
+   Put explanatory copy in a .hint-muted AFTER the row, not inside it. */
+.form-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  /* Apple's 44px minimum hit target. */
+  min-height: 44px;
+  padding: 5px 0;
+}
+.form-row + .form-row { border-top: 1px solid var(--border); }
+.form-row-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  min-width: 0;
+}
+/* Beat `.modal-card label`'s block display when the row's label is a real
+   <label> bound to its control. */
+.modal-card label.form-row-label { display: inline-flex; margin-bottom: 0; }
+/* Same escape hatch for segments, which are <label>s too. Without this,
+   `.modal-card label` (higher specificity than `.segment`) forces them
+   display:block and — the visible bug — adds a 6px bottom margin to each,
+   padding the segmented track with a blank strip under the segments. */
+.modal-card label.segment { display: flex; margin-bottom: 0; }
+.form-row-ctl { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* A select in a row sizes to its content rather than eating the whole row. */
+.form-row-ctl .select { flex: 0 0 auto; min-width: 150px; max-width: 220px; }
+/* Short scalar fields (Server URL, API token) sit inline at the end of their row
+   like every other control, instead of stacking label-over-input across two
+   lines. Allowed to shrink but never below legibility, so a long URL scrolls
+   within the field rather than pushing the label off the row. */
+.form-row-ctl .input { flex: 0 1 240px; min-width: 140px; font-size: 14px; padding: 8px 10px; }
+/* A switch's own top nudge is for stacked layouts; a row centres it already. */
+.form-row-ctl .site-subs-toggle { margin-top: 0; }
 /* The Server URL field is only meaningful in the native Tauri shell (which
    must point the UI at a remote server). In a browser the UI is same-origin,
    so hide the whole row — detected via html.app-native (set from
    window.__TAURI__), not user-agent sniffing. */
 html:not(.app-native) #server-row { display: none; }
+/* Background activity and storage are Android grants with no web equivalent —
+   the browser build can only ever ask about notifications, and doesn't insist on
+   even that. Same html.app-native signal as the row above, not user-agent
+   sniffing. Covers both copies of these rows (Settings and the first-launch
+   prompt) without either having to know the other exists. */
+html:not(.app-native) .permission-item[data-permission="background"],
+html:not(.app-native) .permission-item[data-permission="storage"] { display: none; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
-.hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: 4px; font-size: 11px; }
+.hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: var(--r-xs); font-size: 11px; }
 .sep { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 .ta {
   width: 100%;
@@ -353,7 +493,7 @@ html:not(.app-native) #server-row { display: none; }
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   resize: vertical;
   margin-bottom: 8px;
 }
@@ -365,7 +505,7 @@ html:not(.app-native) #server-row { display: none; }
   overflow: hidden;
   margin: 0 0 14px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--surface-2);
 }
 .permission-item {
@@ -396,12 +536,21 @@ html:not(.app-native) #server-row { display: none; }
 .permission-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; }
 .permission-copy strong { font-size: 14px; font-weight: 600; }
 .permission-copy small { margin-top: 2px; color: var(--muted); font-size: 12px; }
-.permission-result { flex: 0 0 20px; color: var(--muted); font-size: 20px; text-align: center; }
+/* State glyph at the end of the row — a check once granted, a chevron while it
+   still needs a tap, a spinner while we're asking. See PERMISSION_RESULT. */
+.permission-result {
+  display: grid;
+  place-items: center;
+  flex: 0 0 20px;
+  color: var(--muted);
+}
+.permission-result svg { display: block; }
+.permission-result .spin { animation: spin .8s linear infinite; }
 .permission-item[data-state="granted"] .permission-icon {
   color: var(--ok);
   background: color-mix(in oklab, var(--ok) 14%, var(--surface));
 }
-.permission-item[data-state="granted"] .permission-result { color: var(--ok); font-size: 17px; }
+.permission-item[data-state="granted"] .permission-result { color: var(--ok); }
 .permission-item[data-state="missing"] .permission-icon {
   color: var(--err);
   background: color-mix(in oklab, var(--err) 12%, var(--surface));
@@ -416,7 +565,7 @@ html:not(.app-native) #server-row { display: none; }
 .cookie-item {
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
   padding: 10px;
 }
 .ck-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -434,7 +583,7 @@ html:not(.app-native) #server-row { display: none; }
 .ck-btn {
   font-size: 12px;
   padding: 5px 10px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
@@ -453,36 +602,62 @@ html:not(.app-native) #server-row { display: none; }
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   resize: vertical;
 }
 .ck-paste-actions { flex: 1 0 100%; display: flex; gap: 6px; }
 
 .submit { margin-bottom: 12px; }
 
-/* Paste button: sits between the URL box and Download, styled as a quiet
-   secondary control (input shell, muted glyph) so it reads as an accessory to
-   the field rather than competing with the accent-filled Download button. */
-.paste-btn {
+/* ---- Field shell (URL box + Paste, and the search box) ----
+   One bordered surface wrapping a field and any inline affordance, lit as a
+   whole on focus — the omnibox / YouTube-search "input group" pattern. The
+   inner <input> goes fully transparent and borderless so the shell owns the
+   border, radius and focus ring; without that the field would draw a second
+   box inside the first. */
+.field {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: none;
+  border-radius: inherit;
+}
+.field input:focus { outline: none; border-color: transparent; }
+
+/* Paste: a quiet, borderless glyph INSIDE the URL field — an accessory to the
+   box it sits in, never competing with the accent-filled Download button. */
+.field-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 42px;
+  width: 34px;
+  height: 34px;
   padding: 0;
   color: var(--muted);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  transition: color .15s ease, border-color .15s ease;
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: color .15s ease, background-color .15s ease;
 }
-.paste-btn:hover { color: var(--accent); border-color: var(--accent); }
-
-/* A settings row whose control is a switch, not a full-width field: keep the
-   switch at its natural size and let the Save button sit beside it. */
-.row-toggle { align-items: center; }
-.row-toggle .site-subs-toggle { margin-top: 0; }
-.row-toggle .btn { margin-left: auto; }
+.field-btn:hover { color: var(--accent); background: var(--surface-2); }
+.field-btn svg { display: block; }
 
 .controls {
   display: flex;
@@ -491,12 +666,13 @@ html:not(.app-native) #server-row { display: none; }
   align-items: center;
   margin-bottom: 12px;
 }
-.controls input[type=search] { flex: 1; min-width: 140px; }
+/* The shell — not the bare input — is the flex item that carries the row. */
+.controls .field { min-width: 140px; }
 /* Multi-select toggle sits inline before the search box (no extra row). */
 .sel-toggle {
   flex: 0 0 auto;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
   padding: 8px;
   color: var(--muted);
 }
@@ -510,7 +686,7 @@ html:not(.app-native) #server-row { display: none; }
   gap: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   padding: 10px;
 }
 
@@ -572,7 +748,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 .group-card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--r-md);
 }
 .group-head {
   display: flex;
@@ -585,7 +761,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   /* Match the card's rounding so the selection highlight (a filled background)
      follows the rounded corners instead of painting a rectangle. When expanded,
      the header only rounds its top corners; the body owns the bottom ones. */
-  border-radius: 12px;
+  border-radius: var(--r-md);
 }
 .group-card:not(.collapsed) .group-head {
   border-bottom-left-radius: 0;
@@ -607,7 +783,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   min-width: 16px; height: 17px; padding: 0 5px;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; font-weight: 700; line-height: 1;
-  color: #fff; background: rgba(0,0,0,.72); border-radius: 5px;
+  color: #fff; background: rgba(0,0,0,.72); border-radius: var(--r-xs);
 }
 /* Whole-list play button: bottom-right. A real <button>, so it needs the button
    reset the item badge (a passive <span>) does not. */
@@ -671,7 +847,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   padding: 8px 8px 8px 16px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   box-shadow: 0 8px 30px rgba(0,0,0,.45);
 }
 /* ---- Back to top ----
@@ -687,13 +863,13 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 56px;
+  height: 56px;
   padding: 0;
   color: var(--text);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   box-shadow: 0 8px 30px rgba(0,0,0,.45);
   cursor: pointer;
   transition: transform .15s ease, border-color .15s ease, color .15s ease;
@@ -705,7 +881,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 
 .select-count { font-size: 13px; font-weight: 600; white-space: nowrap; }
 .select-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.select-bar .btn { padding: 8px 12px; font-size: 13px; border-radius: 10px; }
+.select-bar .btn { padding: 8px 12px; font-size: 13px; border-radius: var(--r-md); }
 
 .thumb-wrap {
   position: relative;
@@ -731,7 +907,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   aspect-ratio: 16 / 9;
   object-fit: cover;
   object-position: center;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   display: block;
   background: var(--surface-2);
 }
@@ -775,7 +951,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   line-height: 1.3;
   font-weight: 600;
   padding: 1px 5px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   color: #fff;
   background: rgba(0,0,0,.72);
 }
@@ -789,7 +965,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   justify-content: center;
   color: #fff;
   background: rgba(0,0,0,.6);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   padding: 1px 3px;
 }
 /* Play affordance: subtle, small, bottom-right of a finished thumbnail. */
@@ -804,7 +980,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   height: 24px;
   color: #fff;
   background: rgba(0,0,0,.42);
-  border-radius: 999px;
+  border-radius: var(--r-full);
   /* A real hit target, not decoration. The whole thumbnail already plays, so
      this changes nothing there — but on a privacy-blurred card the badge must be
      distinguishable from the blurred image under it, so that tapping it plays
@@ -815,8 +991,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 .play-badge svg { width: 14px; height: 14px; margin-left: 1px; /* optical centre */ }
 .thumb-play:hover .play-badge,
 .thumb-play:focus-visible .play-badge { background: var(--accent); transform: scale(1.08); }
-.thumb-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
-.act-cloud { border-style: dashed; color: var(--muted, #9aa); cursor: default; }
+.thumb-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
 
 .body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .title {
@@ -851,7 +1026,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   height: 20px;
   box-sizing: border-box;
   padding: 2px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
   background: #fff;
   object-fit: contain;
   margin-top: 1px;
@@ -865,7 +1040,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   color: #fff;
   background: var(--muted);
 }
@@ -883,7 +1058,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   margin-top: 8px;
   height: 6px;
   background: var(--surface-2);
-  border-radius: 999px;
+  border-radius: var(--r-full);
   overflow: hidden;
 }
 .progress-fill { height: 100%; background: var(--run); width: 0; transition: width .3s ease; }
@@ -898,12 +1073,16 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
   margin-top: auto; align-self: flex-end; padding-top: 8px;
 }
+/* Icon-only action (Save / Share / Delete): no border or background, just the
+   glyph. The card's row reads as "facts and choices in capsules (.chip), verbs
+   as bare glyphs" — so these deliberately carry no capsule of their own. */
 .act {
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  background: none;
   color: var(--text);
   cursor: pointer;
   text-decoration: none;
@@ -911,63 +1090,50 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   user-select: none;
 }
 .act::-webkit-details-marker { display: none; }
-.act:hover { border-color: var(--accent); }
-.act-on { border-color: var(--ok); color: var(--ok); }
-/* Icon-only action (Save): no border/background, just the glyph. */
-.act-icon {
-  border: none;
-  background: none;
-  padding: 3px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text);
-}
-.act-icon:hover { border: none; color: var(--accent); }
-.act-icon svg { display: block; }
+.act:hover { color: var(--accent); }
+.act svg { display: block; }
 /* Delete (trash) action: neutral by default, red on hover — its destructive
    intent, and it always routes through the confirm dialog. */
 .act-del:hover { color: var(--err); }
 /* A live (public) share tints the share icon the Completed green, at-a-glance
-   signalling "this is shared". Beats .act-icon's neutral color by specificity. */
+   signalling "this is shared". */
 .act-share.act-on { color: var(--ok); }
 
-/* External-access counter capsule, sits right after the status badge. Neutral
-   pill (deliberately not the green "on" state) so a shared item's access count
-   reads as a metric, not another status. */
-.hits {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-}
-.hits svg { display: block; }
-.hits-n { color: var(--text); }
+/* ---- Chips: one capsule for every fact and choice on a card ----------------
+   The size readout, the external-access counter and the resolution picker are
+   all the same capsule: same height, padding, type scale, and full rounding, so
+   a passive metric and a tappable control sit on one baseline and read as one
+   family. They previously each carried their own near-miss metrics (11px/2px vs
+   11px/4px vs 12px/5px, pill vs 8px corners), which is what made the resolution
+   button and the size capsule look mismatched.
 
-/* ---- Meta chip in the action row (resolution | file size) ----
-   One neutral capsule mirroring the .hits pill, parked at the LEFT of the card's
-   action row (before the trash icon), showing "720p | 20.4 MB". line-height:1 +
-   symmetric padding keeps the label optically centred on the row rather than
-   riding high (the font's descent space would otherwise push it up). */
-.meta-chip {
+   line-height:1 + symmetric padding keeps a label optically centred rather than
+   riding high on the font's descent space. */
+.chip {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   line-height: 1;
   font-size: 11px;
   font-weight: 600;
   padding: 4px 8px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: var(--surface-2);
+  border-radius: var(--r-full);
   border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
   white-space: nowrap;
+  text-decoration: none;
 }
+.chip svg { display: block; }
+/* Tappable chip (the resolution picker): same capsule, plus an accent on hover
+   to tell it apart from the passive ones. */
+.chip-btn { cursor: pointer; }
+.chip-btn:hover { color: var(--accent); border-color: var(--accent); }
+/* The measured part of a chip stands out from its label/icon. */
+.hits-n { color: var(--text); }
+.res-btn-label { color: var(--text); font-variant-numeric: tabular-nums; }
+/* Cloud-only: a stated fact, not a control — dashed to read as "no file here". */
+.act-cloud { border-style: dashed; cursor: default; }
 
 /* Video/audio pass label next to the status badge. */
 .phase { font-weight: 600; color: var(--run); }
@@ -998,7 +1164,7 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   width: 40px;
   height: 40px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   background: rgba(0,0,0,.55);
   color: #fff;
   font-size: 20px;
@@ -1034,7 +1200,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--r-xl);
   padding: 22px;
   box-shadow: 0 12px 40px rgba(0,0,0,.35);
 }
@@ -1045,7 +1211,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   width: 32px;
   height: 32px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   background: var(--surface-2);
   color: var(--muted);
   font-size: 16px;
@@ -1061,31 +1227,44 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.share-windows-label {
+/* Small caps-ish heading sitting directly above a control (as opposed to
+   .form-row-label, which sits beside one). */
+.field-label {
   margin: 0 0 8px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: .02em;
-  color: var(--muted);
+  color: var(--text);
 }
-/* Segmented control (iOS/Linear style): a recessed track with an elevated
-   accent "thumb" marking the selection — replaces the old radio-circle pills. */
-.share-windows {
+
+/* ---- Segmented control (shared) -------------------------------------------
+   The iOS/Linear segmented picker: a recessed track holding 2–4 mutually
+   exclusive options, with an elevated accent "thumb" marking the selection. A
+   real radiogroup underneath — the native inputs stay in the DOM (just visually
+   hidden) so keyboard arrow-nav and screen readers work for free.
+
+   Used wherever a short, exclusive choice needs to sit on one line: the share
+   window pickers, and the Theme picker in Settings. Reach for it over a <select>
+   when every option fits at a glance; past ~4 options the track gets too tight
+   and a .select is the better control. */
+.segmented {
   margin: 0 0 16px;
   display: flex;
   gap: 4px;
   padding: 4px;
   background: var(--surface-2);
-  border-radius: 12px;
+  border-radius: var(--r-md);
 }
-.share-opt {
+.segment {
   position: relative;
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
+  /* The track's radius minus its padding — Apple's concentric-corner rule, so
+     the thumb's curve sits parallel to the track's rather than fighting it. */
   padding: 9px 6px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   font-size: 13px;
   font-weight: 500;
   color: var(--muted);
@@ -1094,7 +1273,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   transition: background .15s ease, color .15s ease, box-shadow .15s ease;
 }
 /* Hide the native radio circle but keep it in the DOM for a11y + keyboard nav. */
-.share-opt input {
+.segment input {
   position: absolute;
   opacity: 0;
   width: 0;
@@ -1102,22 +1281,24 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   margin: 0;
   pointer-events: none;
 }
-.share-opt:has(input:checked) {
+.segment:has(input:checked) {
   background: var(--accent);
   color: #fff;
   box-shadow: 0 1px 4px rgba(0,0,0,.22);
 }
-.share-opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.segment:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A segmented control filling a settings row sheds the block-level margin. */
+.form-row .segmented { flex: 0 0 auto; margin: 0; }
 .share-link-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .share-link {
   flex: 1;
   min-width: 0;
   font-size: 13px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
 }
 .share-expiry { margin: 0 0 14px; font-size: 12px; color: var(--muted); min-height: 1em; }
 .share-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.share-card .btn { border-radius: 10px; }
+.share-card .btn { border-radius: var(--r-md); }
 .btn-ghost { background: var(--surface-2); color: var(--text); }
 .btn-danger { background: var(--err); color: #fff; }
 /* Cancel-share confirmation ("undo") view. */
@@ -1135,7 +1316,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   justify-content: center;
   width: 36px;
   height: 36px;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--muted);
@@ -1171,7 +1352,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   border: 1px solid var(--border);
   color: var(--text);
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   font-size: 14px;
   box-shadow: 0 6px 20px rgba(0,0,0,.4);
   opacity: 1;
@@ -1193,7 +1374,17 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .logs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .logs-actions { display: flex; gap: 6px; }
 .log-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; max-height: 260px; overflow-y: auto; }
-.log-entry { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); overflow: hidden; }
+.log-entry { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); overflow: hidden; }
+/* Severity, as a left rule rather than a tinted row: the message still has to be
+   readable, and a wash behind 12px text fails contrast in both themes. Amber =
+   the user hit a wall we correctly refused (private video, unsupported link, no
+   cookies); red = Orca or its host broke and there's a bug to file. Classified
+   server-side (errlog::classify) so the API and the UI can't disagree about what
+   counts as our fault. */
+.log-entry--warn { border-left: 3px solid var(--warn); }
+.log-entry--error { border-left: 3px solid var(--err); }
+.log-entry--warn .log-badge { color: var(--warn); }
+.log-entry--error .log-badge { color: var(--err); }
 .log-entry > summary {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   cursor: pointer; list-style: none; font-size: 12px; user-select: none;
@@ -1205,7 +1396,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .log-stage { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; white-space: nowrap; }
 .log-msg-short { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-entry[open] .log-msg-short { white-space: normal; }
-.log-copy { flex: none; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 6px; }
+.log-copy { flex: none; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: var(--r-xs); }
 .log-copy:hover { color: var(--text); }
 .log-full {
   margin: 0; padding: 8px 10px; border-top: 1px solid var(--border);
@@ -1215,10 +1406,33 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .settings-footer { margin-top: 14px; text-align: center; color: var(--muted); font-size: 12px; }
 .settings-footer a { color: var(--accent); }
 
+/* ---- Dirty-tracked save bar ------------------------------------------------
+   ONE Save for the whole sheet, docked to its bottom edge and revealed only once
+   something is actually dirty (see setupSettingsSaveBar) — the GitHub/Vercel
+   settings pattern, in place of a Save button beside every field. It sticks so a
+   change made at the top of a long sheet is still committable without scrolling
+   back down to find the button. */
+.save-bar {
+  position: sticky;
+  bottom: -22px; /* cancel the card's own bottom padding so it sits flush */
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 14px -22px -22px;
+  padding: 12px 22px calc(12px + env(safe-area-inset-bottom));
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  /* Only the bottom corners, and only as round as the card it's docked into. */
+  border-radius: 0 0 var(--r-xl) var(--r-xl);
+  box-shadow: 0 -4px 20px rgba(0,0,0,.25);
+}
+.save-bar-msg { font-size: 13px; font-weight: 600; color: var(--text); }
+.save-bar-actions { display: flex; gap: 8px; }
+
 /* ---- Per-item resolution button + multi-select picker ------------------- */
-.res-btn { display: inline-flex; align-items: center; gap: 5px; }
-.res-btn .res-btn-label { font-variant-numeric: tabular-nums; font-weight: 600; }
-.res-btn:hover { color: var(--accent); border-color: var(--accent); }
 .res-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; max-height: 320px; overflow-y: auto; }
 /* Resolution options are toggle rows, not native checkboxes: the row surface
    itself carries the selected state (same natural-highlight pattern as the
@@ -1226,7 +1440,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
    rectangular checkbox tap-highlight. */
 .res-opt {
   display: flex; align-items: center; gap: 10px; padding: 9px 12px;
-  border: 1px solid var(--border); border-radius: 10px; cursor: pointer; font-size: 14px;
+  border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; font-size: 14px;
   user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
 }
 .res-opt:hover { border-color: var(--accent); }
@@ -1239,9 +1453,13 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   font-weight: 600;
 }
 
+/* A confirm asks one question — hold it to a readable measure rather than
+   letting one sentence stretch the full sheet width. */
+.modal-card-narrow { max-width: 400px; }
+
 /* ---- Website management --------------------------------------------------- */
 .modal-card-wide { max-width: 680px; }
-.sites-global { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+.sites-global { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 14px; }
 .sites-global .row { display: flex; gap: 8px; align-items: center; }
 .sites-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .sites-toolbar #site-search { flex: 1 1 auto; min-width: 0; }
@@ -1253,7 +1471,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .website-card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -1277,7 +1495,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .site-blur-toggle,
 .site-cookie-toggle,
 .site-subs-toggle {
-  position: relative; width: 40px; height: 22px; border-radius: 999px; flex-shrink: 0; margin-top: 1px;
+  position: relative; width: 40px; height: 22px; border-radius: var(--r-full); flex-shrink: 0; margin-top: 1px;
   border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; padding: 0;
 }
 .site-toggle .knob,
@@ -1300,42 +1518,95 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .site-menu-wrap { position: relative; flex-shrink: 0; }
 .site-menu-btn {
   display: flex; align-items: center; justify-content: center; width: 30px; height: 30px;
-  border: none; background: none; color: var(--muted); border-radius: 8px; cursor: pointer; padding: 0;
+  border: none; background: none; color: var(--muted); border-radius: var(--r-sm); cursor: pointer; padding: 0;
 }
 .site-menu-btn:hover { background: var(--surface-2); color: var(--text); }
 .site-menu-pop {
   position: absolute; top: 34px; right: 0; z-index: 5; min-width: 160px; padding: 6px;
   display: flex; flex-direction: column; gap: 2px;
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md);
   box-shadow: 0 8px 30px rgba(0,0,0,.35);
 }
 .site-menu-item {
   display: block; width: 100%; text-align: left; font-size: 13px; padding: 8px 10px;
-  border: none; background: none; color: var(--text); border-radius: 8px; cursor: pointer; text-decoration: none;
+  border: none; background: none; color: var(--text); border-radius: var(--r-sm); cursor: pointer; text-decoration: none;
 }
 .site-menu-item:hover { background: var(--surface); }
 .site-menu-item.danger { color: var(--err); }
 
-/* Per-site settings: three consistent rows — max-resolution · cookies · blur —
-   each a left-aligned label and a right-aligned control (iOS-settings "form
-   group"). One shared label font size keeps the three controls visually equal. */
 .site-settings { display: flex; flex-direction: column; }
-.site-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  min-height: 40px; padding: 5px 0;
+.form-row-ctl .site-res-select { flex: 0 0 auto; min-width: 150px; max-width: 220px; }
+
+/* ---- Multi-select (resolution sets) --------------------------------------
+   A <select>-shaped trigger over a checkable popover. It deliberately borrows
+   `.select` wholesale — same shell, same painted chevron, same metrics — so a
+   row holding a set of resolutions is indistinguishable at rest from the rows
+   beside it holding a single format. The popover is the only part that differs,
+   and it only exists while you're using it. */
+.multiselect { position: relative; flex: 0 0 auto; }
+/* <button> resets that a <select> gets for free. */
+.multiselect-trigger {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  height: 100%;
+  font-family: inherit;
 }
-.site-row + .site-row { border-top: 1px solid var(--border); }
-.site-row-label {
-  display: inline-flex; align-items: center; gap: 8px;
-  font-size: 14px; color: var(--text); min-width: 0;
+/* One line, always: the summary elides rather than wrapping the row open. */
+.multiselect-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multiselect-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 100%;
+  width: max-content;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: 0 8px 24px rgba(0,0,0,.28);
 }
-.site-row-ctl { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-.site-row-ctl .site-res-select { flex: 0 0 auto; min-width: 150px; max-width: 220px; }
+.multiselect-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 28px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.multiselect-opt:hover { background: var(--surface-2); }
+/* The tick lives in the padding gutter reserved above, so selecting an option
+   never reflows the label — the menu width is stable as you click through it. */
+.multiselect-opt[aria-selected="true"]::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  width: 12px;
+  height: 12px;
+  background-color: var(--accent);
+  -webkit-mask: var(--check-mask) center / contain no-repeat;
+  mask: var(--check-mask) center / contain no-repeat;
+}
+.multiselect-opt { position: relative; }
+.multiselect-opt[aria-selected="true"] { font-weight: 600; }
+.multiselect-sep { height: 1px; margin: 4px 2px; background: var(--border); }
 
 /* Cookie health dot (traffic-light): green ok · amber expiring · red expired ·
    grey off. Conveys the jar's state without ever exposing its contents. */
 .ck-dot {
-  width: 9px; height: 9px; border-radius: 999px; flex: 0 0 auto; background: var(--muted);
+  width: 9px; height: 9px; border-radius: var(--r-full); flex: 0 0 auto; background: var(--muted);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--muted) 18%, transparent);
 }
 .ck-dot-ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 22%, transparent); }
@@ -1345,7 +1616,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 
 /* Import/replace button, shown left of the cookie switch once a jar exists. */
 .site-cookie-btn {
-  flex-shrink: 0; font-size: 13px; padding: 6px 12px; border-radius: 10px;
+  flex-shrink: 0; font-size: 13px; padding: 6px 12px; border-radius: var(--r-md);
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
 }
 .site-cookie-btn:hover { border-color: var(--accent); }
@@ -1363,6 +1634,6 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .site-select-bar {
   position: sticky; bottom: 0; margin-top: 14px; z-index: 6;
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-  padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px;
+  padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-lg);
   box-shadow: 0 -4px 20px rgba(0,0,0,.2);
 }

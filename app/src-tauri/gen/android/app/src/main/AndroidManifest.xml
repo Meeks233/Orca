@@ -1,6 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- "Save to device" writes finished downloads to Downloads/Orca (or the
+         hidden Downloads/.Orca). Two eras, both required:
+          - API 30+: MANAGE_EXTERNAL_STORAGE ("All files access"). Scoped storage
+            otherwise confines us to app-private dirs, and MediaStore flatly
+            refuses to create a dot-prefixed folder — so the hide feature is
+            impossible without it. It is granted ONLY from a Settings screen
+            (ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION), never a dialog.
+            tools:ignore silences the Play-policy lint: Orca is self-hosted (
+            F-Droid / sideload) and this is the documented file-manager case.
+          - API 28-29 (minSdk is 28): the classic WRITE_EXTERNAL_STORAGE runtime
+            grant, capped with maxSdkVersion so API 30+ doesn't list a permission
+            it would ignore anyway. API 29 additionally needs the legacy opt-out
+            below, or scoped storage blocks the same writes silently. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <!-- Seal-style download-progress notifications (Android 13+ runtime prompt). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Keep background download-progress polling alive when the screen is off:
@@ -14,9 +35,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- requestLegacyExternalStorage is read ONLY on API 29, where it opts out
+         of scoped storage so WRITE_EXTERNAL_STORAGE still grants real access to
+         Downloads/. Ignored on 28 (predates scoped storage) and on 30+ (which
+         uses MANAGE_EXTERNAL_STORAGE instead). -->
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:requestLegacyExternalStorage="true"
         android:theme="@style/Theme.orca_app"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity

@@ -199,31 +199,56 @@ impl Queue {
     }
 }
 
-/// The effective max-height cap for a download: the env override if the operator
-/// set `ORCA_MAX_HEIGHT` (always wins), else the per-site cap from the website
-/// registry for this URL, else the UI-stored global `max_height`, else `None`
-/// (highest).
-async fn resolve_max_height(
+/// The effective set of download heights for a URL: the env override if the
+/// operator set `ORCA_MAX_HEIGHT` (always wins, and is necessarily a single
+/// height), else the per-site set from the website registry, else the UI-stored
+/// global `max_heights`, else "highest available".
+///
+/// An empty set means stream-only. Note the difference between a site that pins
+/// the empty set (`Some("")` → download nothing) and one that follows global
+/// (`None` → whatever the global says); collapsing those two is the bug this
+/// ladder exists to avoid.
+pub async fn resolve_max_heights(
     cfg: &Config,
     db: &Db,
     sites: &[crate::types::Website],
     url: &str,
-) -> Option<i64> {
-    if cfg.max_height.is_some() {
-        return cfg.max_height;
+) -> crate::resolution::HeightSet {
+    use crate::resolution::HeightSet;
+    if let Some(h) = cfg.max_height {
+        return HeightSet::from_heights(&[h]).unwrap_or_default();
     }
-    // Per-site cap overrides the global setting when the site pins one.
-    if let Some(h) = crate::websites::detect(sites, url).and_then(|w| w.max_height) {
-        if h > 0 {
-            return Some(h);
-        }
+    if let Some(csv) = crate::websites::detect(sites, url).and_then(|w| w.max_heights.clone()) {
+        return HeightSet::parse(&csv);
     }
-    db.get_setting("max_height")
+    match db.get_setting("max_heights").await.ok().flatten() {
+        Some(csv) => HeightSet::parse(&csv),
+        // Unset global = highest available, matching the pre-multi-select default.
+        None => HeightSet::parse("0"),
+    }
+}
+
+/// The effective share-bandwidth cap for a URL: per-site override, else the
+/// UI-stored global, else the built-in default (`Higher`). There is no env knob
+/// for this one — it is a sharing policy, not a deployment constant.
+pub async fn resolve_stream_quality(
+    db: &Db,
+    sites: &[crate::types::Website],
+    url: &str,
+) -> crate::resolution::StreamQuality {
+    use crate::resolution::StreamQuality;
+    if let Some(q) = crate::websites::detect(sites, url)
+        .and_then(|w| w.stream_quality.clone())
+        .and_then(|s| StreamQuality::parse(&s))
+    {
+        return q;
+    }
+    db.get_setting("stream_quality")
         .await
         .ok()
         .flatten()
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|h| *h > 0)
+        .and_then(|v| StreamQuality::parse(&v))
+        .unwrap_or_default()
 }
 
 /// The effective merge container for a download, same precedence ladder as
@@ -329,10 +354,19 @@ async fn run_job(
     let site_key = crate::websites::detect(&sites, &item.webpage_url).map(|w| w.key.clone());
 
     // Resolution cap: a variant pins exactly the requested height; the primary
-    // uses the effective cap (env `ORCA_MAX_HEIGHT`, else per-site, else global).
+    // takes the tallest height of the effective set (env `ORCA_MAX_HEIGHT`, else
+    // per-site, else global), so the item's own file is its best copy and any
+    // shorter picks arrive as variants enqueued alongside it. `HIGHEST` (0) and an
+    // empty set both mean "no cap" here — an empty set never reaches a download
+    // in the first place (submit keeps it stream-only).
     let cap = match variant {
         Some(h) => Some(h),
-        None => resolve_max_height(cfg, db, &sites, &item.webpage_url).await,
+        None => resolve_max_heights(cfg, db, &sites, &item.webpage_url)
+            .await
+            .heights()
+            .first()
+            .copied()
+            .filter(|h| *h > 0),
     };
     let mut job_cfg = cfg.clone();
     job_cfg.format = cfg.format_capped(cap);
