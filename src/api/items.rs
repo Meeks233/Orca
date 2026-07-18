@@ -121,11 +121,12 @@ pub async fn submit(
     // variants enqueued once the row exists.
     // A prepare card can pin one resolution for this submission (goal 4),
     // overriding the settings ladder. `0` is the "highest available" sentinel; any
-    // other height must be on the ladder or we reject rather than silently ignore.
+    // other positive height is taken as-is (the card offers the source's own
+    // reported heights, which may sit between ladder rungs — see single_requested).
     // The override is also persisted per item below so run_job's primary honours it.
     let requested_height = req.options.as_ref().and_then(|o| o.max_height);
     let heights = match requested_height {
-        Some(h) => crate::resolution::HeightSet::from_heights(&[h])
+        Some(h) => crate::resolution::HeightSet::single_requested(h)
             .map_err(AppError::BadRequest)?,
         None => crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await,
     };

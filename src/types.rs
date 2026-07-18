@@ -231,6 +231,12 @@ pub struct Website {
     /// in the history and revealed on hover (web) / tap (app).
     #[serde(default)]
     pub blur: bool,
+    /// What `blur` was seeded to (migration 0016/0022). Immutable after seed and
+    /// not user-editable — the UI sorts sites by how far each departs from its
+    /// defaults, and blur must count only when it deviates from *this*, so the
+    /// NSFW sites seeded blur-on don't all float to the top unprompted.
+    #[serde(default)]
+    pub blur_default: bool,
     #[serde(default)]
     pub sort: i64,
     /// Computed (not stored): cookie presence/state for this site, merged in by

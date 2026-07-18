@@ -82,6 +82,7 @@ mod tests {
             container: None,
             subs: None,
             blur: false,
+            blur_default: false,
             sort: 0,
             cookie: None,
         }

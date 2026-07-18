@@ -1444,7 +1444,18 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   cursor: pointer;
   transition: border-color .12s, background .12s;
 }
-.prep-card.selected { border-color: var(--accent); background: var(--surface-3, var(--surface-2)); }
+/* Selection reuses the history list's accent ring (goal 3) so the two lists share
+   one visual language. Instant (no transition on these props) for the same Android
+   WebView reason .item.selected is. */
+.prep-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+/* Honour per-site privacy blur on staged/clipboard cards (goal 3): blur the
+   thumbnail until hover, mirroring .item.blurred. */
+.prep-card.blurred .prep-thumb { filter: blur(9px); transition: filter .18s ease; }
+.prep-card.blurred:hover .prep-thumb { filter: none; }
 .prep-thumb {
   flex: 0 0 auto;
   width: 96px;
@@ -1459,6 +1470,8 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
+  /* Keep the first line clear of the top-right remove (X) button. */
+  padding-right: 26px;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -1475,36 +1488,33 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
+  /* Hug the right edge so, after picking a quality, the finger is already over the
+     Download button below (goal 3). */
+  margin-left: auto;
 }
 .prep-dup { font-size: 11px; font-weight: 600; color: var(--warn); }
-/* Selection checkmark badge, top-right; only visible on a selected card. */
-.prep-check {
+/* Per-card remove (X), top-right — drops this one entry from the batch (goal 3).
+   Replaces the old selection checkmark; selection is now shown by the whole-card
+   accent ring instead. */
+.prep-cancel {
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border);
   background: var(--surface);
-  opacity: .35;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: .7;
+  transition: opacity .12s, color .12s, border-color .12s;
 }
-.prep-card.selected .prep-check {
-  opacity: 1;
-  border-color: var(--accent);
-  background: var(--accent);
-}
-.prep-card.selected .prep-check::after {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 2px;
-  width: 4px;
-  height: 8px;
-  border: solid #fff;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-}
+.prep-cancel:hover { opacity: 1; color: var(--text); border-color: var(--accent); }
 
 /* ---- Manual prepare stage (goal 4) ---------------------------------------- */
 /* Sits between the URL row and the search bar; the search bar is the divider from
@@ -1512,7 +1522,9 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
    sections — no extra constraint of its own. */
 .stage { margin-top: 4px; }
 .stage .prep-list { max-height: min(48vh, 420px); overflow-y: auto; }
-.stage-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+/* Symmetric vertical breathing room: the same gap above the buttons (to the card
+   list) as below them (to the search bar, which carries no top margin) — goal 3. */
+.stage-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 12px 0; }
 
 /* Video/audio pass label next to the status badge. */
 .phase { font-weight: 600; color: var(--run); }

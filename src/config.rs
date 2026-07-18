@@ -187,7 +187,7 @@ fn env_opt(key: &str) -> Option<String> {
 }
 
 impl Config {
-    /// Default name yt-dlp writes: "<uploader> - <date> - <title> [<id>].<ext>".
+    /// Default name yt-dlp writes: "<uploader> - <title> [<id>].<ext>".
     ///
     /// Every field is truncated in BYTES (`.NB`), not characters: ext4 caps a
     /// name at 255 *bytes*, the tightest limit across the filesystems a download
@@ -196,11 +196,12 @@ impl Config {
     /// to 182 bytes, which is what `ytdlp::options::NAME_MAX_BYTES` enforces —
     /// the slack covers what yt-dlp appends *after* the template (see there).
     ///
-    /// The date falls back from upload_date to release_date to "0000-00-00" so
-    /// the field never collapses and shift the rest of the name around.
+    /// The upload date used to sit between uploader and title; it was dropped so
+    /// the name reads as post metadata rather than a timestamp. Its freed budget
+    /// (the 10-byte date plus its " - " separator) folds into the title field,
+    /// which is where a forum/booru post's identifying text actually lives.
     pub const DEFAULT_OUTPUT_TEMPLATE: &'static str = "%(uploader,channel,creator|Unknown).32B - \
-         %(upload_date>%Y-%m-%d,release_date>%Y-%m-%d|0000-00-00)s - \
-         %(title,description|Untitled).101B [%(id).30B].%(ext)s";
+         %(title,description|Untitled).114B [%(id).30B].%(ext)s";
 
     pub fn from_env() -> anyhow::Result<Self> {
         let (token, token_generated) = match env_opt("ORCA_TOKEN") {

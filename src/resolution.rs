@@ -65,6 +65,22 @@ impl HeightSet {
         Ok(Self(heights))
     }
 
+    /// Build a one-height set for a per-submission override (a prepare card
+    /// pinning a single resolution). Unlike [`from_heights`](Self::from_heights)
+    /// this does **not** require the height to be on [`HEIGHT_LADDER`]: the card
+    /// offers the concrete heights a source actually reports, and real sources
+    /// hand back off-ladder rungs — xvideos labels a clip "240p" while reporting
+    /// a 250px height. Snapping such a pick to the ladder or, worse, rejecting it
+    /// outright (the old "unsupported resolution height: 250" 400) throws away a
+    /// legitimate download target. `0` is the [`HIGHEST`] sentinel; a negative
+    /// height is the only genuine error.
+    pub fn single_requested(height: i64) -> Result<Self, String> {
+        if height < 0 {
+            return Err(format!("negative resolution height: {height}"));
+        }
+        Ok(Self(vec![height]))
+    }
+
     fn normalize(heights: &mut Vec<i64>) {
         // Descending, but HIGHEST (0) first — it outranks every concrete height.
         heights.sort_unstable_by(|a, b| match (*a, *b) {
@@ -280,6 +296,19 @@ mod tests {
                 .heights(),
             &[1080, 720]
         );
+    }
+
+    #[test]
+    fn single_requested_accepts_off_ladder_source_heights() {
+        // xvideos reports a "240p" clip as 250px — a legitimate pick a prepare
+        // card offers, which from_heights would 400 on.
+        let s = HeightSet::single_requested(250).unwrap();
+        assert_eq!(s.heights(), &[250]);
+        // It still resolves against what the source has.
+        assert_eq!(s.resolve(&[250, 480]), vec![250]);
+        // 0 stays the HIGHEST sentinel; negatives are the only error.
+        assert_eq!(HeightSet::single_requested(0).unwrap().heights(), &[HIGHEST]);
+        assert!(HeightSet::single_requested(-1).is_err());
     }
 
     #[test]

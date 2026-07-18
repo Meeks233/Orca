@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn output_template_fits_the_byte_budget() {
         let tpl = Config::DEFAULT_OUTPUT_TEMPLATE;
-        // Literal separators in the template: " - ", " - ", " [", "]".
-        let literals = " - ".len() * 2 + " [".len() + "]".len();
+        // Literal separators in the template: " - ", " [", "]".
+        let literals = " - ".len() + " [".len() + "]".len();
         // The `.NB` budget declared on each truncated field.
         let field_budgets: usize = tpl
             .match_indices(".")
@@ -408,8 +408,7 @@ mod tests {
                     .flatten()
             })
             .sum();
-        let date = "0000-00-00".len();
-        let base = literals + field_budgets + date;
+        let base = literals + field_budgets;
         assert_eq!(
             base, NAME_MAX_BYTES,
             "template budget ({base}) and NAME_MAX_BYTES ({NAME_MAX_BYTES}) drifted apart"
