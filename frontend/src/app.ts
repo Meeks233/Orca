@@ -1063,6 +1063,12 @@ function groupChildIds(gkey: string): number[] {
   return g ? [...g.body.children].map((c) => Number((c as HTMLElement).dataset.id)) : [];
 }
 
+// Resolve a list of item ids to their latest known Item objects, dropping any
+// that are no longer in state (deleted, or not yet loaded).
+function itemsFromIds(ids: number[]): Item[] {
+  return ids.map((id) => state.items.get(id)).filter(Boolean) as Item[];
+}
+
 // Fill the fold header from its children. Industry "playlist" pattern (YouTube /
 // file managers): the FIRST video's thumbnail (its real orientation preserved),
 // a stacked-card edge behind it so it reads as a list at a glance, the video
@@ -1071,7 +1077,7 @@ function groupChildIds(gkey: string): number[] {
 function updateGroupHeader(gkey: string): void {
   const g = state.groups.get(gkey);
   if (!g) return;
-  const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[];
+  const items = itemsFromIds(groupChildIds(gkey));
   if (!items.length) return;
   const first = items[0]!;
   const firstThumb = thumbUrl(first);
@@ -1134,7 +1140,7 @@ function updateGroupHeader(gkey: string): void {
 function updateGroupProgress(gkey: string): void {
   const g = state.groups.get(gkey);
   if (!g) return;
-  const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[];
+  const items = itemsFromIds(groupChildIds(gkey));
   if (!items.length) return;
   const total = items.length;
   // Prefer the latest SSE status (state.progress) over the possibly-stale item
@@ -1445,8 +1451,8 @@ function closeFilterMenu(): void {
 
 els.filterBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  const open = els.filterMenu.classList.toggle('hidden');
-  els.filterBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  const hidden = els.filterMenu.classList.toggle('hidden');
+  els.filterBtn.setAttribute('aria-expanded', hidden ? 'false' : 'true');
 });
 document.addEventListener('click', (e) => {
   if (!els.filterMenu.classList.contains('hidden')
@@ -1636,9 +1642,6 @@ function parseLinks(text: string): string[] {
   return out;
 }
 
-// Submit every link in the box, one at a time. Sequential rather than parallel:
-// the backend paces downloads politely, and a burst of concurrent probes is
-// exactly the batch-downloader signature the queue works to avoid.
 // ---- Manual prepare stage (goal 4) ----------------------------------------
 // The Download button no longer submits behind the user's back: it probes the
 // entered link(s) into prepare cards shown in a staging area above the search bar
@@ -1934,6 +1937,11 @@ function multiSelectHtml(o: MultiSelectOpts): string {
   </div>`;
 }
 
+// Descending height order, but HIGHEST (0, meaning "no cap / best") first —
+// mirrors the backend's ordering so the summary names the same "tallest" the
+// server treats as primary.
+const sortHeightsDesc = (a: number, b: number): number => (a === 0 ? -1 : b === 0 ? 1 : b - a);
+
 /** Read the current selection back out of the DOM. `null` = follow global. */
 function multiSelectValue(root: HTMLElement): number[] | null {
   const opts = Array.from(root.querySelectorAll<HTMLElement>('.multiselect-opt'));
@@ -1942,9 +1950,7 @@ function multiSelectValue(root: HTMLElement): number[] | null {
   return opts
     .filter((o) => o.dataset.value !== 'global' && o.getAttribute('aria-selected') === 'true')
     .map((o) => Number(o.dataset.value))
-    // Descending, but HIGHEST (0) first — mirrors the backend's ordering so the
-    // summary names the same "tallest" the server will treat as primary.
-    .sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : b - a));
+    .sort(sortHeightsDesc);
 }
 
 function closeMultiSelects(except?: Element): void {
@@ -1996,7 +2002,7 @@ document.addEventListener('click', (e) => {
     const current = multiSelectValue(root) ?? [];
     const h = Number(opt.dataset.value);
     const next = current.includes(h) ? current.filter((x) => x !== h) : current.concat(h);
-    setMultiSelect(root, next.sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : b - a)));
+    setMultiSelect(root, next.sort(sortHeightsDesc));
   }
   root.dispatchEvent(new CustomEvent('multiselect-change', {
     bubbles: true,
@@ -2104,9 +2110,9 @@ function cookieDot(w: Website): { cls: CookieDotClass; label: string } {
   return { cls: 'ok', label: t('cookie.active', { size: fmtBytes(c.bytes) }) };
 }
 
-// Kebab overflow menu: everything that isn't an everyday control (login, test,
-// domain edit, cookie enable/disable + delete, delete site) collapses here so the
-// card front shows only the toggle, cookie status, one cookie button and the cap.
+// Kebab overflow menu: everything that isn't an everyday control (login, domain
+// edit, validate, cookie delete, delete site) collapses here so the card front
+// shows only the toggle, cookie status, one cookie button and the cap.
 function siteMenuHtml(w: Website): string {
   const present = !!(w.cookie && w.cookie.present);
   const items: string[] = [];
@@ -3180,6 +3186,21 @@ interface GlobalSettings {
 }
 let globalSettings: GlobalSettings | null = null;
 
+// Coerce a raw /api/settings payload into GlobalSettings, applying the same
+// per-field fallbacks whether it arrives from a GET (loadSettings) or a PUT echo
+// (commitGlobal).
+function parseGlobalSettings(data: Record<string, unknown>): GlobalSettings {
+  return {
+    max_heights: Array.isArray(data.max_heights) ? data.max_heights : [0],
+    max_heights_locked: !!data.max_heights_locked,
+    stream_quality: String(data.stream_quality || 'higher'),
+    container: String(data.container || 'mkv'),
+    container_locked: !!data.container_locked,
+    subs: !!data.subs,
+    subs_locked: !!data.subs_locked,
+  };
+}
+
 function renderGlobalDefaults(d: GlobalSettings): void {
   els.maxRes.innerHTML = multiSelectHtml({
     act: 'g-res',
@@ -3221,15 +3242,7 @@ async function loadSettings(): Promise<void> {
     const res = await apiFetch('/api/settings');
     if (!res.ok) return;
     const data = await res.json();
-    globalSettings = {
-      max_heights: Array.isArray(data.max_heights) ? data.max_heights : [0],
-      max_heights_locked: !!data.max_heights_locked,
-      stream_quality: String(data.stream_quality || 'higher'),
-      container: String(data.container || 'mkv'),
-      container_locked: !!data.container_locked,
-      subs: !!data.subs,
-      subs_locked: !!data.subs_locked,
-    };
+    globalSettings = parseGlobalSettings(data);
     renderGlobalDefaults(globalSettings);
     // The storage cap rides the same payload but lives in the Settings sheet, not
     // the per-site defaults, so it's tracked separately (and by the save bar).
@@ -3264,15 +3277,7 @@ async function commitGlobal(patch: Record<string, unknown>): Promise<void> {
       if (globalSettings) renderGlobalDefaults(globalSettings);
       return;
     }
-    globalSettings = {
-      max_heights: Array.isArray(data.max_heights) ? data.max_heights : [0],
-      max_heights_locked: !!data.max_heights_locked,
-      stream_quality: String(data.stream_quality || 'higher'),
-      container: String(data.container || 'mkv'),
-      container_locked: !!data.container_locked,
-      subs: !!data.subs,
-      subs_locked: !!data.subs_locked,
-    };
+    globalSettings = parseGlobalSettings(data);
     toast(t('toast.settingsSaved'), 'ok');
   } catch (e) {
     if (!isUnauthorized(e)) toast('Network error', 'error');
@@ -4319,7 +4324,9 @@ function buildResSelect(entry: PrepEntry): HTMLSelectElement {
   return sel;
 }
 
-// Submit every selected entry at its chosen resolution, sequentially.
+// Submit every selected entry at its chosen resolution, one at a time. Sequential
+// rather than parallel: the backend paces downloads politely, and a burst of
+// concurrent probes is exactly the batch-downloader signature the queue avoids.
 async function submitPrepEntries(entries: PrepEntry[]): Promise<void> {
   for (const e of entries) {
     if (e.selected) await submitUrl(e.url, e.height);
@@ -4755,7 +4762,7 @@ document.addEventListener('click', (e) => {
 
 // Items backing the current selection (latest known objects).
 function selectedItems(): Item[] {
-  return [...state.selected].map((id) => state.items.get(id)).filter(Boolean) as Item[];
+  return itemsFromIds([...state.selected]);
 }
 
 // Reflect the selection Set onto every loaded row and refresh the toolbar.
@@ -5078,10 +5085,10 @@ async function applyBatchShare(): Promise<void> {
 
 // Whole-fold helpers wired to the header's play/share/download actions.
 function shareGroup(gkey: string): void {
-  void openBatchShare(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
+  void openBatchShare(itemsFromIds(groupChildIds(gkey)));
 }
 function downloadGroup(gkey: string): void {
-  batchDownload(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
+  batchDownload(itemsFromIds(groupChildIds(gkey)));
 }
 
 // Stop sharing every selected item that is currently public (turns them private).
