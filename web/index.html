@@ -231,21 +231,22 @@
   <div id="welcome" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
     <div class="modal-card welcome-card">
       <h2 id="welcome-title" class="modal-heading" data-i18n="welcome.title">Welcome to Orca</h2>
-      <p class="hint-muted" data-i18n="welcome.sub">Point Orca at your server to get started.</p>
-      <div class="form-box">
-        <div id="welcome-server-row" class="form-row">
-          <label class="form-row-label" for="welcome-server" data-i18n="settings.serverUrl">Server URL</label>
-          <div class="form-row-ctl">
-            <input id="welcome-server" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
+      <section class="set-group">
+        <div class="form-box">
+          <div id="welcome-server-row" class="form-row">
+            <label class="form-row-label" for="welcome-server" data-i18n="settings.serverUrl">Server URL</label>
+            <div class="form-row-ctl">
+              <input id="welcome-server" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-row-label" for="welcome-token" data-i18n="settings.token">API token</label>
+            <div class="form-row-ctl">
+              <input id="welcome-token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+            </div>
           </div>
         </div>
-        <div class="form-row">
-          <label class="form-row-label" for="welcome-token" data-i18n="settings.token">API token</label>
-          <div class="form-row-ctl">
-            <input id="welcome-token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
-          </div>
-        </div>
-      </div>
+      </section>
       <p id="welcome-error" class="hint hidden"></p>
       <section id="welcome-perms" class="set-group hidden">
         <label data-i18n="settings.permissions">App permissions</label>
