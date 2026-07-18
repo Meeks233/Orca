@@ -4776,13 +4776,14 @@ function revealBlurred(el: HTMLElement): void {
 }
 
 // ---- Desktop hover-intent reveal (privacy blur) --------------------------------
-// Revealing a blurred card on a bare CSS :hover was too eager — the thumbnail
-// flashed clear whenever the cursor merely swept across the card on the way
-// elsewhere. Instead the pointer must DWELL on the thumbnail itself for a short
-// beat before the card peeks (adds `.peek`). ~0.45s is the sensitive-media reveal
-// sweet spot: long enough to filter out incidental fly-overs, short enough to feel
-// immediate when you mean it. Hovering anything else on the card (title, actions)
-// never reveals — only the thumbnail does. Touch devices skip this and tap-to-peek.
+// Revealing a blurred card on a bare CSS :hover was too eager — the card flashed
+// clear whenever the cursor merely swept across it on the way elsewhere. Instead
+// the pointer must DWELL anywhere on the card for a short beat before it peeks
+// (adds `.peek`). ~0.45s is the sensitive-media reveal sweet spot: long enough to
+// filter out incidental fly-overs, short enough to feel immediate when you mean
+// it. Dwelling on the title/uploader reveals just like the thumbnail — the whole
+// blurred card is one peek target, so you don't have to aim at the image to read
+// the title. Touch devices skip this and use tap-to-peek instead.
 const canHover = !!window.matchMedia && window.matchMedia('(hover: hover)').matches;
 const BLUR_PEEK_INTENT_MS = 450;
 let hoverPeek: { item: HTMLElement; timer: number } | null = null;
@@ -4800,15 +4801,15 @@ function armHoverPeek(item: HTMLElement): void {
 }
 if (canHover) {
   els.history.addEventListener('mouseover', (e) => {
-    const wrap = (e.target as HTMLElement).closest('.item.blurred .thumb-wrap') as HTMLElement | null;
-    if (!wrap) { clearHoverPeek(); return; }
-    armHoverPeek(wrap.closest('.item') as HTMLElement);
+    const item = (e.target as HTMLElement).closest('.item.blurred') as HTMLElement | null;
+    if (!item) { clearHoverPeek(); return; }
+    armHoverPeek(item);
   });
   els.history.addEventListener('mouseout', (e) => {
-    const wrap = (e.target as HTMLElement).closest('.item.blurred .thumb-wrap') as HTMLElement | null;
-    if (!wrap) return;
+    const item = (e.target as HTMLElement).closest('.item.blurred') as HTMLElement | null;
+    if (!item) return;
     const to = e.relatedTarget as Node | null;
-    if (to && wrap.contains(to)) return; // still inside the thumbnail — keep peeking
+    if (to && item.contains(to)) return; // still inside the card — keep peeking
     clearHoverPeek();
   });
 }
