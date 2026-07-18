@@ -46,11 +46,13 @@ self.addEventListener('fetch', (event) => {
   // Only handle same-origin GETs; everything else goes straight to the network.
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
 
-  // Never cache API traffic — data must always be live.
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(fetch(req));
-    return;
-  }
+  // Bypass the worker entirely for API traffic — don't call respondWith, so the
+  // browser fetches straight from the network. Piping API responses back through
+  // the worker was actively harmful: the `/api/events` SSE stream (and `/api/stream`
+  // media) are long-lived responses, and routing them through the worker's
+  // respondWith tied it up, stalling every `<img>` thumbnail load until the SSE's
+  // 15s keep-alive tick. Not handling these leaves data live AND unblocks images.
+  if (url.pathname.startsWith('/api/')) return;
 
   // App shell: network-first so code edits (app.js/style.css/index.html) load
   // immediately; warm the cache and fall back to it only when offline.
