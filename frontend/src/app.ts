@@ -1658,6 +1658,14 @@ function clearStage(): void {
   els.stage.classList.add('hidden');
 }
 
+// Drop one staged entry (its X was tapped). The card's own DOM node is already
+// removed by prepCardEl; collapse the whole stage once the last one goes.
+function removeStageEntry(entry: PrepEntry): void {
+  const i = stageEntries.indexOf(entry);
+  if (i >= 0) stageEntries.splice(i, 1);
+  if (!stageEntries.length) clearStage();
+}
+
 async function stageInput(): Promise<void> {
   if (stageBusy) return;
   const raw = els.url.value.trim();
@@ -1689,7 +1697,7 @@ async function stageInput(): Promise<void> {
   setSubmitBusy(false);
   els.stageList.textContent = '';
   if (!stageEntries.length) { clearStage(); toast(t('toast.probeFail'), 'error'); return; }
-  for (const entry of stageEntries) els.stageList.appendChild(prepCardEl(entry));
+  for (const entry of stageEntries) els.stageList.appendChild(prepCardEl(entry, removeStageEntry));
   if (links.length > shown.length) toast(t('clip.capped', { n: links.length - shown.length }), 'info');
   els.stageDownload.disabled = false;
   els.url.value = '';
@@ -1827,6 +1835,10 @@ interface Website {
   /// Per-site subtitle capture; null = follow the global default.
   subs: boolean | null;
   blur: boolean;
+  /// What `blur` was seeded to on the backend (immutable). Sorting counts blur as a
+  /// customisation only when it deviates from this, so the NSFW sites shipped
+  /// blur-on don't all float to the top of the list as if the user had set them.
+  blur_default: boolean;
   sort: number;
   cookie?: CookieStatus;
 }
@@ -1850,11 +1862,16 @@ function hostOfUrl(url?: string | null): string {
   s = (s.split(':')[0] ?? '').toLowerCase().replace(/\.$/, '');
   return s.startsWith('www.') ? s.slice(4) : s;
 }
-function isItemBlurred(item: Item): boolean {
+// True when a URL's host belongs to a blur-on site. Shared by the history rows and
+// the prepare cards so the stage/clipboard grabber honours the same blur setting.
+function urlIsBlurred(url?: string | null): boolean {
   if (!blurredHosts.length) return false;
-  const host = hostOfUrl(item.webpage_url);
+  const host = hostOfUrl(url);
   if (!host) return false;
   return blurredHosts.some((suf) => host === suf || host.endsWith('.' + suf));
+}
+function isItemBlurred(item: Item): boolean {
+  return urlIsBlurred(item.webpage_url);
 }
 // Reapply the blurred class across already-rendered home rows (after a blur
 // toggle or a fresh website load), without a full list rebuild.
@@ -2206,13 +2223,16 @@ async function loadWebsites(): Promise<void> {
  * How many of this site's settings differ from the defaults. Each of the four
  * inherited settings counts when it's pinned (non-null = "don't follow the
  * global"), plus the two flags that are themselves departures from the norm.
+ * Blur counts only when it deviates from the site's SEEDED default — an NSFW site
+ * shipped blur-on is at its default and must not float up, but the same site
+ * turned blur-off (or a plain site turned blur-on) is a real departure.
  * Cookies are excluded: a jar is state the site needed, not a preference the
  * user expressed.
  */
 function customCount(w: Website): number {
   return Number(w.max_heights !== null) + Number(w.stream_quality !== null)
     + Number(w.container !== null) + Number(w.subs !== null)
-    + Number(w.blur) + Number(!w.enabled);
+    + Number(w.blur !== w.blur_default) + Number(!w.enabled);
 }
 
 /**
@@ -4081,6 +4101,18 @@ async function readClipboardText(): Promise<string> {
   return navigator.clipboard.readText();
 }
 
+// Write clipboard text across platforms (mirror of readClipboardText): the Tauri
+// plugin in the native app, else the async Clipboard API. Best-effort — a denial
+// is swallowed, since the only caller is a courtesy clear after a download.
+async function writeClipboardText(text: string): Promise<void> {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (invoke) {
+    try { await invoke('plugin:clipboard-manager|write_text', { text }); return; }
+    catch (_) { /* plugin absent or denied — try the web API below */ }
+  }
+  try { await navigator.clipboard.writeText(text); } catch (_) { /* denied — best effort */ }
+}
+
 // Paste button: pull the clipboard, keep every link in it, and stage them in the
 // box for review rather than submitting behind the user's back. Also the gesture
 // that grants clipboard permission in a browser, after which auto-detect can read.
@@ -4120,6 +4152,28 @@ if (els.pasteBtn) {
 // the same content. Cleared implicitly when the clipboard text changes.
 let lastClipText = '';
 let clipOpen = false;
+// True when the clipboard text that triggered the current offer was NOTHING but
+// link(s) — the only case we're allowed to clear it after downloading (goal 4).
+let clipLinkOnly = false;
+
+// The clipboard held only URL(s) and whitespace, nothing worth keeping.
+function isLinkOnly(text: string): boolean {
+  const matches = text.match(LINK_RE);
+  if (!matches?.length) return false;
+  return text.replace(LINK_RE, ' ').replace(/\s+/g, '').length === 0;
+}
+
+// Clear the clipboard after a clipboard-grabber download, but only if it still
+// holds exactly what we acted on — never clobber something the user copied since.
+async function clearClipboardIfUnchanged(): Promise<void> {
+  try {
+    const cur = ((await readClipboardText()) || '').trim();
+    if (cur && cur === lastClipText) {
+      await writeClipboardText('');
+      lastClipText = '';
+    }
+  } catch (_) { /* best effort */ }
+}
 
 // Cooldown: once a link is declined (goal 2), don't auto-offer it again for 12h,
 // even across sessions or after the clipboard cycles away and back. Persisted as a
@@ -4175,6 +4229,8 @@ async function detectClipboard(): Promise<void> {
   const staged = els.url.value;
   const fresh = links.filter((l) => staged.indexOf(l) < 0 && !clipInCooldown(l));
   if (!fresh.length) return;
+  // Remember whether the clipboard was link-only, so a later confirm may clear it.
+  clipLinkOnly = isLinkOnly(text);
   await showClipConfirm(fresh);
 }
 
@@ -4233,15 +4289,28 @@ async function probePrepEntries(urls: string[]): Promise<PrepEntry[]> {
 // The shared prepare card. Built with DOM methods (textContent / data-URI src),
 // never innerHTML, because the title/uploader/thumbnail are attacker-influenced.
 // Reuses the history card's shape (thumbnail + body) so it reads as "a video".
-function prepCardEl(entry: PrepEntry): HTMLElement {
+function prepCardEl(entry: PrepEntry, onRemove?: (entry: PrepEntry) => void): HTMLElement {
   const card = document.createElement('div');
   card.className = 'prep-card';
   card.classList.toggle('selected', entry.selected);
+  // Honour the per-site privacy blur (goal 3): a card from a blur-on site hides
+  // its thumbnail until hover, exactly like the history rows.
+  card.classList.toggle('blurred', urlIsBlurred(entry.url));
 
-  const check = document.createElement('div');
-  check.className = 'prep-check';
-  check.setAttribute('aria-hidden', 'true');
-  card.appendChild(check);
+  // The X drops this single entry from the batch (goal 3) — it sits where the old
+  // selection checkmark did, but is an explicit "remove this one" control now that
+  // the whole card carries the accent highlight to show selection.
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'prep-cancel';
+  cancel.setAttribute('aria-label', t('prep.remove'));
+  cancel.innerHTML = CANCEL_SVG;
+  cancel.addEventListener('click', (e) => {
+    e.stopPropagation();
+    card.remove();
+    onRemove?.(entry);
+  });
+  card.appendChild(cancel);
 
   const m = entry.meta;
   if (m?.thumbnail) {
@@ -4288,10 +4357,12 @@ function prepCardEl(entry: PrepEntry): HTMLElement {
   body.appendChild(row);
   card.appendChild(body);
 
-  // Tapping the card toggles its selection (reusing the multi-select mental model,
-  // goal 3), except when the tap is on the resolution picker.
+  // Tapping the card toggles its selection, reusing the history list's accent
+  // highlight (goal 3) — except when the tap lands on the resolution picker or the
+  // remove (X) button, which own their own gestures.
   card.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).closest('.prep-res')) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('.prep-res') || target.closest('.prep-cancel')) return;
     entry.selected = !entry.selected;
     card.classList.toggle('selected', entry.selected);
   });
@@ -4374,13 +4445,22 @@ async function showClipConfirm(links: string[]): Promise<void> {
   if (document.querySelector('.modal-overlay:not(.hidden)')) { clipOpen = false; return; }
   clipEntries = fresh;
   els.clipList.textContent = '';
-  for (const entry of fresh) els.clipList.appendChild(prepCardEl(entry));
+  for (const entry of fresh) els.clipList.appendChild(prepCardEl(entry, removeClipEntry));
   els.clipConfirmBtn.disabled = false;
   openModal(els.clipConfirm);
   const base = t(fresh.length === 1 ? 'clip.subOne' : 'clip.subN', { n: fresh.length });
   els.clipSub.textContent = total > shown.length
     ? base + ' ' + t('clip.capped', { n: total - shown.length })
     : base;
+}
+
+// Drop one offered entry (its X was tapped). "Temporarily" cancel — no 12h
+// cooldown, unlike a full dismiss — so re-copying the link can still offer it. The
+// card's DOM node is already removed by prepCardEl; close the sheet if it empties.
+function removeClipEntry(entry: PrepEntry): void {
+  const i = clipEntries.indexOf(entry);
+  if (i >= 0) clipEntries.splice(i, 1);
+  if (!clipEntries.length) { closeModal(els.clipConfirm); clipOpen = false; }
 }
 
 function dismissClip(): void {
@@ -4398,6 +4478,10 @@ if (els.clipConfirmBtn) {
     closeModal(els.clipConfirm);
     clipOpen = false;
     await submitPrepEntries(entries);
+    // The offered links came straight off the clipboard; if that's ALL it held and
+    // we actually downloaded something, wipe it so the same URLs don't re-trigger
+    // the grabber (goal 4). Guarded so we never clobber unrelated new content.
+    if (clipLinkOnly && entries.some((e) => e.selected)) await clearClipboardIfUnchanged();
   });
   els.clipCancel.addEventListener('click', dismissClip);
   els.clipClose.addEventListener('click', dismissClip);

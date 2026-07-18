@@ -503,7 +503,7 @@ async fn run_job(
             // honour it as the cap in place of the settings ladder. `Some(0)` is an
             // explicit "highest available", so it caps at nothing like HIGHEST does.
             let heights = match item.requested_height {
-                Some(h) => crate::resolution::HeightSet::from_heights(&[h]).unwrap_or_default(),
+                Some(h) => crate::resolution::HeightSet::single_requested(h).unwrap_or_default(),
                 None => resolve_max_heights(cfg, db, &sites, &item.webpage_url).await,
             };
             // What this run is aiming for, snapped against the heights the source

@@ -70,6 +70,7 @@ pub async fn upsert(
         container: None,
         subs: None,
         blur: false,
+        blur_default: false,
         sort: 999,
         cookie: None,
     });
@@ -139,6 +140,8 @@ pub async fn upsert(
             body.subs.or(base.subs)
         },
         blur: body.blur.unwrap_or(base.blur),
+        // Immutable seed baseline — carried through so a user edit never rewrites it.
+        blur_default: base.blur_default,
         sort: body.sort.unwrap_or(base.sort),
         cookie: None,
     };
