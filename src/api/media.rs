@@ -16,6 +16,7 @@ use axum::body::{Body, Bytes};
 use futures::StreamExt;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::header;
+use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::net::SocketAddr;
@@ -353,7 +354,6 @@ async fn proxy_upstream(
     // Mirror only the headers a media element needs — copying blindly risks
     // forwarding hop-by-hop or CORS headers that fight our own response.
     for name in [
-        header::CONTENT_TYPE,
         header::CONTENT_LENGTH,
         header::CONTENT_RANGE,
         header::ACCEPT_RANGES,
@@ -367,6 +367,23 @@ async fn proxy_upstream(
             }
         }
     }
+    // Content-Type is the one mirrored header a hostile upstream can weaponise:
+    // this response is same-origin, so a `text/html` body would be script running
+    // on our origin, with our token in its localStorage. Media types pass
+    // through; anything else is served as an opaque download, and `nosniff` stops
+    // the browser from re-deriving a runnable type from the bytes.
+    let upstream_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    builder = builder
+        .header(header::CONTENT_TYPE, playable_content_type(upstream_type))
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        // Belt to the type allowlist's braces: a subresource load ignores this,
+        // but a browser *navigated* to this URL — the only way a hostile body
+        // becomes a document — gets nothing it can run.
+        .header(header::CONTENT_SECURITY_POLICY, MEDIA_CSP);
     // Pace the egress: an initial burst so the player buffers and starts instantly,
     // then a throttle to a small multiple of the clip's real bitrate. A viewer who
     // seeks away or stops never costs the operator the whole file. Unranged bodies
@@ -519,6 +536,13 @@ async fn guarded_get(
 ) -> Result<reqwest::Response, AppError> {
     let client = proxy_client(allow_private_dns).await?;
     let mut url = upstream.to_string();
+    // The cookies were scoped to the host we were *asked* to fetch (see
+    // `cookie_header_for`). The Location of a redirect is chosen by the upstream,
+    // so replaying them on a hop to a different host would hand that host the
+    // site's session — the classic way a proxied fetch leaks credentials. Send
+    // them only while we are still on the original host; a hop away drops them,
+    // and a hop back legitimately gets them again.
+    let origin_host = host_of(upstream);
     let mut redirects = 0;
     loop {
         crate::net_guard::guard(&url, allow_private_dns)
@@ -529,7 +553,7 @@ async fn guarded_get(
             .get(&url)
             .header(reqwest::header::USER_AGENT, PROXY_UA)
             .header(reqwest::header::REFERER, referer);
-        if let Some(c) = cookie_header {
+        if let Some(c) = cookie_header.filter(|_| host_of(&url) == origin_host) {
             rb = rb.header(reqwest::header::COOKIE, c);
         }
         if let Some(r) = range {
@@ -561,6 +585,54 @@ async fn guarded_get(
             return Err(AppError::BadRequest("too many upstream redirects".into()));
         }
     }
+}
+
+/// Sent with every media body this server hands out, proxied or local. Media is
+/// consumed by `<video>`/`<audio>`/`<img>`, which ignore a subresource's own CSP,
+/// so this costs playback nothing — it only bites when a browser is navigated
+/// straight at the URL, which is the one case where a body that isn't really
+/// media could become a document on our origin.
+const MEDIA_CSP: &str = "default-src 'none'; sandbox";
+
+/// Narrow an upstream `Content-Type` to something a `<video>`/`<audio>` element
+/// can use and a browser will never execute. Anything outside the allowlist —
+/// `text/html`, `image/svg+xml`, a script type, or a missing/garbled value —
+/// becomes an opaque download.
+///
+/// The allowlist is deliberately by prefix: real CDNs answer with everything from
+/// `video/mp4` to `audio/webm; codecs=opus`, and the parameters have to survive.
+fn playable_content_type(upstream: &str) -> String {
+    let base = upstream
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let playable = (base.starts_with("audio/") || base.starts_with("video/"))
+        || (base.starts_with("image/") && base != "image/svg+xml")
+        || matches!(
+            base.as_str(),
+            "application/mp4"
+                | "application/octet-stream"
+                // HLS/DASH manifests: data for the player, never a document.
+                | "application/vnd.apple.mpegurl"
+                | "application/x-mpegurl"
+                | "text/vtt"
+        );
+    if playable {
+        upstream.trim().to_string()
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+/// Lowercased host of a URL, or `None` if it has none. Used to decide whether a
+/// redirect has left the host the request's credentials belong to.
+fn host_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(|h| h.to_ascii_lowercase())
 }
 
 /// Buffer a response body into memory under a hard byte budget, streaming it
@@ -869,6 +941,17 @@ async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response,
     parts
         .headers
         .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+    // ServeFile types the response from the file extension. Public shares serve
+    // this same path tokenlessly, so pin the browser to that type rather than let
+    // it sniff a runnable one out of the bytes.
+    parts.headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    parts.headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(MEDIA_CSP),
+    );
     Ok(Response::from_parts(parts, Body::new(body)).into_response())
 }
 
@@ -953,6 +1036,49 @@ mod tests {
             .unwrap();
         let body = resp.text().await.unwrap();
         assert!(body.contains("tls=TLSv1.3"), "{body}");
+    }
+
+    #[test]
+    fn hostile_upstream_types_are_not_echoed_back() {
+        // Anything a browser would execute on our origin becomes a download.
+        for hostile in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "TEXT/HTML",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "text/javascript",
+            "",
+            "garbage",
+        ] {
+            assert_eq!(
+                playable_content_type(hostile),
+                "application/octet-stream",
+                "{hostile}"
+            );
+        }
+        // Real media types survive intact, parameters and all.
+        for ok in [
+            "video/mp4",
+            "audio/webm; codecs=opus",
+            "image/jpeg",
+            "application/vnd.apple.mpegurl",
+            "text/vtt",
+        ] {
+            assert_eq!(playable_content_type(ok), ok, "{ok}");
+        }
+    }
+
+    #[test]
+    fn host_of_is_case_folded_and_scheme_agnostic() {
+        assert_eq!(host_of("https://CDN.Example.com/a"), host_of("http://cdn.example.com:8080/b"));
+        assert_ne!(host_of("https://cdn.example.com/a"), host_of("https://evil.test/a"));
+        // A sub-domain is a different host: cookies must not follow it either.
+        assert_ne!(
+            host_of("https://example.com/a"),
+            host_of("https://media.example.com/a")
+        );
+        assert_eq!(host_of("not a url"), None);
     }
 
     #[test]

@@ -28,6 +28,8 @@ use tokio::net::{TcpListener, TcpStream};
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Cap on the request head we buffer before giving up on a malformed client.
 const MAX_HEAD: usize = 16 * 1024;
+/// How long a connected client has to actually send its request line.
+const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 static PROXY_URL: OnceLock<String> = OnceLock::new();
 
@@ -77,7 +79,12 @@ pub async fn start(allow_private_dns: bool) -> Option<&'static str> {
 }
 
 async fn serve_conn(mut client: TcpStream) -> std::io::Result<()> {
-    let (head, rest) = read_head(&mut client).await?;
+    // A connection that opens and then says nothing must not pin a task forever.
+    let (head, rest) = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "client sent no request in time")
+        })??;
     let request_line = head.lines().next().unwrap_or_default().to_string();
     let mut parts = request_line.split_whitespace();
     let (method, target) = match (parts.next(), parts.next()) {
