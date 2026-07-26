@@ -16,9 +16,17 @@ const PREFIX: &str = "__ORCA__";
 pub struct DownloadOutcome {
     pub filepath: String,
     pub filesize: i64,
-    /// Final video pixel height parsed from the `.last_res_<id>` sidecar, or
-    /// `None` for audio-only downloads / when yt-dlp reported no height.
+    /// Final display-resolution edge. Videos use yt-dlp's pixel height; images
+    /// use the shorter decoded edge so landscape and portrait files classify the
+    /// same way (3840×2160 and 2160×3840 are both 4K).
     pub height: Option<i64>,
+}
+
+/// Resolution convention shared by video and still images: the smaller image
+/// edge is the video-equivalent height. This keeps orientation from inflating a
+/// portrait 1080×1920 image into a misleading "2K" label.
+pub(crate) fn image_resolution(width: usize, height: usize) -> Option<i64> {
+    i64::try_from(width.min(height)).ok().filter(|edge| *edge > 0)
 }
 
 /// Run a download for `item`. Progress ticks are sent on `progress` as they are
@@ -145,18 +153,28 @@ pub async fn download(
         let filesize = std::fs::metadata(&filepath)
             .map(|m| m.len() as i64)
             .unwrap_or(0);
-        // Best-effort resolution: read the last non-empty line of the height
-        // sidecar and parse it. Missing / "NA" (audio-only) → None.
-        let height = std::fs::read_to_string(&res_sidecar)
-            .ok()
-            .and_then(|raw| {
-                raw.lines()
-                    .rev()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty())
-                    .and_then(|l| l.parse::<i64>().ok())
-            })
-            .filter(|h| *h > 0);
+        // Images have no rendition ladder. Read the finished local file's header
+        // once and store its orientation-neutral short edge in `items.height`;
+        // subsequent history renders read the DB and never re-open the image.
+        // `imagesize` is header-only, covering the web formats we accept without
+        // allocating/decoding a multi-megapixel original.
+        let height = if item.media_type == "image" {
+            imagesize::size(&filepath)
+                .ok()
+                .and_then(|size| image_resolution(size.width, size.height))
+        } else {
+            // Best-effort video resolution from yt-dlp's final height sidecar.
+            std::fs::read_to_string(&res_sidecar)
+                .ok()
+                .and_then(|raw| {
+                    raw.lines()
+                        .rev()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .and_then(|l| l.parse::<i64>().ok())
+                })
+                .filter(|h| *h > 0)
+        };
         Ok(DownloadOutcome {
             filepath,
             filesize,
@@ -267,6 +285,33 @@ mod tests {
         assert_eq!(parse_percent("N/A"), None);
     }
 
+    #[test]
+    fn image_resolution_uses_the_short_edge_regardless_of_orientation() {
+        assert_eq!(image_resolution(3840, 2160), Some(2160));
+        assert_eq!(image_resolution(2160, 3840), Some(2160));
+        assert_eq!(image_resolution(1920, 1080), Some(1080));
+        assert_eq!(image_resolution(1080, 1920), Some(1080));
+        assert_eq!(image_resolution(0, 1080), None);
+    }
+
+    #[test]
+    fn header_probe_feeds_the_persisted_image_resolution() {
+        use std::io::Write;
+
+        // A minimal 1920×1080 GIF header. `imagesize` reads the dimensions from
+        // the local file header, which is exactly the path download() uses after
+        // yt-dlp has atomically moved the completed image into place.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&[
+            b'G', b'I', b'F', b'8', b'9', b'a',
+            0x80, 0x07, // width: 1920, little endian
+            0x38, 0x04, // height: 1080, little endian
+        ])
+        .unwrap();
+        let size = imagesize::size(file.path()).unwrap();
+        assert_eq!(image_resolution(size.width, size.height), Some(1080));
+    }
+
     // ---- Cancellation guarantee -------------------------------------------
     // Proves a delete stops the backend job WITHOUT needing a real download:
     // point `ytdlp_path` at a shell script that ignores its args and sleeps
@@ -324,6 +369,7 @@ mod tests {
             archive_key: "youtube x".into(),
             title: "t".into(),
             uploader: None,
+            uploader_url: None,
             webpage_url: "https://example.com/watch?v=x".into(),
             thumbnail_url: None,
             duration: None,
@@ -343,9 +389,13 @@ mod tests {
             public_until: None,
             public_hits: 0,
             filename: None,
+            media_type: "video".into(),
             local_available: false,
             total_filesize: 0,
             playlist_index: None,
+            playlist_key: None,
+            playlist_title: None,
+            playlist_pos: None,
         }
     }
 

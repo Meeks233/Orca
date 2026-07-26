@@ -3,8 +3,8 @@
 use super::{Db, ListPage, ListQuery, SortKey};
 use crate::seal_import::{ImportOutcome, SealRecord};
 use crate::types::{Client, Item, ItemResolution, ProbeResult, SiteCount, Source, Status, Website};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +30,14 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
     } else {
         None
     };
+    // A completed file's extension is authoritative. This also upgrades images
+    // saved by releases before `media_type` was persisted.
+    let media_type = if filename.is_some() {
+        media_type_for_filename(filename.as_deref())
+    } else {
+        row.try_get::<String, _>("media_type")
+            .unwrap_or_else(|_| "video".to_string())
+    };
 
     Ok(Item {
         id: row.try_get("id")?,
@@ -39,6 +47,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         archive_key: row.try_get("archive_key")?,
         title: row.try_get("title")?,
         uploader: row.try_get("uploader")?,
+        uploader_url: row.try_get("uploader_url")?,
         webpage_url: row.try_get("webpage_url")?,
         thumbnail_url: row.try_get("thumbnail_url")?,
         duration: row.try_get("duration")?,
@@ -57,9 +66,13 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         public_until: row.try_get("public_until")?,
         public_hits: row.try_get("public_hits")?,
         playlist_index: row.try_get("playlist_index")?,
+        playlist_key: row.try_get("playlist_key")?,
+        playlist_title: row.try_get("playlist_title")?,
+        playlist_pos: row.try_get("playlist_pos")?,
         total_filesize: row.try_get("total_filesize")?,
         filepath,
         filename,
+        media_type,
         local_available,
     })
 }
@@ -72,6 +85,24 @@ fn basename(filepath: &Option<String>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Unknown formats preserve the established video-download path. Only common
+/// still-image extensions use the image save path.
+fn media_type_for_filename(filename: Option<&str>) -> String {
+    let ext = filename
+        .and_then(|name| Path::new(name).extension())
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        ext.as_str(),
+        "avif" | "bmp" | "gif" | "heic" | "heif" | "jpeg" | "jpg" | "png" | "webp"
+    ) {
+        "image".to_string()
+    } else {
+        "video".to_string()
+    }
+}
+
 /// True when `filepath` is set and points at a real file on disk.
 fn filepath_exists(filepath: &Option<String>) -> bool {
     filepath
@@ -81,12 +112,11 @@ fn filepath_exists(filepath: &Option<String>) -> bool {
         .unwrap_or(false)
 }
 
-const SELECT_COLS: &str =
-    "id, public_slug AS resource_slug, extractor, video_id, archive_key, title, uploader, \
-    webpage_url, thumbnail_url, duration, filepath, filesize, height, target_height, \
+const SELECT_COLS: &str = "id, public_slug AS resource_slug, extractor, video_id, archive_key, title, uploader, \
+    uploader_url, webpage_url, thumbnail_url, duration, media_type, filepath, filesize, height, target_height, \
     requested_height, source_max_height, source, \
     status, error, created_at, completed_at, public, share_slug, public_until, public_hits, \
-    playlist_index, \
+    playlist_index, playlist_key, playlist_title, playlist_pos, \
     COALESCE((SELECT SUM(filesize) FROM item_resolutions WHERE item_id = items.id), filesize, 0) \
       AS total_filesize";
 
@@ -143,24 +173,31 @@ pub(super) async fn insert_probe(db: &Db, p: &ProbeResult, source: Source) -> an
 
     let result = sqlx::query(
         "INSERT INTO items \
-         (extractor, video_id, archive_key, title, uploader, webpage_url, thumbnail_url, \
-          duration, source, status, created_at, playlist_index, available_heights, public_slug) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (extractor, video_id, archive_key, title, uploader, uploader_url, webpage_url, \
+          thumbnail_url, \
+          duration, media_type, source, status, created_at, playlist_index, available_heights, public_slug, \
+          playlist_key, playlist_title, playlist_pos) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&p.extractor)
     .bind(&p.video_id)
     .bind(&archive_key)
     .bind(&p.title)
     .bind(&p.uploader)
+    .bind(&p.uploader_url)
     .bind(&p.webpage_url)
     .bind(&p.thumbnail_url)
     .bind(p.duration)
+    .bind(&p.media_type)
     .bind(source.as_str())
     .bind(Status::Queued.as_str())
     .bind(now)
     .bind(p.playlist_index)
     .bind(heights_csv)
     .bind(&slug)
+    .bind(p.playlist.as_ref().map(|pl| pl.key.as_str()))
+    .bind(p.playlist.as_ref().and_then(|pl| pl.title.as_deref()))
+    .bind(p.playlist.as_ref().and_then(|pl| pl.pos))
     .execute(&db.pool)
     .await?;
 
@@ -276,12 +313,36 @@ pub(super) async fn set_target_height(db: &Db, id: i64, height: Option<i64>) -> 
 
 /// Record the prepare-card resolution override for an item (see
 /// `Item::requested_height`). `Some(0)` pins "highest available".
-pub(super) async fn set_requested_height(db: &Db, id: i64, height: Option<i64>) -> anyhow::Result<()> {
+pub(super) async fn set_requested_height(
+    db: &Db,
+    id: i64,
+    height: Option<i64>,
+) -> anyhow::Result<()> {
     sqlx::query("UPDATE items SET requested_height = ? WHERE id = ?")
         .bind(height)
         .bind(id)
         .execute(&db.pool)
         .await?;
+    Ok(())
+}
+
+/// Record which collection an item belongs to (see `Item::playlist_key`). Used
+/// when a video already in the library is re-submitted as part of a list, so the
+/// existing row joins the fold instead of staying loose.
+pub(super) async fn set_playlist(
+    db: &Db,
+    id: i64,
+    pl: &crate::types::PlaylistRef,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE items SET playlist_key = ?, playlist_title = ?, playlist_pos = ? WHERE id = ?",
+    )
+    .bind(&pl.key)
+    .bind(pl.title.as_deref())
+    .bind(pl.pos)
+    .bind(id)
+    .execute(&db.pool)
+    .await?;
     Ok(())
 }
 
@@ -942,7 +1003,12 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
                 .await?;
             match row {
                 Some(r) => Some(r.try_get::<i64, _>("v")?),
-                None => return Ok(ListPage { items: Vec::new(), next_cursor: None }),
+                None => {
+                    return Ok(ListPage {
+                        items: Vec::new(),
+                        next_cursor: None,
+                    });
+                }
             }
         }
         None => None,
@@ -963,6 +1029,9 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
         Some(true) => sql.push_str(" AND filepath IS NOT NULL AND filepath <> ''"),
         Some(false) => sql.push_str(" AND (filepath IS NULL OR filepath = '')"),
         None => {}
+    }
+    if q.playlist.is_some() {
+        sql.push_str(" AND playlist_key = ?");
     }
     for c in &search_clauses {
         sql.push_str(" AND ");
@@ -985,6 +1054,9 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
     let mut query = sqlx::query(&sql);
     if let Some(status) = q.status {
         query = query.bind(status.as_str().to_string());
+    }
+    if let Some(key) = q.playlist.clone() {
+        query = query.bind(key);
     }
     for b in search_binds {
         query = match b {
@@ -1281,10 +1353,13 @@ mod tests {
             video_id: video_id.to_string(),
             title: title.to_string(),
             uploader: Some("uploader".to_string()),
+            uploader_url: Some("https://example.com/@uploader".to_string()),
             thumbnail_url: None,
             duration: Some(42),
             webpage_url: format!("https://example.com/{video_id}"),
+            media_type: "video".to_string(),
             playlist_index: None,
+            playlist: None,
             available_heights: vec![1080, 720, 360],
         }
     }
@@ -1397,12 +1472,19 @@ mod tests {
         let (db, _dir) = temp_db().await;
         assert_eq!(db.pending_client_count().await.unwrap(), 0);
 
-        db.register_client("pending-one-xxxx", None, false).await.unwrap();
-        let two = db.register_client("pending-two-xxxx", None, false).await.unwrap();
+        db.register_client("pending-one-xxxx", None, false)
+            .await
+            .unwrap();
+        let two = db
+            .register_client("pending-two-xxxx", None, false)
+            .await
+            .unwrap();
         assert_eq!(db.pending_client_count().await.unwrap(), 2);
 
         // A repeat registration is the same row, not a new pending slot.
-        db.register_client("pending-one-xxxx", None, false).await.unwrap();
+        db.register_client("pending-one-xxxx", None, false)
+            .await
+            .unwrap();
         assert_eq!(db.pending_client_count().await.unwrap(), 2);
         assert!(db.client_known("pending-one-xxxx").await.unwrap());
         assert!(!db.client_known("never-registered").await.unwrap());
@@ -1495,7 +1577,9 @@ mod tests {
 
         // A canceled item: the overlay button must be able to find it (to render
         // retry), but the "already saved" tick lookup must NOT (it isn't downloaded).
-        db.set_status(item.id, Status::Canceled, None).await.unwrap();
+        db.set_status(item.id, Status::Canceled, None)
+            .await
+            .unwrap();
         assert_eq!(
             db.find_latest_by_url(&url).await.unwrap().map(|i| i.id),
             Some(item.id),
@@ -1507,7 +1591,9 @@ mod tests {
         );
 
         // Once completed, both agree.
-        db.set_status(item.id, Status::Completed, None).await.unwrap();
+        db.set_status(item.id, Status::Completed, None)
+            .await
+            .unwrap();
         assert_eq!(
             db.find_downloaded_by_url(&url).await.unwrap().map(|i| i.id),
             Some(item.id),
@@ -1524,7 +1610,9 @@ mod tests {
         let done = probe("youtube", "aaa111", "Done");
         let done_url = done.webpage_url.clone();
         let done_item = db.insert_probe(&done, Source::Download).await.unwrap();
-        db.set_status(done_item.id, Status::Completed, None).await.unwrap();
+        db.set_status(done_item.id, Status::Completed, None)
+            .await
+            .unwrap();
 
         let queued = probe("youtube", "bbb222", "Queued");
         let queued_url = queued.webpage_url.clone();
@@ -1609,6 +1697,53 @@ mod tests {
         assert_eq!(page2.next_cursor, None);
     }
 
+    // A playlist is one card standing for many rows, so it must be fetchable as a
+    // unit — independent of where its members happen to fall in the paged history.
+    #[tokio::test]
+    async fn list_filters_to_one_playlist() {
+        let (db, _dir) = temp_db().await;
+        let pl = crate::types::PlaylistRef {
+            key: "youtube:PL1".into(),
+            title: Some("Mine".into()),
+            pos: None,
+        };
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            let item = db
+                .insert_probe(&probe("youtube", id, id), Source::Download)
+                .await
+                .unwrap();
+            // Only the first two belong to the list; the third is a loose item
+            // sitting between them in id order.
+            if i != 2 {
+                db.set_playlist(item.id, &pl).await.unwrap();
+            }
+        }
+        let page = db
+            .list(ListQuery {
+                limit: 50,
+                playlist: Some("youtube:PL1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(
+            page.items
+                .iter()
+                .all(|i| i.playlist_key.as_deref() == Some("youtube:PL1"))
+        );
+
+        // An unfiltered list still sees everything.
+        let all = db
+            .list(ListQuery {
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 3);
+    }
+
     #[tokio::test]
     async fn list_sort_by_duration_paginates_both_directions() {
         let (db, _dir) = temp_db().await;
@@ -1622,10 +1757,17 @@ mod tests {
 
         // Descending: longest first, crossing a page boundary via the cursor.
         let p1 = db
-            .list(ListQuery { limit: 2, sort: SortKey::Duration, ..Default::default() })
+            .list(ListQuery {
+                limit: 2,
+                sort: SortKey::Duration,
+                ..Default::default()
+            })
             .await
             .unwrap();
-        assert_eq!(p1.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(30), Some(20)]);
+        assert_eq!(
+            p1.items.iter().map(|i| i.duration).collect::<Vec<_>>(),
+            vec![Some(30), Some(20)]
+        );
         let p2 = db
             .list(ListQuery {
                 limit: 2,
@@ -1635,15 +1777,26 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(p2.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(10)]);
+        assert_eq!(
+            p2.items.iter().map(|i| i.duration).collect::<Vec<_>>(),
+            vec![Some(10)]
+        );
         assert_eq!(p2.next_cursor, None);
 
         // Reverse (ascending): shortest first, same keyset walk the other way.
         let r1 = db
-            .list(ListQuery { limit: 2, sort: SortKey::Duration, reverse: true, ..Default::default() })
+            .list(ListQuery {
+                limit: 2,
+                sort: SortKey::Duration,
+                reverse: true,
+                ..Default::default()
+            })
             .await
             .unwrap();
-        assert_eq!(r1.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(10), Some(20)]);
+        assert_eq!(
+            r1.items.iter().map(|i| i.duration).collect::<Vec<_>>(),
+            vec![Some(10), Some(20)]
+        );
         let r2 = db
             .list(ListQuery {
                 limit: 2,
@@ -1654,7 +1807,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(r2.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(30)]);
+        assert_eq!(
+            r2.items.iter().map(|i| i.duration).collect::<Vec<_>>(),
+            vec![Some(30)]
+        );
     }
 
     #[test]
@@ -2038,11 +2194,12 @@ mod tests {
         let priv_again = db.get(item.id).await.unwrap().unwrap();
         assert!(!priv_again.public);
         assert!(priv_again.public_slug.is_none());
-        assert!(db
-            .find_by_public_slug(&first_share)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            db.find_by_public_slug(&first_share)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Re-sharing creates a different capability and records the expiry.
         let until = now_unix() + 7 * 86400;
@@ -2114,13 +2271,14 @@ mod tests {
         assert!(db.get(forever.id).await.unwrap().unwrap().public);
 
         // Expiry destroys the public capability.
-        assert!(db
-            .get(lapsed.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .public_slug
-            .is_none());
+        assert!(
+            db.get(lapsed.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .public_slug
+                .is_none()
+        );
         // Access tally zeroed on expiry — capsule drops once the share lapses.
         assert_eq!(db.get(lapsed.id).await.unwrap().unwrap().public_hits, 0);
     }

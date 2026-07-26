@@ -106,16 +106,23 @@ pub fn download_args(
             .replace(".%(ext)s", &format!(" [{h}p].%(ext)s")),
         None => cfg.output_template.clone(),
     };
+    let is_image = item.media_type == "image";
     let mut args: Vec<String> = vec![
         "--ignore-config".into(),
         "--no-warnings".into(),
         "-f".into(),
-        cfg.format.clone(),
-        "--merge-output-format".into(),
-        cfg.container.ext().into(),
+        if is_image {
+            "best".into()
+        } else {
+            cfg.format.clone()
+        },
     ];
+    if !is_image {
+        args.push("--merge-output-format".into());
+        args.push(cfg.container.ext().into());
+    }
 
-    if cfg.subs {
+    if !is_image && cfg.subs {
         args.push("--embed-subs".into());
         args.push("--write-subs".into());
         args.push("--sub-langs".into());
@@ -155,13 +162,13 @@ pub fn download_args(
         args.push(idx.to_string());
     }
 
-    args.push("--embed-metadata".into());
-
-    if cfg.embed_thumbnail {
-        args.push("--embed-thumbnail".into());
+    if !is_image {
+        args.push("--embed-metadata".into());
+        if cfg.embed_thumbnail {
+            args.push("--embed-thumbnail".into());
+        }
+        args.push("--embed-chapters".into());
     }
-
-    args.push("--embed-chapters".into());
 
     args.push("-o".into());
     args.push(output_template);
@@ -293,6 +300,7 @@ mod tests {
             archive_key: "youtube abc123".into(),
             title: "Test Video".into(),
             uploader: Some("Uploader".into()),
+            uploader_url: None,
             webpage_url: "https://example.com/watch?v=abc123".into(),
             thumbnail_url: None,
             duration: Some(120),
@@ -312,9 +320,13 @@ mod tests {
             public_until: None,
             public_hits: 0,
             filename: None,
+            media_type: "video".into(),
             local_available: false,
             total_filesize: 0,
             playlist_index: None,
+            playlist_key: None,
+            playlist_title: None,
+            playlist_pos: None,
         }
     }
 
@@ -476,9 +488,11 @@ mod tests {
         let cfg = test_config();
         let mut item = test_item();
         // Standalone item → no --playlist-items.
-        assert!(!download_args(&cfg, &item, None, None)
-            .iter()
-            .any(|a| a == "--playlist-items"));
+        assert!(
+            !download_args(&cfg, &item, None, None)
+                .iter()
+                .any(|a| a == "--playlist-items")
+        );
         // Multi-video post entry → pinned to its position.
         item.playlist_index = Some(2);
         let args = download_args(&cfg, &item, None, None);
@@ -509,5 +523,22 @@ mod tests {
         assert_eq!(args[ci + 1], "/data/c.txt");
 
         assert_eq!(args.last().unwrap(), &item.webpage_url);
+    }
+
+    #[test]
+    fn image_download_keeps_the_resolved_cookie_jar_but_skips_video_only_flags() {
+        let cfg = test_config();
+        let mut item = test_item();
+        item.media_type = "image".into();
+        let cookies = PathBuf::from("/data/x-cookies.txt");
+        let args = download_args(&cfg, &item, Some(&cookies), None);
+
+        let fi = pos(&args, "-f");
+        assert_eq!(args[fi + 1], "best");
+        let ci = pos(&args, "--cookies");
+        assert_eq!(args[ci + 1], "/data/x-cookies.txt");
+        assert!(!args.iter().any(|a| a == "--merge-output-format"));
+        assert!(!args.iter().any(|a| a == "--embed-metadata"));
+        assert!(!args.iter().any(|a| a == "--embed-thumbnail"));
     }
 }

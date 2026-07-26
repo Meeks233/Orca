@@ -107,6 +107,12 @@ pub struct Item {
     pub archive_key: String,
     pub title: String,
     pub uploader: Option<String>,
+    /// The uploader's own page (channel / profile URL), when the source reported
+    /// one. Rendered as a link on the uploader name in the web app. `None` for
+    /// rows downloaded before this was captured and sources that report neither
+    /// `uploader_url` nor `channel_url`.
+    #[serde(default)]
+    pub uploader_url: Option<String>,
     pub webpage_url: String,
     pub thumbnail_url: Option<String>,
     pub duration: Option<i64>,
@@ -120,6 +126,10 @@ pub struct Item {
     /// recognised as local. `None` when there is no local file.
     #[serde(default)]
     pub filename: Option<String>,
+    /// `image` for still-image files; `video` for all other downloadable media.
+    /// Computed from the actual local filename, so old rows need no migration.
+    #[serde(default)]
+    pub media_type: String,
     pub filesize: Option<i64>,
     /// Downloaded video pixel height (e.g. 720, 1080, 2160), used to label the
     /// item's resolution in the UI. `None` for audio-only / not-yet-completed /
@@ -178,6 +188,32 @@ pub struct Item {
     /// standalone item, where the URL already identifies a single video.
     #[serde(default)]
     pub playlist_index: Option<i64>,
+    /// The collection this video came from — a YouTube playlist, a channel tab,
+    /// whatever list the client downloaded it from — as `"<extractor>:<list id>"`.
+    /// Purely descriptive: it changes nothing about how the item is fetched, and
+    /// exists so the UI can fold a whole list into one card. `None` for a video
+    /// submitted on its own. See migration 0024.
+    #[serde(default)]
+    pub playlist_key: Option<String>,
+    /// Human-readable name of that collection, for the fold's header.
+    #[serde(default)]
+    pub playlist_title: Option<String>,
+    /// 1-based position within the collection — display order for the fold, and
+    /// deliberately NOT `playlist_index` (which drives `--playlist-items`).
+    #[serde(default)]
+    pub playlist_pos: Option<i64>,
+}
+
+/// Which collection an item belongs to. Supplied by a client that downloads a
+/// list video-by-video (the in-page button's list mode), or derived from the
+/// probe when a playlist URL is submitted whole.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlaylistRef {
+    pub key: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub pos: Option<i64>,
 }
 
 /// A self-registered client that authenticates with its own passphrase instead
@@ -281,13 +317,21 @@ pub struct ProbeResult {
     pub video_id: String,
     pub title: String,
     pub uploader: Option<String>,
+    /// The uploader's channel/profile URL (`uploader_url`, else `channel_url`).
+    pub uploader_url: Option<String>,
     pub thumbnail_url: Option<String>,
     pub duration: Option<i64>,
     pub webpage_url: String,
+    /// `image` when yt-dlp identified the selected entry as a still image.
+    pub media_type: String,
     /// 1-based position within a multi-entry probe, when yt-dlp reported one.
     /// Only meaningful (and only stored on the `Item`) when several entries share
     /// the same `webpage_url`; otherwise `None`. See `Item::playlist_index`.
     pub playlist_index: Option<i64>,
+    /// The list yt-dlp reported this entry as part of (`playlist_id` /
+    /// `playlist_title`), when the submitted URL was a playlist. Descriptive
+    /// only — see `Item::playlist_key`.
+    pub playlist: Option<PlaylistRef>,
     /// Distinct video pixel heights the source offers, highest first, parsed from
     /// this probe's `formats` list. Captured up front (yt-dlp already enumerates
     /// formats to pick the default) so the resolution picker needn't re-probe.
@@ -331,6 +375,11 @@ pub struct SubmitOptions {
     /// ladder height downloads just that copy; `0` means "highest available".
     /// When absent the settings ladder (`resolve_max_heights`) decides as before.
     pub max_height: Option<i64>,
+    /// The list this URL was picked from. Set by a client downloading a playlist
+    /// video-by-video (the in-page button's list mode), which submits N ordinary
+    /// video URLs the server has no way to recognise as one collection. Recorded
+    /// on the item so the web UI folds them into a single card.
+    pub playlist: Option<PlaylistRef>,
 }
 
 /// Response body for POST /api/items (single item form).

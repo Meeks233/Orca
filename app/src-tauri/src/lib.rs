@@ -127,6 +127,7 @@ fn save_media<R: tauri::Runtime>(
     _name: String,
     _slug: String,
     _height: i64,
+    _media_type: String,
 ) -> Result<AndroidPermissionStatus, String> {
     #[cfg(target_os = "android")]
     {
@@ -137,6 +138,7 @@ fn save_media<R: tauri::Runtime>(
                 "saveMedia",
                 serde_json::json!({
                     "url": _url, "name": _name, "slug": _slug, "height": _height,
+                    "mediaType": _media_type,
                 }),
             )
             .map_err(|e| e.to_string());
@@ -231,7 +233,10 @@ fn delete_local<R: tauri::Runtime>(
         return _app
             .state::<AndroidPermissions<R>>()
             .0
-            .run_mobile_plugin::<DeleteResult>("deleteLocal", serde_json::json!({ "items": _items }))
+            .run_mobile_plugin::<DeleteResult>(
+                "deleteLocal",
+                serde_json::json!({ "items": _items }),
+            )
             .map(|r| r.deleted)
             .map_err(|e| e.to_string());
     }

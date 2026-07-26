@@ -21,7 +21,7 @@ import {
   seal,
   type Session,
 } from './e2ee.js';
-import type { Item, ProgressEvent, SubmitResult, Website } from './types.js';
+import type { Item, PlaylistRef, ProgressEvent, SubmitResult, Website } from './types.js';
 
 export interface EventsHandle {
   close(): void;
@@ -148,21 +148,43 @@ export class OrcaClient {
     return null;
   }
 
-  // Submit a URL. Normalizes the single- and multi-item response into one item.
-  async submit(url: string, maxHeight?: number): Promise<SubmitResult> {
-    const options = maxHeight === undefined ? undefined : { max_height: maxHeight };
+  // Submit a URL. Keep the complete multi-item response: a social post with four
+  // photos creates four independent queue jobs, and callers must watch all four
+  // terminal events rather than treating its first image as the whole post.
+  // `playlist` tags the item with the list it was picked from (list mode) so the
+  // web app can fold the whole collection into one card.
+  async submit(url: string, maxHeight?: number, playlist?: PlaylistRef): Promise<SubmitResult> {
+    const options: Record<string, unknown> = {};
+    if (maxHeight !== undefined) options.max_height = maxHeight;
+    if (playlist) options.playlist = playlist;
     const body: Record<string, unknown> = { url };
-    if (options) body.options = options;
+    if (Object.keys(options).length) body.options = options;
     const res = await this.request<
       | SubmitResult
       | { items: SubmitResult['item'][]; duplicates: number }
     >('POST', '/api/items', body);
-    if ('items' in res) {
+    if (!('item' in res) && Array.isArray(res.items)) {
       const first = res.items[0];
       if (!first) throw new Error('empty playlist');
-      return { item: first, duplicate: res.duplicates > 0 };
+      return {
+        item: first,
+        duplicate: (res as { duplicates: number }).duplicates > 0,
+        items: res.items,
+      };
     }
-    return res;
+    return res as SubmitResult;
+  }
+
+  // Submit a COLLECTION url (a playlist page). The server probes it once, expands
+  // it into every entry, and returns them all — so a 46-video list costs one
+  // round-trip and one probe instead of 46 of each, and every row exists in the
+  // library by the time this resolves rather than trickling in over minutes.
+  // A single-video url answers in the single-item shape; normalize both to a list.
+  async submitList(url: string): Promise<Item[]> {
+    const res = await this.request<
+      SubmitResult | { items: Item[]; duplicates: number }
+    >('POST', '/api/items', { url });
+    return 'item' in res ? [res.item] : (res.items ?? []);
   }
 
   getItem(slug: string): Promise<SubmitResult['item']> {

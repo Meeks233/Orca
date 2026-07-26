@@ -1,0 +1,8 @@
+{
+  "default": "app-icon.png",
+  "bg_color": "#ffffff",
+  "android_bg": "android-icon-background.png",
+  "android_fg": "android-icon-foreground.png",
+  "android_fg_scale": 68,
+  "android_monochrome": "android-icon-monochrome.png"
+}

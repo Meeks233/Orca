@@ -279,6 +279,22 @@ mod tests {
         );
     }
 
+    // The in-page list button submits a playlist's own page URL so the server
+    // expands the whole collection in one probe. That only works if the `list`
+    // id survives normalization — while a WATCH url keeps collapsing to the
+    // single video, so downloading one entry never drags its playlist in.
+    #[test]
+    fn youtube_playlist_page_keeps_its_list_id() {
+        assert_eq!(
+            normalize("https://www.youtube.com/playlist?list=PLabc123&utm_source=x"),
+            "https://www.youtube.com/playlist?list=PLabc123"
+        );
+        assert_eq!(
+            normalize("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc123"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+    }
+
     #[test]
     fn twitter_and_x_status() {
         assert_eq!(

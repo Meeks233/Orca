@@ -17,6 +17,12 @@ written to be Chrome-portable: no `EventSource` (SSE is parsed from a streaming
 - **In-page download button.** A cloud-download button is mounted on video
   pages/posts. Click → spinner → progress ring → cloud-check (click it to preview
   the finished video in a new tab) or X on failure.
+- **X / Twitter thread saving.** On an X/Twitter post-detail page, a fixed
+  bottom-right **Save thread · N** control appears when the rendered contiguous
+  posts by the thread author contain media. It submits only those image/video
+  posts, in reading order, and records them as one `x-thread:<root-post-id>`
+  group in Orca. It deliberately stops before replies by other authors; scroll or
+  expand the thread first when X has not rendered all continuation posts yet.
 - **Popup.** First launch shows a **welcome** screen (server URL + token, then the
   E2EE handshake). Afterwards: a **Connection** tab (edit server/token, feature
   toggles) and a **Website management** tab (per-site cookies, resolution, share
@@ -96,7 +102,7 @@ chrome-devtools MCP offers — the Firefox equivalent of that flow.
 For browsers where you'd rather run a userscript than install an extension, the
 same code ships as a **single-file userscript** — `dist-userscript/orca.user.js`.
 It is the headless twin of the extension: the in-page **download / status
-button** (top-left of any video) and the **token bridge** come from the *exact
+button** (and X/Twitter's **Save thread** global control) and the **token bridge** come from the *exact
 same sources* as the extension, so you maintain one codebase, not two.
 
 ```sh

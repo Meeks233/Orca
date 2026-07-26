@@ -4,12 +4,52 @@ use super::AppState;
 use crate::db::{ListQuery, SortKey};
 use crate::error::{AppError, AppResult};
 use crate::types::{Item, Status, SubmitRequest, SubmitResponse};
+use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
+
+// A playlist probe is an upstream operation: the same link can occasionally hit
+// a transient extractor/CDN response while a normal video succeeds moments
+// later.  Retrying every failure would double the wait for malformed or
+// login-gated URLs, so keep the retry strictly to errors that are normally
+// short-lived at the network boundary.
+fn retryable_preview_probe(error: &crate::ytdlp::YtdlpError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "timed out",
+        "429",
+        "http error 5",
+        "http error 408",
+        "temporarily unavailable",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "name or service not known",
+        "temporary failure",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+async fn probe_preview(
+    state: &AppState,
+    url: &str,
+    cookie: Option<&std::path::Path>,
+) -> Result<Vec<crate::types::ProbeResult>, crate::ytdlp::YtdlpError> {
+    match crate::ytdlp::probe(&state.cfg, url, cookie).await {
+        Ok(probes) => Ok(probes),
+        Err(first) if retryable_preview_probe(&first) => {
+            tracing::info!(url = %url, error = %first, "retrying transient preview probe");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            crate::ytdlp::probe(&state.cfg, url, cookie).await
+        }
+        Err(error) => Err(error),
+    }
+}
 
 async fn item_by_slug(state: &AppState, slug: &str) -> AppResult<Item> {
     let valid = matches!(slug.len(), 24 | 32) && slug.bytes().all(|b| b.is_ascii_hexdigit());
@@ -125,12 +165,23 @@ pub async fn submit(
     // reported heights, which may sit between ladder rungs — see single_requested).
     // The override is also persisted per item below so run_job's primary honours it.
     let requested_height = req.options.as_ref().and_then(|o| o.max_height);
+    // A client downloading a list submits its videos one URL at a time, so only it
+    // knows they belong together — it names the collection here. Takes precedence
+    // over whatever the probe reports (the client is looking at the actual page).
+    let client_playlist = req
+        .options
+        .as_ref()
+        .and_then(|o| o.playlist.as_ref())
+        .filter(|pl| !pl.key.trim().is_empty());
     let heights = match requested_height {
-        Some(h) => crate::resolution::HeightSet::single_requested(h)
-            .map_err(AppError::BadRequest)?,
+        Some(h) => {
+            crate::resolution::HeightSet::single_requested(h).map_err(AppError::BadRequest)?
+        }
         None => crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await,
     };
-    let no_download = heights.is_empty();
+    // A still image has no video-height ladder, but it is still a downloadable
+    // asset. An empty height list only means "stream-only" for video sources.
+    let no_download = heights.is_empty() && !probes.iter().all(|p| p.media_type == "image");
     // Out of room: still probe and record the item (so it stays searchable and
     // streamable via /api/stream/:slug), but park the fetch as Paused rather than
     // filling the last of the disk. Freeing space and hitting Resume picks it up.
@@ -146,7 +197,25 @@ pub async fn submit(
         let key = p.archive_key();
         let existing = state.db.find_by_archive_key(&key).await?;
 
+        // Which collection this entry belongs to: the client's declaration wins,
+        // else whatever the probe saw. Applied to fresh and existing rows alike so
+        // re-downloading an already-saved video from a list still folds it in.
+        let playlist = client_playlist
+            .map(|pl| crate::types::PlaylistRef {
+                key: pl.key.chars().take(200).collect(),
+                title: pl.title.as_deref().map(|t| t.chars().take(300).collect()),
+                pos: pl.pos,
+            })
+            .or_else(|| p.playlist.clone());
+
         if let Some(item) = existing {
+            let item = match &playlist {
+                Some(pl) => {
+                    state.db.set_playlist(item.id, pl).await?;
+                    state.db.get(item.id).await?.unwrap_or(item)
+                }
+                None => item,
+            };
             if force {
                 // Carry the prepare card's resolution choice onto the reused row so
                 // the re-enqueued primary honours it, same as a fresh submit.
@@ -173,6 +242,7 @@ pub async fn submit(
         let shared_url = url_counts.get(p.webpage_url.as_str()).copied().unwrap_or(0) > 1;
         let mut probe = p.clone();
         probe.playlist_index = if shared_url { p.playlist_index } else { None };
+        probe.playlist = playlist;
         let item = state
             .db
             .insert_probe(&probe, crate::types::Source::Download)
@@ -281,7 +351,7 @@ pub async fn preview(
         state.cfg.cookies.as_deref(),
         site_key.as_deref(),
     );
-    let probes = match crate::ytdlp::probe(&state.cfg, &url, cookie.as_deref()).await {
+    let probes = match probe_preview(&state, &url, cookie.as_deref()).await {
         Ok(p) => p,
         Err(e) => {
             let raw = e.to_string();
@@ -301,7 +371,11 @@ pub async fn preview(
     // link the user has downloaded before instead of silently re-fetching it.
     let mut previews: Vec<serde_json::Value> = Vec::with_capacity(probes.len());
     for (i, p) in probes.iter().enumerate() {
-        let known = state.db.find_by_archive_key(&p.archive_key()).await?.is_some();
+        let known = state
+            .db
+            .find_by_archive_key(&p.archive_key())
+            .await?
+            .is_some();
         // Synchronously pull the thumbnail and inline it as a data URI so the card
         // can show it without an item slug or a CDN round-trip from the client
         // (goal 1). Best-effort: a missing thumbnail leaves the field null. Only the
@@ -318,6 +392,7 @@ pub async fn preview(
         previews.push(json!({
             "title": p.title.clone(),
             "uploader": p.uploader.clone(),
+            "uploader_url": p.uploader_url.clone(),
             "duration": p.duration,
             "webpage_url": p.webpage_url.clone(),
             "extractor": p.extractor.clone(),
@@ -429,6 +504,10 @@ pub struct ListParams {
     /// stream-only ones. Answered in SQL so "show me what's downloaded" costs one
     /// filtered page rather than paging the whole history to sieve it client-side.
     pub local: Option<bool>,
+    /// `playlist=<key>` → only that collection's members. The UI's playlist card
+    /// is one card standing for many rows, so it fetches its own membership in
+    /// one go rather than waiting for the paged history to walk down to it.
+    pub playlist: Option<String>,
     /// Column to order by: `time` (default), `size`, `duration`, `resolution`.
     pub sort: Option<String>,
     /// `reverse=true` flips the default descending order to ascending.
@@ -455,7 +534,12 @@ pub async fn list(
             limit,
             before_id: params.before_id,
             local: params.local,
-            sort: params.sort.as_deref().map(SortKey::parse).unwrap_or_default(),
+            playlist: params.playlist.filter(|p| !p.is_empty()),
+            sort: params
+                .sort
+                .as_deref()
+                .map(SortKey::parse)
+                .unwrap_or_default(),
             reverse: params.reverse.unwrap_or(false),
         })
         .await?;
@@ -819,8 +903,10 @@ pub async fn resolutions(
     }
     let available: Vec<i64> = set.into_iter().rev().collect();
 
-    Ok(Json(json!({ "available": available, "downloaded": downloaded, "variants": variants }))
-        .into_response())
+    Ok(
+        Json(json!({ "available": available, "downloaded": downloaded, "variants": variants }))
+            .into_response(),
+    )
 }
 
 /// Probe the source's available heights now and cache them. `None` on any
@@ -967,7 +1053,7 @@ pub async fn set_resolutions(
 
 #[cfg(test)]
 mod tests {
-    use super::defer_resolution_removals;
+    use super::{defer_resolution_removals, retryable_preview_probe};
     use std::collections::BTreeSet;
 
     #[test]
@@ -979,6 +1065,17 @@ mod tests {
         let have = BTreeSet::from([1920, 720]);
         let desired = BTreeSet::from([720, 568]);
         assert!(!defer_resolution_removals(&have, &desired, &[568]));
+    }
+
+    #[test]
+    fn preview_retry_is_limited_to_transient_upstream_failures() {
+        assert!(retryable_preview_probe(&crate::ytdlp::YtdlpError::Probe(
+            "HTTP Error 429: Too Many Requests".into()
+        )));
+        assert!(retryable_preview_probe(&crate::ytdlp::YtdlpError::Timeout));
+        assert!(!retryable_preview_probe(&crate::ytdlp::YtdlpError::Probe(
+            "Unsupported URL".into()
+        )));
     }
 }
 

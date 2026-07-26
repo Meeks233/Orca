@@ -27,6 +27,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 rust-embed = "8"
 mime_guess = "2"
+# Reads only image headers to obtain dimensions after a download; avoids decoding
+# the full original just to classify it for the UI.
+imagesize = "0.14"
 futures = "0.3"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

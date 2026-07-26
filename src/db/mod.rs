@@ -44,6 +44,11 @@ pub struct ListQuery {
     /// Restrict to items that do (`Some(true)`) or don't (`Some(false)`) hold a
     /// downloaded file. See the `filepath` clause in `queries::list`.
     pub local: Option<bool>,
+    /// Restrict to one collection's members (see `Item::playlist_key`). A
+    /// playlist is ONE card in the UI but many rows here, so the card asks for
+    /// its own membership directly instead of hoping the whole list happens to
+    /// fall inside the page the history is currently showing.
+    pub playlist: Option<String>,
     /// Column the page is ordered by. Defaults to `Time` (newest first).
     pub sort: SortKey,
     /// Flip the sort direction (ascending instead of the default descending).
@@ -137,6 +142,15 @@ impl Db {
 
     pub async fn set_requested_height(&self, id: i64, height: Option<i64>) -> anyhow::Result<()> {
         queries::set_requested_height(self, id, height).await
+    }
+
+    /// Attach an existing item to a collection (see `Item::playlist_key`).
+    pub async fn set_playlist(
+        &self,
+        id: i64,
+        pl: &crate::types::PlaylistRef,
+    ) -> anyhow::Result<()> {
+        queries::set_playlist(self, id, pl).await
     }
 
     /// Repoint the item's primary file at its highest downloaded resolution.
@@ -332,4 +346,5 @@ impl Db {
     pub async fn list_clients(&self) -> anyhow::Result<Vec<Client>> {
         queries::list_clients(self).await
     }
+
 }

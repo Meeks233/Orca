@@ -47,19 +47,14 @@
 }
 .orca-dl-btn.orca-visible,
 .orca-dl-btn[data-state='submitting'],
-.orca-dl-btn[data-state='progress'],
-.orca-dl-btn.orca-pinned {
+.orca-dl-btn[data-state='queued'],
+.orca-dl-btn[data-state='progress'] {
   opacity: 1;
 }
 /* An IN-FLIGHT download (submitting/progress) always forces itself visible. On a
    real player the parked retry states (error/canceled — the "redownload" glyph) are
    NOT force-visible: they reuse the idle button's reveal behavior, fading with the
-   native controls rather than lingering in the corner after the download settles.
-   A PINNED button is different: it has been promoted onto a feed/search thumbnail
-   and is that row's only status light, so it stays visible in every state — a
-   failure that faded out would read as "nothing happened". (Success never stays
-   pinned: it hands off to the static .orca-yt-tick so a freshly saved video looks
-   identical to one saved long ago.) */
+   native controls rather than lingering in the corner after the download settles. */
 
 .orca-dl-btn:hover {
   transform: translateZ(0) scale(1.08);
@@ -106,7 +101,8 @@
   color: #fff;
 }
 
-/* Submitting / queued — a conic-gradient ring spinner. It's a full, radially
+/* Submitting — a conic-gradient ring spinner, shown only while OUR request is
+   actually in flight (a queued item gets the still clock below). It's a full, radially
    symmetric ring (masked hollow), so its geometric centre IS the button centre:
    it rotates perfectly on-axis with no perceived offset, and a gradient (not a
    stroked cap) means nothing to alias/shimmer. */
@@ -140,6 +136,19 @@
   to {
     transform: translateZ(0) rotate(360deg);
   }
+}
+
+/* Queued — accepted by the server, parked behind the downloads ahead of it.
+   Deliberately STILL: nothing is happening to this video, and a spinner that
+   turns for ten minutes is a lie about that (a 46-video list left forty-five
+   spinners whirring at once). A dimmed clock reads as "waiting its turn", and
+   the hover-to-cancel X below still applies, because a queued download is
+   exactly the kind you change your mind about. */
+.orca-dl-btn[data-state='queued'] {
+  background: rgba(22, 22, 30, 0.7);
+}
+.orca-dl-btn[data-state='queued'] .orca-glyph {
+  color: rgba(255, 255, 255, 0.72);
 }
 
 /* Downloading — the progress ring is the whole story; hide the inner cloud glyph
@@ -190,6 +199,7 @@
   color: #fff;
 }
 .orca-dl-btn[data-state='submitting']:hover .orca-dl-cancel,
+.orca-dl-btn[data-state='queued']:hover .orca-dl-cancel,
 .orca-dl-btn[data-state='progress']:hover .orca-dl-cancel {
   display: flex;
 }
@@ -198,14 +208,17 @@
    also blanked the X, so hovering showed an empty red circle. Restore it with a
    higher-specificity rule scoped to the revealed cancel affordance. */
 .orca-dl-btn[data-state='submitting']:hover .orca-dl-cancel .orca-glyph,
+.orca-dl-btn[data-state='queued']:hover .orca-dl-cancel .orca-glyph,
 .orca-dl-btn[data-state='progress']:hover .orca-dl-cancel .orca-glyph {
   opacity: 1;
 }
 .orca-dl-btn[data-state='submitting']:hover .orca-dl-spinner,
+.orca-dl-btn[data-state='queued']:hover .orca-glyph,
 .orca-dl-btn[data-state='progress']:hover .orca-dl-arc {
   opacity: 0.35;
 }
 .orca-dl-btn[data-state='submitting']:hover,
+.orca-dl-btn[data-state='queued']:hover,
 .orca-dl-btn[data-state='progress']:hover {
   background: rgba(46, 20, 20, 0.9);
 }
@@ -234,33 +247,252 @@
   color: var(--orca-accent);
 }
 
-/* YouTube playlist "already downloaded" tick. Unlike the overlay button, this
-   stays put (no hover) so a saved entry reads as done at a glance; un-saved
-   entries get nothing. Pinned to the thumbnail's top-left, clear of YouTube's
-   bottom-right duration badge. */
-.orca-yt-tick {
+/* ---- thumbnail buttons ----------------------------------------------------
+   Every recognised video thumbnail carries its own download control, pinned to
+   the top-left corner (clear of the bottom-right duration badge sites put
+   there). Smaller than the player overlay, because a grid of them is a lot of
+   pixels — and reveal is driven purely by CSS :hover of the thumbnail link
+   rather than the overlay's pointer-tracking, since the anchor already IS the
+   hover target. */
+.orca-thumb-wrap {
   position: absolute;
   top: 4px;
   left: 4px;
   z-index: 100;
+  pointer-events: auto;
+}
+.orca-dl-btn.orca-thumb-btn {
+  width: 26px;
+  height: 26px;
+}
+.orca-dl-btn.orca-thumb-btn .orca-glyph {
+  width: 15px;
+  height: 15px;
+}
+.orca-dl-btn.orca-thumb-btn .orca-dl-spinner {
+  width: 17px;
+  height: 17px;
+}
+.orca-dl-btn.orca-thumb-btn .orca-dl-cancel .orca-glyph {
+  width: 12px;
+  height: 12px;
+}
+/* Idle is offered on hover only — an always-on button over every card in a grid
+   is noise. Every OTHER state is a status report the row must keep showing at
+   rest: a live ring, a failure parked on retry, or the green check that says
+   "this one is already in your library". */
+[data-orca-thumb]:hover .orca-dl-btn.orca-thumb-btn,
+.orca-dl-btn.orca-thumb-btn:not([data-state='idle']) {
+  opacity: 1;
+}
+
+/* ---- whole-list button ----------------------------------------------------
+   The page-level control, in a fixed corner pill so it is reachable wherever the
+   list is scrolled to. Reuses the per-video button verbatim (same shell, same
+   ring, same states) with a label beside it, so "download this one" and
+   "download all of them" read as one control at two scales. */
+/* The fixed bottom-right column that stacks the "Select" toggle over the
+   "Download all" pill so the two share one corner. */
+.orca-fab-stack {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 2147483001;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none;
+}
+/* Hidden while selecting — the floating action bar owns that gesture. */
+body.orca-selecting .orca-fab-stack {
+  display: none;
+}
+.orca-list-fab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 6px;
+  border-radius: 999px;
+  color: #fff;
+  font: 500 13px/1.2 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: rgba(22, 22, 30, 0.92);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+  /* The pill is a backdrop for the button, never a click target of its own. */
+  pointer-events: none;
+}
+.orca-list-fab .orca-dl-btn {
+  pointer-events: auto;
+  opacity: 1;
+}
+/* Mid-run the pill offers the one gesture that stops EVERYTHING — the per-video
+   buttons can only ever cancel their own row. It reuses the same hover-to-cancel
+   X the per-video control uses, so "click the live ring to stop it" means the
+   same thing at both scales; the label spells out that this one is the whole
+   list. */
+.orca-list-fab .orca-dl-btn[data-state='progress']:hover ~ .orca-list-label,
+.orca-list-fab .orca-dl-btn[data-state='queued']:hover ~ .orca-list-label {
+  color: #ff9d97;
+}
+.orca-list-label {
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+/* Armed: the pill has asked "download all of these?" and is waiting for the
+   confirming second click. Accent-filled so the pending question is unmissable,
+   and it lapses on its own if the click never comes. */
+.orca-dl-btn.orca-list-btn.orca-list-armed {
+  background: var(--orca-accent);
+}
+.orca-dl-btn.orca-list-btn.orca-list-armed:hover {
+  background: #8f73ff;
+}
+
+/* ---- multi-select mode -------------------------------------------
+   A "Select" toggle opens a selection over the page's thumbnails: each tile
+   becomes a checkbox, and a floating bar offers the quick-select shortcuts and
+   the commit. Modelled on the mature grid-selection pattern (Google Photos / file
+   managers): whole-tile toggle, a corner tick, shift-click to range-select. */
+.orca-select-toggle {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px 7px 11px;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  color: #fff;
+  font: 600 12.5px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: rgba(22, 22, 30, 0.92);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+  transition: background 0.14s ease, transform 0.14s ease;
+}
+.orca-select-toggle:hover {
+  background: rgba(40, 40, 54, 0.95);
+  transform: translateY(-1px);
+}
+.orca-select-toggle .orca-glyph {
+  width: 16px;
+  height: 16px;
+}
+
+/* While selecting, the per-thumbnail download buttons step aside for the
+   full-tile checkboxes. */
+body.orca-selecting .orca-thumb-wrap {
+  display: none;
+}
+
+/* Full-tile toggle overlay pinned over a thumbnail anchor. Hidden until selecting
+   mode is on (it's only mounted then, but guard anyway). */
+.orca-select-box {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  cursor: pointer;
+  border-radius: inherit;
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  background: rgba(10, 10, 16, 0.12);
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.orca-select-box:hover {
+  background: rgba(124, 92, 255, 0.14);
+}
+.orca-select-box.orca-checked {
+  border-color: var(--orca-accent, #7c5cff);
+  background: rgba(124, 92, 255, 0.24);
+}
+/* The corner tick: an empty rounded box that fills accent with a check once on. */
+.orca-select-tick {
+  position: absolute;
+  top: 6px;
+  left: 6px;
   width: 20px;
   height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
-  color: #fff;
-  background: #2ea043;
+  border-radius: 6px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(10, 10, 16, 0.5);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-  /* Interactive: on a saved thumbnail this tick IS the control (the download
-     button hands off to it), so a click plays the saved copy in Orca. */
-  pointer-events: auto;
+}
+.orca-select-tick .orca-glyph {
+  width: 14px;
+  height: 14px;
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.orca-select-box.orca-checked .orca-select-tick {
+  border-color: var(--orca-accent, #7c5cff);
+  background: var(--orca-accent, #7c5cff);
+}
+.orca-select-box.orca-checked .orca-select-tick .orca-glyph {
+  opacity: 1;
+}
+
+/* Floating action bar, bottom-center — the count, the shortcuts, and the commit. */
+.orca-select-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 2147483002;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 16px;
+  border-radius: 999px;
+  color: #fff;
+  font: 500 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: rgba(20, 20, 28, 0.96);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
+}
+.orca-select-count {
+  margin-right: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.orca-select-btn {
+  border: none;
+  border-radius: 999px;
   cursor: pointer;
+  padding: 7px 12px;
+  color: #fff;
+  font: 500 12.5px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: rgba(255, 255, 255, 0.1);
+  transition: background 0.12s ease;
 }
-.orca-yt-tick:hover {
-  background: #3fb950;
+.orca-select-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
 }
-.orca-yt-tick .orca-glyph {
-  width: 13px;
-  height: 13px;
+.orca-select-done {
+  background: transparent;
+}
+.orca-select-dl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  padding: 7px 15px;
+  color: #fff;
+  font: 600 12.5px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--orca-accent, #7c5cff);
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+.orca-select-dl:hover {
+  background: #8f73ff;
+}
+.orca-select-dl[disabled] {
+  opacity: 0.45;
+  cursor: default;
+  background: rgba(255, 255, 255, 0.12);
+}
+.orca-select-dl .orca-glyph {
+  width: 16px;
+  height: 16px;
 }

@@ -2,7 +2,7 @@
 // ../web/app.js by build.ts. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
-import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, fetchMediaBytes, pushSessionToWorker } from './e2ee';
+import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, fetchMediaBytes, pushSessionToWorker, refreshSessionForWorker } from './e2ee';
 import { getCachedThumb, putCachedThumb } from './thumbcache';
 
 type Params = Record<string, string | number>;
@@ -19,6 +19,8 @@ interface Item {
   // file precisely enough for the Android app to recognise its own copy in
   // Downloads/Orca without having saved it through this build (see scanLocal).
   filename?: string | null;
+  /** `image` for a saved still image; omitted/other values are video. */
+  media_type?: 'image' | 'video';
   total_filesize?: number | null;  // sum across all downloaded resolution variants
   height?: number | null;
   // Height the download is aiming for, set by the backend when the job starts.
@@ -31,6 +33,7 @@ interface Item {
   site_name?: string;
   video_id?: string;
   uploader?: string;
+  uploader_url?: string | null;
   error?: string;
   webpage_url?: string;
   local_available?: boolean;
@@ -39,6 +42,9 @@ interface Item {
   public_until?: number | null;
   public_hits?: number;
   playlist_index?: number | null;
+  playlist_key?: string | null;
+  playlist_title?: string | null;
+  playlist_pos?: number | null;
   [k: string]: unknown;
 }
 
@@ -388,7 +394,10 @@ const els = {
   ptr: byId('ptr'),
   player: byId('player'),
   playerVideo: byId<HTMLVideoElement>('player-video'),
+  playerImage: byId<HTMLImageElement>('player-image'),
   playerClose: byId<HTMLButtonElement>('player-close'),
+  playerPrev: byId<HTMLButtonElement>('player-prev'),
+  playerNext: byId<HTMLButtonElement>('player-next'),
   shareOverlay: byId('share'),
   shareTitle: byId('share-title'),
   shareClose: byId<HTMLButtonElement>('share-close'),
@@ -441,11 +450,35 @@ const state = {
   expandedGroups: new Set<string>(),
 };
 
-// The playlist a multi-video item belongs to (its shared webpage_url), or null
-// for a standalone item. The backend sets playlist_index only when siblings
-// share a URL, so that flag is exactly our "this belongs to a fold" signal.
+// The fold an item belongs to, or null for a standalone one. TWO things fold:
+//
+//   • a real LIST — a YouTube playlist, or whatever collection the in-page
+//     button downloaded video-by-video — identified by the backend's
+//     playlist_key. Its entries are separate videos with separate URLs, so the
+//     collection id is the only thing tying them together.
+//   • a MULTI-VIDEO POST (a tweet with two clips), whose entries all share one
+//     webpage_url. The backend sets playlist_index only in that case, so that
+//     flag is exactly the signal.
+//
+// Namespaced so a list id can never collide with a post URL.
 function groupKeyOf(item: Item): string | null {
-  return item.playlist_index != null && item.webpage_url ? item.webpage_url : null;
+  if (item.playlist_key) return 'list:' + item.playlist_key;
+  return item.playlist_index != null && item.webpage_url ? 'post:' + item.webpage_url : null;
+}
+
+// Display order within a fold: a list uses its own position, a multi-video post
+// its download-disambiguation index. Neither is guaranteed, so unknowns sink to 0.
+function groupPosOf(item: Item): number {
+  return item.playlist_pos ?? item.playlist_index ?? 0;
+}
+
+// A multi-attachment social post is one post, not a playlist of independently
+// titled media. X's “Save thread” deliberately supplies `x-thread:` as its
+// playlist key, which takes priority in groupKeyOf; include it here so that path
+// receives the same compact attachment gallery as a directly saved X post.
+function isCompactSocialMedia(item: Item): boolean {
+  const group = groupKeyOf(item);
+  return group?.startsWith('post:') === true || item.playlist_key?.startsWith('x-thread:') === true;
 }
 
 // ---- Toast ----------------------------------------------------------------
@@ -665,6 +698,15 @@ function esc(s: unknown): string {
   return d.innerHTML;
 }
 
+// An http(s) address, or '' — so a metadata field only ever becomes a link when
+// it is a real web page. The backend already filters uploader URLs to http(s);
+// this is the belt-and-braces guard on the render side against a javascript:/
+// data: href slipping into an anchor.
+function httpHref(url: unknown): string {
+  const s = typeof url === 'string' ? url.trim() : '';
+  return /^https?:\/\//i.test(s) ? s : '';
+}
+
 function fmtDuration(sec: number | null | undefined): string {
   if (sec == null) return '';
   sec = Math.floor(sec);
@@ -688,18 +730,25 @@ function fmtSize(bytes: number | null | undefined): string {
   return `${n.toFixed(digits)} ${units[u]}`;
 }
 
-// A video pixel height → the resolution label people recognise (4K, 1080p…).
-// Buckets the common broadcast tiers; anything else falls back to "<h>p".
+// A video-equivalent short edge → the resolution label people recognise. Images
+// are normalised to this same edge after local header inspection, so portrait and
+// landscape media share one complete set of familiar tiers.
 function resLabel(height: number | null | undefined): string {
   if (!height || height <= 0) return '';
   if (height >= 4320) return '8K';
   if (height >= 2160) return '4K';
   if (height >= 1440) return '2K';
   if (height >= 1080) return '1080p';
+  if (height >= 900) return '900p';
   if (height >= 720) return '720p';
+  if (height >= 576) return '576p';
+  if (height >= 540) return '540p';
   if (height >= 480) return '480p';
   if (height >= 360) return '360p';
+  if (height >= 270) return '270p';
   if (height >= 240) return '240p';
+  if (height >= 180) return '180p';
+  if (height >= 144) return '144p';
   return height + 'p';
 }
 
@@ -756,12 +805,28 @@ function fileUrl(item: Item | number, download?: boolean): string {
   const slug = resolved?.slug;
   if (slug && swControls()) {
     if (download) {
-      const name = resolved?.title ? '?name=' + encodeURIComponent(resolved.title) : '';
-      return mediaUrl('dl', slug) + name;
+      // The service worker cannot see the server's Content-Disposition header on
+      // the encrypted media hop. Pass the actual stored basename (the exact
+      // yt-dlp output name, including its extension) as the final path segment.
+      // Chromium ignores a filename carried only by Content-Disposition on a
+      // synthetic worker response, but reliably derives it from this segment.
+      const name = downloadName(resolved);
+      return mediaUrl('dl', slug, name);
     }
     return mediaUrl('file', slug);
   }
   return withQuery(itemPath(item, '/file'), mediaTokenParam(), download ? 'download=1' : '');
+}
+
+function downloadName(item: Item | undefined): string {
+  if (!item) return '';
+  if (item.filename) return item.filename;
+  const uploader = item.uploader?.trim() || 'Unknown';
+  const title = item.title?.trim() || 'Untitled';
+  // The precise extension comes from `filename` on current servers. This
+  // conservative image fallback is only for a mixed-version client/server
+  // deployment; the worker corrects its MIME type from the actual bytes.
+  return `${uploader} - ${title}${item.media_type === 'image' ? '.jpg' : ''}`;
 }
 
 // Thumbnail through the backend proxy/cache instead of the source CDN. The server
@@ -923,12 +988,9 @@ const DOWNLOAD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height=
 // the high-res one (see the save-click intercept and localUpgradeAvailable).
 const UPGRADE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a10 10 0 0 1 7.38 16.75"/><path d="m16 12-4-4-4 4"/><path d="M12 16V8"/><path d="M2.5 8.875a10 10 0 0 0-.5 3"/><path d="M2.83 16a10 10 0 0 0 2.43 3.4"/><path d="M4.636 5.235a10 10 0 0 1 .891-.857"/><path d="M8.644 21.42a10 10 0 0 0 7.631-.38"/></svg>`;
 
-// Share glyph (Lucide "share-2"): matches the Save icon's borderless, inline
-// currentColor style. A single icon replaces the old Public/Private + Copy pair;
-// tapping it opens the share dialog (see openShare). When the item is live
-// (public), the icon turns the same green as the Completed badge (.act-on) as an
-// at-a-glance "this is shared" cue.
-const SHARE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>`;
+// Share glyph (Lucide "link"). A live public link turns it green so its state
+// remains visible at a glance.
+const SHARE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-link-icon lucide-link"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
 // Trash glyph (Lucide "trash-2"): borderless inline icon matching Save/Share,
 // tinted red on hover. Every card carries one (leftmost action) so any item can
@@ -1044,6 +1106,14 @@ function dlChipHtml(item: Item): string {
   const label = item.target_height && item.target_height > 0
     ? `<span class="dl-res">${esc(resLabel(item.target_height))}</span>`
     : '';
+  // Queued is a WAIT, not work in progress: the server has accepted the item and
+  // parked it behind the ones ahead. It gets a still clock and its own label, so
+  // a long queue reads as a queue instead of as fifty things all loading at once.
+  // Only a genuinely running transfer spins.
+  const live = state.progress.get(item.id)?.status || item.status;
+  if (live === 'queued' || live === 'paused') {
+    return `<span class="chip chip-queued" title="${esc(t('item.queued'))}">${CLOCK_SVG}<span class="dl-res">${esc(t('item.queued'))}</span></span>`;
+  }
   return `<span class="chip chip-dl" title="${esc(t('item.downloading'))}"><span class="chip-spin" aria-hidden="true">${SPINNER_SVG}</span>${label}</span>`;
 }
 
@@ -1109,7 +1179,7 @@ function actionsHtml(item: Item): string {
     const local = !!item.local_available;
     const pub = !!item.public;
     mediaActions = local
-      ? `<a class="act act-save" href="${fileUrl(item, true)}" download data-id="${item.id}" aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
+      ? `<a class="act act-save" href="${fileUrl(item, true)}" data-id="${item.id}" aria-label="${esc(saveActionLabel(item))}" title="${esc(saveActionLabel(item))}">${DOWNLOAD_SVG}</a>
       <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
       : `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.download'))}" title="${esc(t('item.download'))}">${RETRY_SVG}</button>`;
   }
@@ -1129,14 +1199,34 @@ const PLAY_BADGE = `<span class="play-badge" aria-hidden="true">${PLAY_ICON}</sp
 // a single animation to keep consistent rather than a second one that drifts.
 const SPINNER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
 const MEDIA_LOADER = `<span class="media-loader" aria-hidden="true">${SPINNER_SVG}</span>`;
+// Clock (Lucide "clock") — the STILL counterpart to the spinner, for an item that
+// is waiting its turn rather than being worked on. Deliberately not animated:
+// that difference is the whole point (see dlChipHtml / isMediaPending).
+const CLOCK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="10"/></svg>`;
 
 function isMediaPending(item: Item, status = item.status): boolean {
   // Resolution jobs emit running events for an already-completed item. Its old
   // file remains valid, so only the first download receives the pending mask.
-  return item.status !== 'completed' && (status === 'queued' || status === 'running');
+  //
+  // RUNNING only. A queued item is not being worked on — it is parked behind the
+  // downloads ahead of it, possibly for a long time — so blurring its thumbnail
+  // under a turning spinner claimed activity that wasn't there. Submitting a
+  // 46-video playlist lit up forty-five of them at once, which is what made the
+  // list read as chaos rather than as a queue. Queued rows keep their thumbnail
+  // and say so in the status capsule instead (see dlChipHtml).
+  return item.status !== 'completed' && status === 'running';
 }
 
-// A completed item with a file is playable in-app (local file or cloud fallback).
+// Is there still a transfer here to stop? Reads the latest SSE status over the
+// possibly-stale item, so a row that has just started (or just finished) counts
+// correctly the moment it changes rather than at the next list reconcile.
+function isCancelable(item: Item): boolean {
+  const live = state.progress.get(item.id)?.status || item.status;
+  return live === 'queued' || live === 'running' || live === 'paused';
+}
+
+// Completed media opens in-app. Videos use <video>; stills use the browser's
+// native <img> renderer rather than navigating to the upstream post.
 function isPlayable(item: Item): boolean {
   // Any completed item is playable: with a local file it plays that; without one
   // (stream-only "None" mode, or a copy backed away) it streams from source via
@@ -1148,6 +1238,14 @@ function isPlayable(item: Item): boolean {
   // withholding the play button would make "recorded and still playable" a lie.
   // Queued/running/failed stay unplayable: a file is coming, or nothing is.
   return item.status === 'completed' || item.status === 'paused';
+}
+
+function isImage(item: Item): boolean {
+  return item.media_type === 'image';
+}
+
+function saveActionLabel(item: Item): string {
+  return t(isImage(item) ? 'aria.saveImage' : 'aria.downloadVideo');
 }
 
 // Friendly platform name from yt-dlp's extractor id (e.g. "youtube:tab" → YouTube).
@@ -1163,19 +1261,111 @@ function sourceLabel(extractor: string | undefined): string {
   return NAMES[base] || (base.charAt(0).toUpperCase() + base.slice(1));
 }
 
-// Per-site logo asset (web/icons/sites/*.svg) for the extractor id. Falls back
-// to a neutral globe. Maps yt-dlp extractor bases/aliases → bundled slug.
+// Per-site logo asset (web/icons/sites/*.svg). Everything here is BUNDLED — the
+// app never fetches a logo from the source site at runtime, so a card paints its
+// mark offline, on the first frame, and without telling anyone what you watch.
+//
+// Two ways in, because neither alone covers the real world: yt-dlp's extractor id
+// (`youtube:tab` → youtube) names the platform when it has a dedicated extractor,
+// and the source host covers everything that arrives through the generic/html5
+// extractor (an e621 post is `html5`, not `e621`). Extractor wins when both hit.
 const SITE_ICONS: Record<string, string> = {
   youtube: 'youtube', twitter: 'x', x: 'x', bilibili: 'bilibili', tiktok: 'tiktok',
   instagram: 'instagram', soundcloud: 'soundcloud', vimeo: 'vimeo', twitch: 'twitch',
   facebook: 'facebook', reddit: 'reddit', weibo: 'weibo', niconico: 'niconico',
-  nicovideo: 'niconico', dailymotion: 'dailymotion',
+  nicovideo: 'niconico', dailymotion: 'dailymotion', rumble: 'rumble', kick: 'kick',
+  vk: 'vk', vkvideo: 'vk', odysee: 'odysee', lbry: 'odysee', pinterest: 'pinterest',
+  tumblr: 'tumblr', bluesky: 'bluesky', bsky: 'bluesky', threads: 'threads',
+  xiaohongshu: 'xiaohongshu', kuaishou: 'kuaishou', douban: 'douban', wechat: 'wechat',
+  netease: 'netease', neteasemusic: 'netease', patreon: 'patreon', pixiv: 'pixiv',
+  deviantart: 'deviantart', newgrounds: 'newgrounds', mastodon: 'mastodon',
+  telegram: 'telegram', snapchat: 'snapchat', spotify: 'spotify',
+  applepodcasts: 'applepodcasts', applemusic: 'applemusic', bandcamp: 'bandcamp',
+  mixcloud: 'mixcloud', audiomack: 'audiomack', deezer: 'deezer', tidal: 'tidal',
+  archive: 'archive', archiveorg: 'archive', ted: 'ted', coursera: 'coursera',
+  udemy: 'udemy', khanacademy: 'khanacademy', crunchyroll: 'crunchyroll',
+  netflix: 'netflix', peertube: 'peertube', odnoklassniki: 'ok', ok: 'ok',
+  imgur: 'imgur', ninegag: 'ninegag', loom: 'loom', wistia: 'wistia',
+  dropbox: 'dropbox', googledrive: 'googledrive', mega: 'mega', e621: 'e621',
+  xvideos: 'xvideos',
 };
-function sourceLogoHtml(extractor: string | undefined): string {
-  const base = (String(extractor || '').split(/[:_]/)[0] ?? '').toLowerCase();
-  const slug = SITE_ICONS[base] || 'generic';
-  const name = sourceLabel(extractor) || 'Source';
-  return `<img class="src-logo" src="/icons/sites/${slug}.svg" alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
+
+// Host suffix → bundled slug, for sources whose extractor says nothing about the
+// site. Matched on the registrable suffix, so `static1.e621.net` and `e621.net`
+// both resolve.
+const HOST_ICONS: Record<string, string> = {
+  'youtube.com': 'youtube', 'youtu.be': 'youtube', 'twitter.com': 'x', 'x.com': 'x',
+  'instagram.com': 'instagram', 'facebook.com': 'facebook', 'fb.watch': 'facebook',
+  'tiktok.com': 'tiktok', 'douyin.com': 'tiktok', 'bilibili.com': 'bilibili',
+  'b23.tv': 'bilibili', 'reddit.com': 'reddit', 'redd.it': 'reddit',
+  'twitch.tv': 'twitch', 'vimeo.com': 'vimeo', 'soundcloud.com': 'soundcloud',
+  'weibo.com': 'weibo', 'weibo.cn': 'weibo', 'nicovideo.jp': 'niconico',
+  'dailymotion.com': 'dailymotion', 'dai.ly': 'dailymotion', 'rumble.com': 'rumble',
+  'kick.com': 'kick', 'vk.com': 'vk', 'vkvideo.ru': 'vk', 'odysee.com': 'odysee',
+  'pinterest.com': 'pinterest', 'pin.it': 'pinterest', 'tumblr.com': 'tumblr',
+  'bsky.app': 'bluesky', 'threads.net': 'threads', 'threads.com': 'threads',
+  'xiaohongshu.com': 'xiaohongshu', 'xhslink.com': 'xiaohongshu',
+  'kuaishou.com': 'kuaishou', 'douban.com': 'douban', 'weixin.qq.com': 'wechat',
+  'music.163.com': 'netease', '163.com': 'netease', 'patreon.com': 'patreon',
+  'pixiv.net': 'pixiv', 'deviantart.com': 'deviantart', 'newgrounds.com': 'newgrounds',
+  'mastodon.social': 'mastodon', 't.me': 'telegram', 'telegram.org': 'telegram',
+  'snapchat.com': 'snapchat', 'spotify.com': 'spotify', 'bandcamp.com': 'bandcamp',
+  'mixcloud.com': 'mixcloud', 'audiomack.com': 'audiomack', 'deezer.com': 'deezer',
+  'tidal.com': 'tidal', 'archive.org': 'archive', 'ted.com': 'ted',
+  'coursera.org': 'coursera', 'udemy.com': 'udemy', 'khanacademy.org': 'khanacademy',
+  'crunchyroll.com': 'crunchyroll', 'netflix.com': 'netflix', 'ok.ru': 'ok',
+  'imgur.com': 'imgur', '9gag.com': 'ninegag', 'loom.com': 'loom',
+  'wistia.com': 'wistia', 'dropbox.com': 'dropbox', 'drive.google.com': 'googledrive',
+  'mega.nz': 'mega', 'podcasts.apple.com': 'applepodcasts', 'music.apple.com': 'applemusic',
+  'e621.net': 'e621', 'e926.net': 'e621', 'e6ai.net': 'e621', 'xvideos.com': 'xvideos',
+};
+
+// The bundled slug for a host, or '' when we ship no mark for it. Walks the host
+// up its parents so a subdomain (m.youtube.com, static1.e621.net) matches the
+// registrable entry without listing every subdomain there is.
+function hostIconSlug(host: string): string {
+  const parts = host.toLowerCase().replace(/^www\./, '').split('.');
+  for (let i = 0; i < parts.length - 1; i++) {
+    const slug = HOST_ICONS[parts.slice(i).join('.')];
+    if (slug) return slug;
+  }
+  return '';
+}
+
+// The bundled slug for an item, or 'generic' when we ship no mark for its source.
+function siteIconSlug(item: Item): string {
+  const base = (String(item.extractor || '').split(/[:_]/)[0] ?? '').toLowerCase();
+  if (SITE_ICONS[base]) return SITE_ICONS[base]!;
+  try {
+    return hostIconSlug(new URL(item.webpage_url || '').hostname) || 'generic';
+  } catch { return 'generic'; }
+}
+
+// Logo for a registry entry, matched on its key first (that IS the platform name
+// for a catalog site) and then on any host it claims.
+function websiteIconSlug(w: Website): string {
+  const key = String(w.key || '').toLowerCase();
+  if (SITE_ICONS[key]) return SITE_ICONS[key]!;
+  for (const host of w.hosts || []) {
+    const slug = hostIconSlug(host);
+    if (slug) return slug;
+  }
+  return 'generic';
+}
+
+// How each bundled mark has to be treated so it stays visible on the current
+// theme, computed from the icon's own colour at build time (see build.ts). Only
+// the marks that need help carry a tone; everything else renders bare.
+declare const __SITE_ICON_TONES__: Record<string, string>;
+
+function siteLogoImg(slug: string, name: string, extra = ''): string {
+  const tone = __SITE_ICON_TONES__[slug];
+  const toned = tone ? ` data-tone="${tone}"` : '';
+  return `<img class="src-logo${extra}" src="/icons/sites/${slug}.svg"${toned} alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
+}
+
+function sourceLogoHtml(item: Item): string {
+  return siteLogoImg(siteIconSlug(item), sourceLabel(item.extractor) || 'Source');
 }
 
 // Thumbnail block. Playable items become a play button (tap → fullscreen player);
@@ -1185,23 +1375,41 @@ function sourceLogoHtml(extractor: string | undefined): string {
 function thumbHtml(item: Item, thumb: string, dur: string): string {
   const pending = isMediaPending(item) ? ' media-pending' : '';
   const overlays = `${thumb}${dur}${MEDIA_LOADER}`;
+  if (isImage(item) && isPlayable(item)) {
+    const cloudOnly = !item.local_available ? '1' : '';
+    return `<div class="thumb-wrap thumb-image${pending}" role="button" tabindex="0" aria-label="View image"
+      data-image="1" data-id="${item.id}" data-cloud="${cloudOnly}">${overlays}</div>`;
+  }
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
     return `<div class="thumb-wrap thumb-play${pending}" role="button" tabindex="0" aria-label="Play"
       data-play="1" data-id="${item.id}" data-cloud="${cloudOnly}">${overlays}${PLAY_BADGE}</div>`;
   }
+  // A queued/failed image has nothing local to view yet, but it must not silently
+  // fall back to an <a> that opens the original social post.
+  if (isImage(item)) return `<div class="thumb-wrap${pending}" aria-disabled="true">${overlays}</div>`;
   return `<a class="thumb-wrap${pending}" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${overlays}</a>`;
 }
 
 function rowHtml(item: Item): string {
   const thumb = thumbMarkup(item);
+  const compactPostMedia = isCompactSocialMedia(item);
   // Clips under a minute are tagged so CSS can drop the pill on portrait thumbs,
   // where it would crowd the play button and where "0:20" on a Reel is just
   // noise. Landscape keeps every duration (see .dur in style.css).
   const durShort = item.duration && item.duration < 60 ? ' dur-short' : '';
   const dur = item.duration ? `<span class="dur${durShort}">${esc(fmtDuration(item.duration))}</span>` : '';
-  const logo = sourceLogoHtml(item.extractor);
-  const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
+  const logo = sourceLogoHtml(item);
+  // When the source told us the uploader's own page, the name links back to it
+  // (new tab) so a card is a jump-off point to who posted it. Otherwise it stays
+  // plain text. Either way it keeps the `.uploader` class the privacy blur and
+  // its reveal-on-tap gesture key off of.
+  const upHref = httpHref(item.uploader_url);
+  const uploader = item.uploader
+    ? upHref
+      ? `<a class="uploader uploader-link" href="${esc(upHref)}" target="_blank" rel="noopener" title="${esc(item.uploader)}">${esc(item.uploader)}</a>`
+      : `<div class="uploader">${esc(item.uploader)}</div>`
+    : '';
   const active = item.status === 'queued' || item.status === 'running';
   const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
   // A failure is reported by the badge and the retry button, NOT by its text: a
@@ -1211,6 +1419,12 @@ function rowHtml(item: Item): string {
   // Multi-select needs no in-card checkbox: the card itself highlights when
   // selected (see .item.selected in style.css), so nothing is injected here that
   // would compete with the thumbnail for horizontal space.
+  if (compactPostMedia) {
+    // The parent card owns the post caption, creator and source. Children are
+    // attachments only: keeping no title markup here makes the gallery compact
+    // even if a future stylesheet changes or a source title is unusually long.
+    return `${thumbHtml(item, thumb, dur)}<div class="body compact-media-body">${actionsHtml(item)}</div>`;
+  }
   return `
     ${thumbHtml(item, thumb, dur)}
     <div class="body">
@@ -1263,7 +1477,7 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
     if (gkey) {
       // Nest inside the playlist fold, ordered by playlist position so the
       // sublist reads #1, #2, … regardless of the list's newest-first arrival.
-      insertByIndex(ensureGroup(gkey, prepend).body, li, item.playlist_index ?? 0);
+      insertByIndex(ensureGroup(gkey, prepend).body, li, groupPosOf(item));
     } else if (prepend) {
       els.history.prepend(li);
     } else {
@@ -1325,14 +1539,45 @@ function ensureGroup(gkey: string, prepend?: boolean): { li: HTMLLIElement; body
   state.groups.set(gkey, g);
   if (prepend) els.history.prepend(li);
   else els.history.appendChild(li);
+  void loadGroupMembers(gkey);
   return g;
+}
+
+// A playlist is ONE card standing for many rows — but the history is paged ten
+// at a time and reconciled on a poll, so the card only ever saw whichever slice
+// of its members happened to be on the current page. Submitting a 46-video list
+// therefore showed a card that said "3 videos", then 7, then 10, creeping upward
+// for minutes: the count was really a report on pagination, not on the playlist.
+//
+// So the card fetches its OWN membership, once, the moment it appears. One
+// request bounded by the same 500-entry cap a playlist submit is, and from then
+// on the count is the truth and stays put.
+const groupsFetched = new Set<string>();
+async function loadGroupMembers(gkey: string): Promise<void> {
+  // Only a real collection has a key to ask by; a multi-video post's children all
+  // arrive together with the post itself and need no second request.
+  if (!gkey.startsWith('list:') || groupsFetched.has(gkey)) return;
+  groupsFetched.add(gkey); // claimed synchronously — re-entrant calls bail here
+  const key = gkey.slice('list:'.length);
+  try {
+    const res = await apiFetch('/api/items?limit=200&playlist=' + encodeURIComponent(key));
+    if (!res.ok) {
+      groupsFetched.delete(gkey);
+      return;
+    }
+    const data = await res.json();
+    for (const it of (data.items || []) as Item[]) upsertRow(it, false);
+    updateGroupHeader(gkey);
+  } catch {
+    groupsFetched.delete(gkey); // transient — let a later render try again
+  }
 }
 
 // Insert `li` into a fold body keeping children sorted by playlist index.
 function insertByIndex(body: HTMLUListElement, li: HTMLLIElement, idx: number): void {
   for (const child of Array.from(body.children)) {
     const other = state.items.get(Number((child as HTMLElement).dataset.id));
-    if (other && (other.playlist_index ?? 0) > idx) { body.insertBefore(li, child); return; }
+    if (other && groupPosOf(other) > idx) { body.insertBefore(li, child); return; }
   }
   body.appendChild(li);
 }
@@ -1360,7 +1605,9 @@ function updateGroupHeader(gkey: string): void {
   if (!items.length) return;
   const first = items[0]!;
   const thumb = thumbMarkup(first);
-  const base = (first.title || '').replace(/\s*#\d+\s*$/, '');
+  // A real list carries its own name; a multi-video post has none, so its card
+  // borrows the first clip's title with the "#1" suffix stripped off.
+  const base = first.playlist_title || (first.title || '').replace(/\s*#\d+\s*$/, '');
   // Raw (not HTML-escaped): it's applied via textContent in updateGroupProgress,
   // which does its own escaping — pre-escaping here would double-encode it.
   const uploader = first.uploader ? first.uploader + ' · ' : '';
@@ -1370,7 +1617,7 @@ function updateGroupHeader(gkey: string): void {
   const play = items.some(isPlayable)
     ? `<button class="play-badge group-play" data-act="play-list" aria-label="${esc(t('group.playAll'))}" title="${esc(t('group.playAll'))}">${PLAY_ICON}</button>`
     : '';
-  const dlShare = items.some((it) => isPlayable(it) && it.local_available)
+  const dlShare = items.some((it) => it.status === 'completed' && it.local_available)
     ? `<button class="act" data-act="dl-list" aria-label="${esc(t('group.downloadAll'))}" title="${esc(t('group.downloadAll'))}">${DOWNLOAD_SVG}</button>
         <button class="act" data-act="share-list" aria-label="${esc(t('group.shareAll'))}" title="${esc(t('group.shareAll'))}">${SHARE_SVG}</button>`
     : '';
@@ -1378,29 +1625,55 @@ function updateGroupHeader(gkey: string): void {
   // the per-video size chip). Dropped when no child has a known size yet.
   const totalBytes = items.reduce((sum, it) => sum + (it.total_filesize || it.filesize || 0), 0);
   const sizeChip = metaChip('', fmtSize(totalBytes));
+  // Stop the WHOLE list. Submitting a playlist queues dozens of downloads behind
+  // one button press, and until now the only way back was to cancel each row by
+  // hand (or delete the records outright, which throws away what already
+  // finished). Offered whenever anything in the fold is still queued or running,
+  // and it only touches those — completed children are left alone.
+  const liveIds = items.filter(isCancelable).map((it) => it.id);
+  const cancelAll = liveIds.length
+    ? `<button class="act act-cancel" data-act="cancel-list" aria-label="${esc(t('group.cancelAll'))}" title="${esc(t('group.cancelAll'))}">${CANCEL_SVG}</button>`
+    : '';
   const listActions = `<div class="actions group-actions">
         ${sizeChip}
         <button class="act act-del" data-act="del-list" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>
+        ${cancelAll}
         ${dlShare}
       </div>`;
+  // The stacked-card edge behind the cover thumbnail is the next two videos'
+  // OWN thumbnails, not a pair of blank offset rectangles. Each is forced into
+  // the cover's box (object-fit: cover crops it, so a portrait Short behind a
+  // landscape cover doesn't letterbox) and blurred, so it reads as "there is
+  // more in here" at a glance without competing with the cover for attention.
+  // Fewer than three videos simply means fewer layers.
+  const stack = items
+    .slice(1, 3)
+    .map((it, i) => `<span class="group-stack group-stack-${i + 1}">${thumbMarkup(it)}</span>`)
+    .reverse() // deepest layer first, so the nearer card paints over it
+    .join('');
   const head = g.li.querySelector('.group-head') as HTMLElement;
+  g.li.classList.toggle('post-media-group', isCompactSocialMedia(first));
   head.innerHTML = `
     <div class="thumb-wrap group-thumb${isMediaPending(first) ? ' media-pending' : ''}">
-      ${thumb}
+      <span class="group-visuals">${stack}${thumb}</span>
       <span class="group-count">${items.length}</span>
       ${play}
       ${MEDIA_LOADER}
     </div>
     <div class="group-info">
-      <div class="title">${sourceLogoHtml(first.extractor)}<span>${esc(base)}</span></div>
+      <div class="title">${sourceLogoHtml(first)}<span>${esc(base)}</span></div>
       <div class="group-sub"><span class="group-status"></span><span class="group-speed"></span></div>
       <div class="progress group-progress hidden"><div class="progress-fill" style="width:0%"></div></div>
+      ${listActions}
     </div>
     <div class="group-side">
       <svg class="group-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-      ${listActions}
     </div>`;
   hydrateThumbs(head);
+  // A fold is the first-level representation of its children. Apply the same
+  // per-site privacy decision here as on child cards; otherwise a blur-on X post
+  // leaked its cover image/title before the user expanded it.
+  head.classList.toggle('blurred', isItemBlurred(first));
   // The uploader prefix is a static lead-in; the status/speed/progress are filled
   // (and kept live) by updateGroupProgress so a progress tick needn't rebuild the
   // whole header.
@@ -1500,9 +1773,7 @@ function toggleGroupExpand(gkey: string): void {
 function playGroup(gkey: string): void {
   const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter((it) => it && isPlayable(it as Item)) as Item[];
   if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
-  playQueue = items.map((it) => ({ id: it.id, cloud: !it.local_available, poster: thumbUrl(it) }));
-  playIndex = 0;
-  playCurrentInQueue();
+  startPlayQueue(items);
 }
 
 // Rows whose target_height has already been asked for after a job start, so the
@@ -1602,6 +1873,11 @@ function patchRow(ev: ProgressEv): void {
   const fill = li.querySelector('.progress-fill') as HTMLElement | null;
   const terminal = !!TERMINAL[ev.status];
   if (terminal) {
+    // The DB refresh below is intentionally asynchronous. Reflect its terminal
+    // authority in the in-memory item immediately so a group header cannot keep
+    // rendering “downloading” during that round-trip (especially visible when a
+    // four-image X post completes in a burst).
+    if (persisted) state.items.set(ev.id, { ...persisted, status: ev.status });
     if (bar) bar.classList.add('hidden');
     paintLiveFields(li, '', '', '');
     chipRefetched.delete(ev.id); // a retry starts a new job, which may pick a new height
@@ -1924,6 +2200,9 @@ async function loadItems(reset?: boolean): Promise<void> {
       state.rows.clear();
       state.items.clear();
       state.groups.clear();
+      // The cards are gone, so their one-shot membership fetch has to be armed
+      // again — otherwise a rebuilt fold would show only the paged slice.
+      groupsFetched.clear();
       state.progress.clear();
       els.history.innerHTML = '';
     }
@@ -2341,6 +2620,11 @@ function applyBlurToRows(): void {
     const it = state.items.get(id);
     if (it) li.classList.toggle('blurred', isItemBlurred(it));
   });
+  state.groups.forEach((_group, key) => {
+    const first = itemsFromIds(groupChildIds(key))[0];
+    const head = state.groups.get(key)?.li.querySelector('.group-head');
+    if (first && head) head.classList.toggle('blurred', isItemBlurred(first));
+  });
 }
 // Client-side filter query (name / domains / key) and batch-select state, mirroring
 // the home list's search + multi-select so the two screens feel like one system.
@@ -2620,6 +2904,7 @@ function websiteCardHtml(w: Website): string {
       <button class="site-toggle ${w.enabled ? 'on' : 'off'}" data-act="enable" role="switch" aria-checked="${w.enabled}" title="${esc(w.enabled ? t('sites.disable') : t('sites.enable'))}"><span class="knob"></span></button>
       <div class="site-info">
         <div class="site-titlerow">
+          ${siteLogoImg(websiteIconSlug(w), w.name, ' site-logo')}
           <span class="site-name">${esc(w.name)}</span>
         </div>
         <div class="site-domains-list">${esc(w.hosts.join(', ') || '—')}</div>
@@ -4917,20 +5202,34 @@ async function probePrepEntries(urls: string[]): Promise<PrepEntry[]> {
   for (const url of urls) {
     let meta: ClipPreview | null = null;
     let extra = 0;
-    try {
-      const res = await apiFetch('/api/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, options: {} }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const entries: ClipPreview[] = Array.isArray(data.previews) ? data.previews : [];
-        meta = entries[0] ?? null;
-        extra = Math.max(0, entries.length - 1);
+    for (let attempt = 0; attempt < 2 && !meta; attempt++) {
+      // A playlist extractor can occasionally stall before returning its first
+      // JSON line.  Do not leave the app's only visible feedback spinning for
+      // the server-side 120s process limit: abort this attempt, let the native
+      // WebView close its request, and give one fresh probe a chance.
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 30_000);
+      try {
+        const res = await apiFetch('/api/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, options: {} }),
+          signal: controller.signal,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const entries: ClipPreview[] = Array.isArray(data.previews) ? data.previews : [];
+          meta = entries[0] ?? null;
+          extra = Math.max(0, entries.length - 1);
+        } else if (res.status >= 400 && res.status < 500) {
+          break;
+        }
+      } catch (e) {
+        if (isUnauthorized(e)) throw e;
+      } finally {
+        window.clearTimeout(timeout);
       }
-    } catch (e) {
-      if (isUnauthorized(e)) throw e;
+      if (!meta && attempt === 0) await new Promise<void>((resolve) => setTimeout(resolve, 350));
     }
     out.push({ url, meta, extra, selected: true, height: meta?.default_height ?? 0 });
   }
@@ -5253,12 +5552,12 @@ function armHoverPeek(item: HTMLElement): void {
 }
 if (canHover) {
   els.history.addEventListener('mouseover', (e) => {
-    const item = (e.target as HTMLElement).closest('.item.blurred') as HTMLElement | null;
+    const item = (e.target as HTMLElement).closest('.item.blurred, .group-head.blurred') as HTMLElement | null;
     if (!item) { clearHoverPeek(); return; }
     armHoverPeek(item);
   });
   els.history.addEventListener('mouseout', (e) => {
-    const item = (e.target as HTMLElement).closest('.item.blurred') as HTMLElement | null;
+    const item = (e.target as HTMLElement).closest('.item.blurred, .group-head.blurred') as HTMLElement | null;
     if (!item) return;
     const to = e.relatedTarget as Node | null;
     if (to && item.contains(to)) return; // still inside the card — keep peeking
@@ -5284,7 +5583,7 @@ els.history.addEventListener('click', (e) => {
   // Pointer devices reveal by dwelling on the thumbnail (hover-intent, above), so
   // this tap path is only for devices without real hover.
   if (!canHover) {
-    const bl = target.closest('.item.blurred:not(.revealed)') as HTMLElement | null;
+    const bl = target.closest('.item.blurred:not(.revealed), .group-head.blurred:not(.revealed)') as HTMLElement | null;
     if (bl) {
       // Only the blurred visual area (thumbnail / title / uploader) reveals-then-
       // waits. Every control on the card is sharp already (blur only touches
@@ -5316,6 +5615,7 @@ els.history.addEventListener('click', (e) => {
       else if (a === 'share-list') shareGroup(gkey());
       else if (a === 'dl-list') downloadGroup(gkey());
       else if (a === 'del-list') deleteGroup(gkey());
+      else if (a === 'cancel-list') void cancelGroup(gkey());
       return;
     }
     toggleGroupExpand(gkey());
@@ -5329,11 +5629,16 @@ els.history.addEventListener('click', (e) => {
     const row = titleEl.closest('.item') as HTMLElement | null;
     if (row) { row.classList.toggle('title-open'); return; }
   }
+  const image = target.closest('.thumb-image') as HTMLElement | null;
+  if (image) { e.preventDefault(); playItemInGroup(Number(image.dataset.id), image.dataset.cloud === '1'); return; }
   const play = target.closest('.thumb-play') as HTMLElement | null;
-  if (play) { e.preventDefault(); openPlayer(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play)); return; }
+  if (play) { e.preventDefault(); playItemInGroup(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play)); return; }
 
-  // Save stays a real <a download> so the browser keeps its native behaviour;
-  // only the Android app (where that anchor is inert) is intercepted.
+  // Save stays a real attachment navigation so the browser keeps its native
+  // download UI; only the Android app (where that anchor is inert) is intercepted.
+  // Do not add the HTML `download` attribute here: Chromium bypasses service
+  // workers for those navigations, which sends `/__m/dl/...` to the backend and
+  // turns its route-level 404 into the browser's vague “file not available”.
   const save = target.closest('.act-save') as HTMLAnchorElement | null;
   if (save && isAndroidApp()) {
     e.preventDefault();
@@ -5716,7 +6021,9 @@ function isAndroidApp(): boolean {
 // Only a fallback: the server sends the real filename in Content-Disposition,
 // which the native side prefers. This is what a notification shows meanwhile.
 function saveLabel(item: Item): string {
-  return item.title || item.slug || 'Orca download';
+  // Native uses this only when the HTTP response lacks Content-Disposition, but
+  // it still must be a valid media filename in that fallback path.
+  return item.filename || item.title || item.slug || 'Orca download';
 }
 
 /**
@@ -5741,11 +6048,16 @@ async function saveItemsNative(items: Item[]): Promise<void> {
       // slug + height let the native side file this under the item, so playback
       // can find it later and a taller save can recognise itself as a
       // replacement for this one rather than a second copy.
+      const url = await T.core.invoke('stream_url', {
+        slug: it.slug, kind: 'file', height: 0,
+      }) as string;
+      if (!url) throw new Error('native media proxy unavailable');
       await T.core.invoke('save_media', {
-        url: fileUrl(it, true),
+        url,
         name: saveLabel(it),
         slug: it.slug,
         height: it.height || 0,
+        mediaType: isImage(it) ? 'image' : 'video',
       });
     }
     toast(t('toast.savingN', { n: items.length }), 'ok');
@@ -5785,7 +6097,9 @@ function batchDownload(source?: Item[]): void {
     setTimeout(() => {
       const a = document.createElement('a');
       a.href = fileUrl(it, true);
-      a.download = '';
+      // This must remain an attachment navigation without the HTML `download`
+      // attribute. Chromium bypasses the service worker when that attribute is
+      // present; the worker's Content-Disposition supplies the real filename.
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -5961,6 +6275,48 @@ function deleteGroup(gkey: string): void {
   openDeleteConfirm(groupChildIds(gkey));
 }
 
+// Stop every download still outstanding in a fold, in one gesture. Cancelling is
+// destructive of the transfer (the partial is discarded), so it asks first —
+// naming the count, because "cancel" on a card standing for forty videos is a
+// much bigger action than on a single row. Children that already finished are
+// untouched: this cancels the LIST's remaining work, it doesn't undo the list.
+async function cancelGroup(gkey: string): Promise<void> {
+  const live = itemsFromIds(groupChildIds(gkey)).filter(isCancelable);
+  if (!live.length) return;
+  // The dismiss button on this dialog is itself labelled "Cancel", so the
+  // confirming one must NOT be — two buttons reading "Cancel" on a destructive
+  // prompt is a coin toss. It says what it does instead: stop the downloads.
+  const ok = await askConfirm({
+    title: t('group.cancelTitle'),
+    sub: t('group.cancelSub', { n: live.length }),
+    confirm: t('group.cancelDo'),
+    danger: true,
+  });
+  if (!ok) return;
+  // Sequential, not a burst: each cancel writes a status and kills a process
+  // server-side, and a fold can hold hundreds of rows.
+  for (const item of live) {
+    try {
+      const res = await apiFetch(itemPath(item, '/cancel'), { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data && data.id) {
+        state.progress.delete(item.id);
+        upsertRow(data, false);
+      }
+      // A non-ok answer is the normal race, not a failure: cancelling a list takes
+      // long enough that a download can finish (or the queue can promote the next
+      // one) between deciding to stop it and the request landing. The refresh
+      // below settles every row against the server rather than leaving the ones
+      // that changed under us showing their pre-cancel badge.
+    } catch (e) {
+      if (isUnauthorized(e)) return; // re-auth prompt is already up; stop hammering
+    }
+  }
+  groupsFetched.delete(gkey); // re-arm the one-shot fetch...
+  await loadGroupMembers(gkey); // ...so the whole fold reloads from the server
+  loadStats();
+}
+
 // DELETE every confirmed item, removing its local file too (the backend no-ops
 // safely when there's no file, so this just clears the record then). Rows drop
 // from the list as they succeed.
@@ -6090,6 +6446,10 @@ els.batchShare.addEventListener('click', (e) => {
 els.history.addEventListener('load', (e) => {
   const img = e.target;
   if (!(img instanceof HTMLImageElement) || !img.classList.contains('thumb')) return;
+  // A group cover contains two decorative backing thumbnails. Their orientation
+  // must never decide the cover's layout — otherwise a landscape second image
+  // could flip a portrait first image back to the wide preview after it loads.
+  if (img.parentElement?.classList.contains('group-stack')) return;
   const portrait = img.naturalHeight > img.naturalWidth * 1.05;
   img.closest('.thumb-wrap')?.classList.toggle('portrait', portrait);
   // Also tag the whole card: the duration moves off the thumbnail and into the
@@ -6098,7 +6458,7 @@ els.history.addEventListener('load', (e) => {
   img.closest('.item, .group-head')?.classList.toggle('portrait-media', portrait);
 }, true);
 
-// Keyboard access for the play thumbnail (it's a role="button").
+// Keyboard access for the native video/image viewer (both are role="button").
 els.history.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const head = (e.target as HTMLElement).closest('.group-head') as HTMLElement | null;
@@ -6108,10 +6468,11 @@ els.history.addEventListener('keydown', (e) => {
     if (state.selectMode) toggleGroupSelect(gkey); else toggleGroupExpand(gkey);
     return;
   }
-  const play = (e.target as HTMLElement).closest('.thumb-play') as HTMLElement | null;
-  if (!play) return;
+  const media = (e.target as HTMLElement).closest('.thumb-play, .thumb-image') as HTMLElement | null;
+  if (!media) return;
   e.preventDefault();
-  openPlayer(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play));
+  const id = Number(media.dataset.id);
+  playItemInGroup(id, media.dataset.cloud === '1', thumbSrc(media));
 });
 
 // ---- Fullscreen in-app player ---------------------------------------------
@@ -6130,9 +6491,133 @@ function thumbSrc(play: HTMLElement): string | undefined {
 let playQueue: Array<{ id: number; cloud: boolean; poster?: string }> = [];
 let playIndex = 0;
 let playerScrollY = 0;
+let imageCycleTimer: ReturnType<typeof setTimeout> | null = null;
+let playerNavTimer: ReturnType<typeof setTimeout> | null = null;
+let playerNavActive = true;
+const IMAGE_CYCLE_MS = 4500;
+// Chromium's native video chrome withdraws shortly after playback resumes or
+// pointer activity stops. It does not expose that visibility as an event, so
+// keep the fold navigation on the same interaction lifecycle instead of leaving
+// two custom buttons floating over an otherwise clean video.
+const PLAYER_NAV_HIDE_MS = 2500;
+
+function stopImageCycle(): void {
+  if (imageCycleTimer) clearTimeout(imageCycleTimer);
+  imageCycleTimer = null;
+}
+
+function stopPlayerNavTimer(): void {
+  if (playerNavTimer) clearTimeout(playerNavTimer);
+  playerNavTimer = null;
+}
+
+// A list is a reel, not a one-shot queue: after its last child, return to the
+// first. Images have no `ended` event, so keep them on screen briefly before
+// taking the same next-item path videos use.
+function advancePlayQueue(): void {
+  if (!playQueue.length) return;
+  playIndex = (playIndex + 1) % playQueue.length;
+  playCurrentInQueue();
+}
+
+function previousPlayQueue(): void {
+  if (!playQueue.length) return;
+  playIndex = (playIndex - 1 + playQueue.length) % playQueue.length;
+  playCurrentInQueue();
+}
+
+// Use the platform's media controls when they exist (hardware next/previous
+// keys, lock-screen controls, and browser media UI). Unsupported actions are
+// explicitly harmless: some browsers expose MediaSession but omit these actions.
+function syncMediaSessionActions(): void {
+  if (!('mediaSession' in navigator)) return;
+  const handler = playQueue.length > 1;
+  try {
+    navigator.mediaSession.setActionHandler('previoustrack', handler ? previousPlayQueue : null);
+    navigator.mediaSession.setActionHandler('nexttrack', handler ? advancePlayQueue : null);
+  } catch {
+    // The Media Session action set varies by browser/version.
+  }
+}
+
+function syncPlayerNav(): void {
+  const available = playQueue.length > 1;
+  const idle = els.player.dataset.kind === 'video' && !playerNavActive;
+  els.playerPrev.classList.toggle('hidden', !available);
+  els.playerNext.classList.toggle('hidden', !available);
+  els.playerPrev.classList.toggle('player-nav-idle', idle);
+  els.playerNext.classList.toggle('player-nav-idle', idle);
+  syncMediaSessionActions();
+}
+
+function showPlayerNav(): void {
+  stopPlayerNavTimer();
+  playerNavActive = true;
+  syncPlayerNav();
+  if (
+    playQueue.length > 1
+    && els.player.dataset.kind === 'video'
+    && !els.playerVideo.paused
+  ) {
+    playerNavTimer = setTimeout(() => {
+      playerNavTimer = null;
+      playerNavActive = false;
+      syncPlayerNav();
+    }, PLAYER_NAV_HIDE_MS);
+  }
+}
+
+function holdPlayerNav(): void {
+  stopPlayerNavTimer();
+  playerNavActive = true;
+  syncPlayerNav();
+}
+
+function scheduleImageCycle(id: number): void {
+  stopImageCycle();
+  if (playQueue.length < 2 || playQueue[playIndex]?.id !== id) return;
+  imageCycleTimer = setTimeout(() => {
+    imageCycleTimer = null;
+    if (!els.player.classList.contains('hidden') && els.player.dataset.kind === 'image') {
+      advancePlayQueue();
+    }
+  }, IMAGE_CYCLE_MS);
+}
+
 function playCurrentInQueue(): void {
   const cur = playQueue[playIndex];
-  if (cur) openPlayer(cur.id, cur.cloud, cur.poster);
+  if (!cur) return;
+  const item = state.items.get(cur.id);
+  if (item && isImage(item)) openImage(cur.id, cur.cloud);
+  else openPlayer(cur.id, cur.cloud, cur.poster);
+  syncPlayerNav();
+}
+
+function startPlayQueue(items: Item[], startId = items[0]?.id): void {
+  playQueue = items.map((it) => ({ id: it.id, cloud: !it.local_available, poster: thumbUrl(it) }));
+  playIndex = Math.max(0, playQueue.findIndex((entry) => entry.id === startId));
+  playCurrentInQueue();
+}
+
+// A child thumbnail is still part of its fold. Starting its queue at that child
+// makes left/right work whether playback began from the first-level card or an
+// expanded second-level image/video.
+function playItemInGroup(id: number, cloud: boolean, poster?: string): void {
+  const item = state.items.get(id);
+  const gkey = item && groupKeyOf(item);
+  if (gkey) {
+    const members = groupChildIds(gkey)
+      .map((memberId) => state.items.get(memberId))
+      .filter((member): member is Item => !!member && isPlayable(member));
+    if (members.length > 1 && members.some((member) => member.id === id)) {
+      startPlayQueue(members, id);
+      return;
+    }
+  }
+  playQueue = [];
+  syncPlayerNav();
+  if (item && isImage(item)) openImage(id, cloud);
+  else openPlayer(id, cloud, poster);
 }
 
 // Honour a pending `#orca-play=<slug>` deep-link (from the browser extension):
@@ -6237,7 +6722,10 @@ function startPlayback(v: HTMLVideoElement): void {
 }
 
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
+  stopImageCycle();
   const v = els.playerVideo;
+  els.player.dataset.kind = 'video';
+  els.playerImage.removeAttribute('src');
   // Also runs when a fold advances to the next clip, so the previous item's
   // tracks never carry over.
   clearSubtitles();
@@ -6253,6 +6741,7 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   if (nativeMediaFallback()) poster = state.items.get(id)?.slug ? thumbObjectUrls.get(state.items.get(id)!.slug) : undefined;
   if (poster) v.poster = poster; else v.removeAttribute('poster');
   els.player.classList.remove('hidden');
+  showPlayerNav();
   els.player.setAttribute('aria-hidden', 'false');
   document.body.classList.add('player-open');
   // Browser: push a history entry so Back pops the player. In the native app the
@@ -6294,6 +6783,51 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
       loadSubtitles(id);
     }
   }
+}
+
+// Android's WebView has no controlling service worker, so its native loopback
+// proxy supplies authenticated/decrypted bytes. The browser then decodes the
+// result as a normal image rather than navigating to an upstream post.
+function showNativeImage(img: HTMLImageElement, slug: string, kind: 'stream' | 'file'): void {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke) { toast(t('toast.streamFail'), 'error'); return; }
+  void (invoke('stream_url', { slug, kind, height: 0 }) as Promise<string>)
+    .then((url) => {
+      if (!url) throw new Error('no proxy url');
+      img.src = url;
+    })
+    .catch(() => { toast(t('toast.streamFail'), 'error'); closePlayer(true); });
+}
+
+function openImage(id: number, cloud: boolean): void {
+  const item = state.items.get(id);
+  if (!item?.slug) return;
+  const opening = els.player.classList.contains('hidden');
+  if (opening) {
+    playerScrollY = window.scrollY;
+    document.body.style.top = `-${playerScrollY}px`;
+  }
+  clearSubtitles();
+  const v = els.playerVideo;
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  els.player.dataset.kind = 'image';
+  els.playerImage.alt = item.title || 'Image';
+  els.playerImage.removeAttribute('src');
+  els.player.classList.remove('hidden');
+  showPlayerNav();
+  els.player.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('player-open');
+  if (!isNativeApp && !(history.state && history.state.player)) history.pushState({ player: true }, '');
+
+  // Prefer a device copy; otherwise use the same authenticated file/stream path
+  // as video. Neither branch opens the source-post URL.
+  const local = localFileFor(item.slug);
+  if (local) els.playerImage.src = local.url;
+  else if (nativeMediaFallback()) showNativeImage(els.playerImage, item.slug, cloud ? 'stream' : 'file');
+  else els.playerImage.src = cloud ? streamUrl(item.slug) : fileUrl(item);
+  scheduleImageCycle(id);
 }
 
 // ---- Local copies on this device (Android app) ----------------------------
@@ -6553,6 +7087,9 @@ function closePlayer(pop: boolean): void {
   v.pause();
   v.removeAttribute('src');
   v.removeAttribute('poster');
+  els.playerImage.removeAttribute('src');
+  els.playerImage.alt = '';
+  delete els.player.dataset.kind;
   clearSubtitles();
   v.load();
   els.player.classList.add('hidden');
@@ -6565,12 +7102,43 @@ function closePlayer(pop: boolean): void {
   // sentinel entry's old (usually top-of-page) scroll position.
   requestAnimationFrame(() => window.scrollTo(0, playerScrollY));
   playQueue = []; // stop any sequential fold playback
+  stopPlayerNavTimer();
+  playerNavActive = true;
+  syncPlayerNav();
+  stopImageCycle();
   if (!isNativeApp && pop && history.state && history.state.player) history.back();
 }
 
 // Advance a fold's sequential playback when the current clip ends.
 els.playerVideo.addEventListener('ended', () => {
-  if (playIndex < playQueue.length - 1) { playIndex++; playCurrentInQueue(); }
+  if (playQueue.length > 1) advancePlayQueue();
+});
+els.playerVideo.addEventListener('playing', showPlayerNav);
+els.playerVideo.addEventListener('pause', showPlayerNav);
+els.player.addEventListener('pointermove', (e) => {
+  // A finger does not meaningfully "move" while watching; its pointerdown below
+  // is the native-controls gesture. Mouse/pen movement, however, reveals them.
+  if (e.pointerType !== 'touch') showPlayerNav();
+});
+els.player.addEventListener('pointerdown', holdPlayerNav);
+els.player.addEventListener('pointerup', showPlayerNav);
+els.player.addEventListener('pointercancel', showPlayerNav);
+els.player.addEventListener('keydown', showPlayerNav);
+els.playerPrev.addEventListener('click', previousPlayQueue);
+els.playerNext.addEventListener('click', advancePlayQueue);
+
+window.addEventListener('keydown', (e) => {
+  if (els.player.classList.contains('hidden') || playQueue.length < 2) return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.matches('input, textarea, select, [contenteditable="true"]')) return;
+  if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    previousPlayQueue();
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    advancePlayQueue();
+  }
 });
 
 // The media itself failing to load (a cloud source the browser can't play — e.g.
@@ -6888,7 +7456,9 @@ if ('serviceWorker' in navigator) {
   // Hand the worker a fresh session whenever it asks (it needs the session key to
   // decrypt the media plane, and asks right after activation or an idle expiry).
   navigator.serviceWorker.addEventListener('message', (e) => {
-    if ((e.data as { type?: string } | null)?.type === 'orca-need-session') pushSessionToWorker();
+    const type = (e.data as { type?: string } | null)?.type;
+    if (type === 'orca-need-session') pushSessionToWorker();
+    else if (type === 'orca-refresh-session') refreshSessionForWorker();
   });
   // A newly-activated worker taking control should get the current session too,
   // and any rows rendered before it took control still point at the loopback

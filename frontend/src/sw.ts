@@ -15,7 +15,7 @@ declare const self: ServiceWorkerGlobalScope;
 
 import { authenticator, decryptChunk, mediaKey, sessionFromRaw, MEDIA_TAG, type Session } from './e2ee';
 
-const CACHE = 'orca-shell-v7';
+const CACHE = 'orca-shell-v10';
 // Persistent thumbnail store, separate from the shell cache so it survives across
 // sessions and token changes. The in-RAM blobCache below is wiped whenever the
 // session rotates (and dies with the worker), so once the token went bad every
@@ -26,8 +26,9 @@ const CACHE = 'orca-shell-v7';
 const THUMB_CACHE = 'orca-thumb-v1';
 const SHELL = [
   '/', '/index.html', '/app.js', '/theme.js', '/style.css',
-  '/manifest.webmanifest', '/favicon.ico', '/icons/favicon-32.png',
-  '/third-party-notices.txt', '/icons/192.png', '/icons/512.png',
+  '/manifest.webmanifest', '/favicon.ico', '/icons/favicon-32.png', '/icons/favicon-32-dark.png',
+  '/third-party-notices.txt', '/icons/logo.png', '/icons/192.png', '/icons/512.png',
+  '/icons/apple-touch-180.png', '/icons/maskable-512.png',
 ];
 
 self.addEventListener('install', (event) => {
@@ -102,10 +103,10 @@ self.addEventListener('message', (event) => {
 });
 
 /// The current session, asking the app for one (and waiting briefly) if absent.
-async function getSession(): Promise<Session> {
-  if (session) return session;
+async function getSession(refresh = false): Promise<Session> {
+  if (!refresh && session) return session;
   const clients = await self.clients.matchAll({ includeUncontrolled: true });
-  clients.forEach((c) => c.postMessage({ type: 'orca-need-session' }));
+  clients.forEach((c) => c.postMessage({ type: refresh ? 'orca-refresh-session' : 'orca-need-session' }));
   return new Promise<Session>((resolve, reject) => {
     waiters.push(resolve);
     setTimeout(() => {
@@ -143,7 +144,7 @@ function route(parts: string[]): Target | null {
 interface WindowData { plainLen: number; windowStart: number; plaintext: Uint8Array<ArrayBuffer>; }
 
 /// Fetch and decrypt one encrypted window starting at plaintext byte `start`.
-async function fetchWindow(s: Session, t: Target, start: number, end?: number, query = ''): Promise<WindowData> {
+async function fetchWindow(s: Session, t: Target, start: number, end?: number, query = '', retried = false): Promise<WindowData> {
   // The authenticator is bound to the path only (never the query), matching the
   // server; `query` (e.g. a `?h=` resolution cap) rides the fetch URL alone.
   const auth = await authenticator(s.gcm, 'GET', t.apiPath);
@@ -154,7 +155,17 @@ async function fetchWindow(s: Session, t: Target, start: number, end?: number, q
       'X-Orca-Range': `${start}-${end == null ? '' : end}`,
     },
   });
-  if (res.status === 401) { session = null; throw new Error('session expired'); }
+  if (res.status === 401) {
+    // Unlike regular API requests, this path is owned by the service worker and
+    // cannot perform a handshake itself (the token deliberately never enters
+    // the worker). Ask the page to renew, wait for its new session key, then
+    // retry this exact byte window once. Without this, a server restart turns
+    // every browser download into Chromium's vague “file not available” error.
+    session = null;
+    if (retried) throw new Error('session refresh failed');
+    const renewed = await getSession(true);
+    return fetchWindow(renewed, t, start, end, query, true);
+  }
   if (!res.ok || res.headers.get('X-Orca-E2EE') !== '1') throw new Error(`media fetch ${res.status}`);
 
   const plainLen = Number(res.headers.get('X-Orca-Plain-Len') || '0');
@@ -274,16 +285,33 @@ async function serveDownload(s: Session, t: Target, name: string | null): Promis
       } catch (e) { controller.error(e); }
     },
   });
-  const disposition = name ? `attachment; filename*=UTF-8''${encodeURIComponent(name)}` : 'attachment';
+  const contentType = sniffMedia(first.plaintext, name);
   return new Response(stream, {
     status: 200,
     headers: {
-      'Content-Type': 'application/octet-stream',
+      // The first decrypted window is already in hand, so preserve image MIME
+      // rather than presenting every encrypted download as a generic binary.
+      // Together with the real filename above this keeps browser/Android saves
+      // as .jpg/.png/.webp instead of falling back to .txt.
+      'Content-Type': contentType,
       'Content-Length': String(plainLen),
-      'Content-Disposition': disposition,
+      // This header, rather than an HTML `download` attribute, must carry the
+      // filename. Chromium bypasses service workers for download-attributed
+      // navigations, so using the attribute sends `/__m/dl/...` straight to the
+      // backend and produces a route-level 404.
+      'Content-Disposition': attachmentDisposition(name),
       'Cache-Control': 'no-store',
     },
   });
+}
+
+/// RFC 5987 attachment name. encodeURIComponent leaves a few characters that
+/// are illegal in an extended parameter untouched, so escape those explicitly.
+function attachmentDisposition(name: string | null): string {
+  if (!name) return 'attachment';
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) =>
+    `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename*=UTF-8''${encoded}`;
 }
 
 function sniffImage(b: Uint8Array): string {
@@ -294,6 +322,23 @@ function sniffImage(b: Uint8Array): string {
   return 'application/octet-stream';
 }
 
+// Downloads need the original image MIME too: some browsers decide an
+// extension from the synthetic service-worker response before applying the
+// attachment filename. Cover the formats yt-dlp classifies as still images,
+// then use the saved filename as a fallback for unusual-but-valid files.
+function sniffMedia(b: Uint8Array, name: string | null): string {
+  const image = sniffImage(b);
+  if (image !== 'application/octet-stream') return image;
+  if (b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp';
+  if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    const brand = String.fromCharCode(...b.slice(8, 12));
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    if (/^hei[cfms]$|^mif1$/.test(brand)) return 'image/heic';
+  }
+  const ext = name?.split('.').pop()?.toLowerCase();
+  return ({ avif: 'image/avif', bmp: 'image/bmp', gif: 'image/gif', heic: 'image/heic', heif: 'image/heif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' } as Record<string, string>)[ext || ''] || 'application/octet-stream';
+}
+
 async function handleMedia(req: Request, parts: string[], url: URL): Promise<Response> {
   const t = route(parts);
   if (!t) return new Response('bad media path', { status: 400 });
@@ -301,7 +346,12 @@ async function handleMedia(req: Request, parts: string[], url: URL): Promise<Res
   try {
     const s = await getSession();
     const ct = url.searchParams.get('ct') || '';
-    if (t.kind === 'download') return await serveDownload(s, t, url.searchParams.get('name'));
+    if (t.kind === 'download') {
+      // The final URL segment is also the browser's filename fallback: Chromium
+      // ignores filename*= on some synthetic service-worker responses.
+      const name = parts[2] ? decodeURIComponent(parts[2]) : url.searchParams.get('name');
+      return await serveDownload(s, t, name);
+    }
     if (t.kind === 'blob') return await serveBlob(s, t, ct);
     // A `?h=` resolution cap only applies to the online-stream resolve.
     const h = t.resource.startsWith('stream:') ? url.searchParams.get('h') : null;

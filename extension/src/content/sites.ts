@@ -15,7 +15,7 @@
 // hover-preview link, lockup renderers). USER adapters, imported at runtime, add
 // or override any site declaratively without a rebuild.
 
-import type { UserSiteAdapter } from '../lib/types.js';
+import type { PlaylistRef, UserSiteAdapter } from '../lib/types.js';
 
 export type { UserSiteAdapter };
 
@@ -27,6 +27,34 @@ export interface SiteAdapter {
   /** Canonicalize a candidate href into the stable video URL Orca stores, or null
    *  if it isn't a watchable video on this site. */
   videoUrl(href: string): string | null;
+  /** Is this page a collection's OWN page — a playlist, a series — rather than a
+   *  page that merely shows several videos (a feed, a search, a watch page with a
+   *  sidebar)? Returns the collection's stable key plus a URL the server can
+   *  expand into exactly that collection, or null.
+   *
+   *  The distinction matters twice. It decides whether the downloads get folded
+   *  into one card in the web app — and a watch page's recommendations are NOT
+   *  part of the playlist it is playing, so tagging them would fold strangers in.
+   *  And it decides HOW they are submitted: a collection page can be handed to
+   *  the server whole (one probe, all entries at once), where an arbitrary page
+   *  has to be submitted a video at a time.
+   *
+   *  A watch page that carries a `list` param (a playlist or radio mix playing in
+   *  the sidebar queue) ALSO counts: its `?list=` queue is a real collection that
+   *  can be handed to the server whole. Its recommendation rail is NOT part of
+   *  that collection, so `listMemberSelector` scopes the members away from it. */
+  playlistPage(href: string): { key: string; url: string } | null;
+  /** On a page that PLAYS a list but also shows unrelated videos — a watch page's
+   *  `?list=` queue sitting beside its recommendation rail — the CSS selector that
+   *  scopes thumbnail anchors to the list's actual members. `null` when the whole
+   *  page IS the list (a `/playlist` page) or there is no bounded list at all. This
+   *  is what keeps "download all" and "select all in list" from sweeping in the
+   *  recommendation rail. */
+  listMemberSelector(href: string): string | null;
+  /** A social-media thread currently rendered in the page. Unlike a server
+   *  expandable playlist, these URLs must be submitted individually, in DOM
+   *  order. `null` means this is not a thread detail page. */
+  pageList(href: string): { urls: string[]; playlist: PlaylistRef; label: string } | null;
 }
 
 // The declarative UserSiteAdapter shape (id, hosts, thumbSelector?, queryParam?,
@@ -63,7 +91,14 @@ export function genericVideoUrl(href: string): string | null {
   if (!u) return null;
   const v = u.pathname === '/watch' ? u.searchParams.get('v') : null;
   if (v && /^[\w-]{4,}$/.test(v)) return `${u.origin}/watch?v=${v}`;
-  if (VIDEO_PATH_RE.test(u.pathname) || /\/status\/\d+/.test(u.pathname)) {
+  // X / Twitter status posts, including their `/video/…` and `/photo/…` media
+  // sub-URLs, canonicalize to the bare post. yt-dlp resolves the post's actual
+  // media, and image posts must reach it now that image downloading is supported.
+  const status = u.pathname.match(/^(.*?\/status\/\d+)/);
+  if (status) {
+    return `${u.origin}${status[1]}`;
+  }
+  if (VIDEO_PATH_RE.test(u.pathname)) {
     return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
   }
   return null;
@@ -73,10 +108,20 @@ export function genericVideoUrl(href: string): string | null {
 // `:has()` is supported by current Chrome & Firefox (the only targets here).
 const GENERIC_THUMB_SELECTOR = 'a:has(img), a:has(picture), a:has(canvas)';
 
+// No cross-site convention identifies a collection page, so the generic adapter
+// never claims one. List mode still runs on such a page — the videos are just
+// submitted one at a time and land as ordinary standalone items.
+const noPlaylist = (): { key: string; url: string } | null => null;
+const noMemberScope = (): string | null => null;
+const noPageList = (): { urls: string[]; playlist: PlaylistRef; label: string } | null => null;
+
 const genericAdapter: SiteAdapter = {
   id: 'generic',
   thumbSelector: GENERIC_THUMB_SELECTOR,
   videoUrl: genericVideoUrl,
+  playlistPage: noPlaylist,
+  listMemberSelector: noMemberScope,
+  pageList: noPageList,
 };
 
 // ---- YouTube (query-param ids, distinct hover-preview link, lockup renderers) ----
@@ -108,10 +153,139 @@ const youtubeAdapter: SiteAdapter = {
     'a#thumbnail[href], a.ytLockupViewModelContentImage[href], ' +
     'ytm-shorts-lockup-view-model a[href]:has(img)',
   videoUrl: ytVideoUrl,
+  // A collection the server can expand whole. Two shapes qualify:
+  //   /playlist?list=<id>  — the list's OWN page, every thumbnail is a member.
+  //   /watch?…&list=<id>   — a list (or radio mix) playing in the sidebar queue.
+  // Both submit the same `/playlist?list=<id>` URL, because a bare watch URL has
+  // its `list` param stripped on normalize (downloading one entry must never drag
+  // its playlist in) — the playlist-page form is what survives and expands. The
+  // watch page ALSO shows a recommendation rail that belongs to no list, so its
+  // members are scoped away from it by `listMemberSelector`. The key is namespaced
+  // to match what the server derives from yt-dlp's own `playlist_id`, so a list
+  // downloaded by this button and the same list pasted into the web app land in
+  // ONE card.
+  playlistPage(href: string): { key: string; url: string } | null {
+    const list = ytListId(href);
+    if (!list) return null;
+    return { key: `youtube:${list}`, url: `https://www.youtube.com/playlist?list=${list}` };
+  },
+  // On a watch page the `?list=` queue lives in the playlist panel; the rest of the
+  // page is recommendations that are not members. Scope to the panel so a whole-list
+  // download never sweeps them in. A `/playlist` page IS the list — no scoping.
+  listMemberSelector(href: string): string | null {
+    const u = parseUrl(href);
+    if (!u || !/(^|\.)youtube\.com$/.test(u.hostname)) return null;
+    if (u.pathname !== '/watch' || !ytListId(href)) return null;
+    return (
+      'ytd-playlist-panel-renderer a#wc-endpoint[href], ' +
+      'ytd-playlist-panel-renderer a#thumbnail[href]'
+    );
+  },
+  pageList: noPageList,
+};
+
+// The list id a YouTube URL carries, whether it's a playlist page or a watch page
+// playing a list — used to recognise both as the same expandable collection.
+function ytListId(href: string): string | null {
+  const u = parseUrl(href);
+  if (!u || !/(^|\.)youtube\.com$/.test(u.hostname)) return null;
+  if (u.pathname !== '/playlist' && u.pathname !== '/watch') return null;
+  const list = u.searchParams.get('list');
+  return list && /^[\w-]{2,}$/.test(list) ? list : null;
+}
+
+// ---- X / Twitter thread detail --------------------------------------------
+//
+// X virtualises its timeline, but its stable accessibility/test hooks have been
+// `article[data-testid="tweet"]`, a timestamp link around `time`, and media
+// markers such as `tweetPhoto` / `videoPlayer`.  The latter two are deliberately
+// only a filter: the status permalink is what we submit, because yt-dlp (and our
+// Twitter image plugin) can then fetch every image/video belonging to that post.
+// This is the same DOM-first strategy used by established X clippers: it does
+// not depend on a private GraphQL operation or a bearer token that X can revoke.
+function xStatus(href: string): { url: string; handle: string; id: string } | null {
+  const u = parseUrl(href);
+  if (!u || !/(^|\.)(x|twitter)\.com$/i.test(u.hostname)) return null;
+  const m = u.pathname.match(/^\/([^/?#]+)\/status\/(\d+)/i);
+  if (!m) return null;
+  return { url: `https://x.com/${m[1]}/status/${m[2]}`, handle: m[1]!, id: m[2]! };
+}
+
+function xArticleStatus(article: Element): { url: string; handle: string; id: string } | null {
+  // The timestamp link is the article's own permalink. Other /status links in
+  // a quote card or reply preview are not the post represented by this article.
+  const time = article.querySelector('time');
+  const stampLink = time?.closest<HTMLAnchorElement>('a[href]');
+  return stampLink ? xStatus(stampLink.href) : null;
+}
+
+function xHasMedia(article: Element): boolean {
+  return !!article.querySelector(
+    '[data-testid="tweetPhoto"], [data-testid="videoPlayer"], video, a[href*="/photo/"], a[href*="/video/"]',
+  );
+}
+
+function xPageList(href: string): { urls: string[]; playlist: PlaylistRef; label: string } | null {
+  const current = xStatus(href);
+  if (!current) return null;
+  const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+  const first = articles.findIndex((article) => xArticleStatus(article)?.id === current.id);
+  if (first < 0) return null; // X is still rendering the focused post.
+
+  // The focused post can be a continuation. Capture the complete contiguous
+  // same-author run around it so “Save thread” means the same thing from any
+  // post in that rendered thread, while the first other author remains a hard
+  // reply-conversation boundary.
+  let start = first;
+  while (start > 0) {
+    const previous = xArticleStatus(articles[start - 1]!);
+    if (!previous || previous.handle.toLowerCase() !== current.handle.toLowerCase()) break;
+    start--;
+  }
+  let end = first + 1;
+  while (end < articles.length) {
+    const next = xArticleStatus(articles[end]!);
+    if (!next || next.handle.toLowerCase() !== current.handle.toLowerCase()) break;
+    end++;
+  }
+
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const article of articles.slice(start, end)) {
+    const post = xArticleStatus(article);
+    if (!post) continue;
+    if (post.handle.toLowerCase() !== current.handle.toLowerCase()) break;
+    if (xHasMedia(article) && !seen.has(post.url)) {
+      seen.add(post.url);
+      urls.push(post.url);
+    }
+  }
+  return {
+    urls,
+    playlist: {
+      key: `x-thread:${xArticleStatus(articles[start]!)?.id ?? current.id}`,
+      title: `X thread by @${current.handle}`,
+    },
+    label: 'Save thread',
+  };
+}
+
+const xAdapter: SiteAdapter = {
+  id: 'x',
+  // Avoid treating avatars and link-card artwork as downloadable post media.
+  // Per-post controls are attached to the actual photo/video permalink.
+  thumbSelector:
+    'article[data-testid="tweet"] a[href*="/status/"][href*="/photo/"], ' +
+    'article[data-testid="tweet"] a[href*="/status/"][href*="/video/"]',
+  videoUrl: genericVideoUrl,
+  playlistPage: noPlaylist,
+  listMemberSelector: noMemberScope,
+  pageList: xPageList,
 };
 
 const BUILTINS: { hosts: string[]; adapter: SiteAdapter }[] = [
   { hosts: ['youtube.com', 'youtu.be'], adapter: youtubeAdapter },
+  { hosts: ['x.com', 'twitter.com'], adapter: xAdapter },
 ];
 
 // ---- user adapter compilation ----
@@ -148,7 +322,14 @@ function compileUserAdapter(u: UserSiteAdapter): SiteAdapter | null {
     // No explicit rule matched → fall back to the generic shape (scoped to host).
     return genericVideoUrl(href);
   };
-  return { id: u.id || u.hosts[0]!, thumbSelector, videoUrl };
+  return {
+    id: u.id || u.hosts[0]!,
+    thumbSelector,
+    videoUrl,
+    playlistPage: noPlaylist,
+    listMemberSelector: noMemberScope,
+    pageList: noPageList,
+  };
 }
 
 // Resolve the adapter for the current host: a user adapter first (users override

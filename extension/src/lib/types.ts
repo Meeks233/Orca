@@ -15,6 +15,10 @@ export interface Item {
   slug: string;
   status: Status;
   url?: string;
+  /** The video's canonical page URL, as the server recorded it. This is the key
+   *  the content script tracks download state by, so it is what pairs an item
+   *  from a batch (whole-playlist) submit back to the thumbnail showing it. */
+  webpage_url?: string;
   title?: string | null;
   site_name?: string | null;
   /** Server-computed privacy-blur flag for this item's site (true when the item's
@@ -28,6 +32,10 @@ export interface Item {
 export interface SubmitResult {
   item: Item;
   duplicate: boolean;
+  /** Every item created by one source post. X photo posts can expand to several
+   *  independent image rows; retaining the full reply keeps progress tracking in
+   *  sync with the server instead of pretending only the first image exists. */
+  items?: Item[];
 }
 
 export interface ProgressEvent {
@@ -95,14 +103,30 @@ export interface FeatureFlags {
   websiteManagement: boolean;
 }
 
+// Which collection a submitted video was picked from. The in-page button's list
+// mode downloads a playlist one video at a time — N ordinary video URLs the
+// server can't tell apart from N unrelated submissions — so it names the list
+// here and the server records it. That's what lets the web app fold the whole
+// list back into a single card. Purely descriptive: it never changes what gets
+// fetched. Mirrors the backend's `PlaylistRef`.
+export interface PlaylistRef {
+  key: string;
+  title?: string;
+  pos?: number;
+}
+
 // ---- Messages: content/popup -> background (request) ----
 
 export type BgRequest =
   | { type: 'getConfig' }
+  | { type: 'health' }
   | { type: 'setConnection'; base: string; token: string }
   | { type: 'validate'; base: string; token: string }
   | { type: 'setFeatures'; features: Partial<FeatureFlags> }
-  | { type: 'submit'; url: string; tabWatch?: boolean }
+  | { type: 'submit'; url: string; tabWatch?: boolean; playlist?: PlaylistRef }
+  // Submit a COLLECTION url (a playlist page) and get back every item the server
+  // expanded it into — one request, one probe, all rows created together.
+  | { type: 'submitList'; url: string }
   | { type: 'itemStatus'; slug: string }
   | { type: 'cancelItem'; slug: string }
   | { type: 'retryItem'; slug: string; tabWatch?: boolean }

@@ -18,7 +18,7 @@
 //     leaving `api.ts` / `e2ee.ts` calling plain `fetch()` unchanged.
 
 import { OrcaClient } from '../lib/api.js';
-import type { BgResponse, FeatureFlags, UserSiteAdapter } from '../lib/types.js';
+import type { BgResponse, FeatureFlags, PlaylistRef, UserSiteAdapter } from '../lib/types.js';
 
 // ---- Greasemonkey / Tampermonkey API (provided at runtime; declared here) ----
 declare function GM_getValue<T>(key: string, def: T): T;
@@ -160,12 +160,17 @@ async function handle(req: { type: string; [k: string]: unknown }): Promise<unkn
         siteAdapters: cfg.siteAdapters,
       };
     }
+    case 'health':
+      return { online: (await getClient().validate()) === '' };
     case 'setSiteAdapters': {
       saveCfg({ siteAdapters: (req.siteAdapters as UserSiteAdapter[]) ?? [] });
       return { siteAdapters: loadCfg().siteAdapters };
     }
     case 'submit':
-      return getClient().submit(req.url as string); // { item, duplicate }
+      // { item, duplicate }
+      return getClient().submit(req.url as string, undefined, req.playlist as PlaylistRef | undefined);
+    case 'submitList':
+      return { items: await getClient().submitList(req.url as string) };
     case 'itemStatus':
       return { item: await getClient().getItem(req.slug as string) };
     case 'lookupItem':

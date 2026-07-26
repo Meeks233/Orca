@@ -539,12 +539,32 @@ async function pollToolbar(): Promise<void> {
 
 // ---- cookie extraction ----
 
-// Registrable domain, best-effort (last two labels). Good enough for the
-// single-label TLDs we target; a public-suffix list would be overkill here.
+// Second-level registries where the last two labels are a *public suffix*, not a
+// registrable domain: `tesco.co.uk` is a site, `co.uk` is a whole TLD. Guessing
+// `co.uk` would file the site under an entire country's namespace — and a later
+// bare `name=value` paste attaches to whatever host the site records, which would
+// then be sent to every site under it.
+const SECOND_LEVEL_SUFFIX = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or', 'ne', 'go']);
+
+// Registrable domain, best-effort: the last two labels, or three when the second
+// to last is one of the second-level registries above (`bbc.co.uk`, `a.com.cn`).
 function registrableDomain(host: string): string {
-  const h = host.replace(/^www\./, '');
+  const h = host.replace(/^www\./, '').toLowerCase();
   const parts = h.split('.');
-  return parts.length <= 2 ? h : parts.slice(-2).join('.');
+  if (parts.length <= 2) return h;
+  const take =
+    parts[parts.length - 1]!.length <= 3 && SECOND_LEVEL_SUFFIX.has(parts[parts.length - 2]!) ? 3 : 2;
+  return parts.slice(-take).join('.');
+}
+
+// Would the browser send this cookie to `host`? `cookies.getAll({domain})` also
+// returns cookies of *sibling* domains under the queried one, so filtering by the
+// browser's own domain-match rule is what keeps an extraction to the site the user
+// is actually on — without it, one click on any `*.co.uk` page would upload every
+// unrelated `.co.uk` login (banks included) to the server.
+function cookieBelongsTo(cookieDomain: string, host: string): boolean {
+  const d = cookieDomain.replace(/^\./, '').toLowerCase();
+  return host === d || host.endsWith('.' + d);
 }
 
 // Netscape cookies.txt — the format yt-dlp wants, and (unlike document.cookie)
@@ -570,13 +590,16 @@ async function extractCookies(
   pageUrl: string,
 ): Promise<{ key: string; name: string; count: number; created: boolean }> {
   const c = getClient();
-  const host = new URL(pageUrl).hostname;
+  const host = new URL(pageUrl).hostname.toLowerCase();
   const reg = registrableDomain(host);
 
   const collected = new Map<string, browser.cookies.Cookie>();
   for (const domain of new Set([host, reg])) {
     const got = await browser.cookies.getAll({ domain });
-    for (const ck of got) collected.set(`${ck.domain}\t${ck.path}\t${ck.name}`, ck);
+    for (const ck of got) {
+      if (!cookieBelongsTo(ck.domain, host)) continue;
+      collected.set(`${ck.domain}\t${ck.path}\t${ck.name}`, ck);
+    }
   }
   const cookies = [...collected.values()];
   if (cookies.length === 0) throw new Error('No cookies found for this page.');
@@ -708,6 +731,9 @@ async function handle(req: BgRequest, sender: browser.runtime.MessageSender): Pr
         siteAdapters: cfg.siteAdapters,
       };
 
+    case 'health':
+      return { online: (await getClient().validate()) === '' };
+
     case 'setSiteAdapters': {
       cfg.siteAdapters = req.siteAdapters;
       await saveConfig();
@@ -742,18 +768,49 @@ async function handle(req: BgRequest, sender: browser.runtime.MessageSender): Pr
 
     case 'submit': {
       const c = getClient();
-      const result = await c.submit(req.url);
-      const item = result.item;
-      const watch: Watch = { slug: item.slug, status: item.status, percent: null, shown: 0 };
-      if (req.tabWatch && sender.tab?.id != null) watch.tabId = sender.tab.id;
-      watches.set(item.id, watch);
+      const result = await c.submit(req.url, undefined, req.playlist);
+      // One X photo post can probe into N image items. Watching only result.item
+      // made every image's spinner share the first image's lifecycle and left
+      // other tabs showing a live list after the visible thumbnail had finished.
+      const items = result.items?.length ? result.items : [result.item];
+      for (const item of items) {
+        const watch: Watch = { slug: item.slug, status: item.status, percent: null, shown: 0 };
+        if (req.tabWatch && sender.tab?.id != null) watch.tabId = sender.tab.id;
+        watches.set(item.id, watch);
+      }
+      const item = items[0]!;
       toolbarItem = item.id;
       renderToolbar();
       // Guard against a download that ends without ever pushing a terminal frame
       // (e.g. cancelled from another client) leaving the ring stuck.
-      if (!isTerminal(item.status)) armToolbarPoll();
+      if (items.some((it) => !isTerminal(it.status))) armToolbarPoll();
       await ensureEvents();
-      return { item, duplicate: result.duplicate };
+      // Preserve the expanded reply for the content script too.  A post can be
+      // one button but N independent server jobs; returning only `item` here
+      // made that button bind its SVG lifecycle to the first job forever.
+      return { item, duplicate: result.duplicate, items };
+    }
+
+    case 'submitList': {
+      // One probe expands the whole collection, so this can take a while on a long
+      // playlist — but every row lands together. Watch each non-terminal item so
+      // the content script's rings get live pushes, same as a single submit.
+      const items = await getClient().submitList(req.url);
+      for (const item of items) {
+        if (isTerminal(item.status)) continue;
+        const watch: Watch = { slug: item.slug, status: item.status, percent: null, shown: 0 };
+        if (sender.tab?.id != null) watch.tabId = sender.tab.id;
+        watches.set(item.id, watch);
+      }
+      // The toolbar follows the one that will actually run first.
+      const live = items.find((it) => !isTerminal(it.status));
+      if (live) {
+        toolbarItem = live.id;
+        renderToolbar();
+        armToolbarPoll();
+      }
+      await ensureEvents();
+      return { items };
     }
 
     case 'itemStatus': {

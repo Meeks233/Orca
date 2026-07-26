@@ -30,9 +30,9 @@ const iconPng = await readFile(resolve(here, 'icons', '192.png'));
 const iconDataUri = `data:image/png;base64,${iconPng.toString('base64')}`;
 
 // Userscript metadata block. `@match *://*/*` mirrors the extension's
-// `<all_urls>`: the script must run on video sites (mount the button) AND on the
-// Orca dashboard (bridge the token). `@connect` + GM_xmlhttpRequest lets the
-// E2EE client reach the self-hosted server across origins.
+// `<all_urls>`: the script must run on video sites (including x.com / twitter.com
+// thread-detail pages) AND on the Orca dashboard (bridge the token). `@connect`
+// + GM_xmlhttpRequest lets the E2EE client reach the self-hosted server across origins.
 //
 // `@connect *` alone does NOT silently authorise loopback/IP hosts — Tampermonkey
 // deliberately excludes localhost and raw IPs from the `*` wildcard, so a
@@ -47,7 +47,7 @@ const banner = `// ==UserScript==
 // @namespace    https://orca.app/
 // @version      ${manifest.version}
 // @description  Submit videos to your self-hosted Orca over its E2EE channel and download them straight from any video page. Headless twin of the Orca extension.
-// @description:zh-CN 在任意视频页左上角注入下载/状态按钮，自动从 Orca 网页端读取并反向注入 token，通过 E2EE 通道提交到自建 Orca。
+// @description:zh-CN 在视频页注入下载/状态按钮；X/Twitter 帖子详情页会识别同作者讨论串并按顺序保存其中的图片和视频。自动从 Orca 网页端读取并反向注入 token，通过 E2EE 通道提交到自建 Orca。
 // @author       Orca
 // @icon         ${iconDataUri}
 // @icon64       ${iconDataUri}

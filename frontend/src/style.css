@@ -35,6 +35,10 @@
   --check-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
 }
 
+/* Prevent Android WebView's narrow-screen text autosizing from altering the
+   deliberate list typography below. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 /* ---- Browser DARK (default): OLED true black ---- */
 :root {
   --bg: #000000;
@@ -189,7 +193,7 @@ body {
    See setServerStatus() in app.ts. */
 .brand-wrap { display: flex; align-items: center; gap: 9px; }
 /* ---- Brand mark ----
-   The orca, as black line art on a transparent ground (web/icons/logo.png), so
+   The black-and-white orca sits on a transparent ground (web/icons/logo.png), so
    it sits on the topbar rather than in a chip of its own. Being pure ink, the
    dark themes just invert it to white — one asset, both themes, no second file
    to keep in sync. Sized to the topbar's cap height, not the icon buttons'. */
@@ -199,7 +203,7 @@ body {
   height: 26px;
   display: block;
   object-fit: contain;
-  /* Dark is the default theme, so the black ink inverts to white by default and
+  /* Dark is the default theme, so the black body inverts to white by default and
      the two light cases below put it back — the same shape as the palette
      declarations at the top of this file. */
   filter: invert(1);
@@ -931,20 +935,48 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
    work. */
 .item.blurred .thumb,
 .item.blurred .title span,
-.item.blurred .uploader {
+.item.blurred .uploader,
+.group-head.blurred > .group-thumb > .group-visuals,
+.group-head.blurred .title span,
+.group-head.blurred .group-sub {
   filter: blur(9px);
   transition: filter .18s ease;
 }
 .item.blurred .title span,
-.item.blurred .uploader { user-select: none; }
+.item.blurred .uploader,
+.group-head.blurred .title span,
+.group-head.blurred .group-sub { user-select: none; }
 .item.blurred.peek .thumb,
 .item.blurred.peek .title span,
 .item.blurred.peek .uploader,
 .item.blurred.revealed .thumb,
 .item.blurred.revealed .title span,
-.item.blurred.revealed .uploader {
+.item.blurred.revealed .uploader,
+.group-head.blurred.peek > .group-thumb > .group-visuals,
+.group-head.blurred.peek .title span,
+.group-head.blurred.peek .group-sub,
+.group-head.blurred.revealed > .group-thumb > .group-visuals,
+.group-head.blurred.revealed .title span,
+.group-head.blurred.revealed .group-sub {
   filter: none;
 }
+/* Opening a fold is an intentional request to inspect it, so its first-level
+   preview and second-level rows get the same clear treatment as a hovered card.
+   This remains scoped to the open fold; collapsing it restores the privacy blur. */
+.group-card:not(.collapsed) > .group-head.blurred > .group-thumb > .group-visuals,
+.group-card:not(.collapsed) > .group-head.blurred .title span,
+.group-card:not(.collapsed) > .group-head.blurred .group-sub,
+.group-card:not(.collapsed) > .group-body > .item.blurred .thumb,
+.group-card:not(.collapsed) > .group-body > .item.blurred .title span,
+.group-card:not(.collapsed) > .group-body > .item.blurred .uploader {
+  filter: none;
+}
+/* A blurred cover must not leave a sharp play glyph floating over it. The count
+   remains structural; revealing the card restores the normal control. */
+.group-head.blurred .group-play { opacity: 0; pointer-events: none; }
+.group-head.blurred.peek .group-play,
+.group-head.blurred.revealed .group-play,
+.group-card:not(.collapsed) > .group-head.blurred .group-play { opacity: 1; pointer-events: auto; }
 
 /* ---- Playlist folds (multi-video posts) ----
    A link with several videos collapses into one card: a header showing the first
@@ -958,6 +990,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   border-radius: var(--r-md);
 }
 .group-head {
+  position: relative;
   display: flex;
   align-items: stretch; /* let the info column fill the thumb height so the
                            bottom-right actions align with the card bottom */
@@ -977,16 +1010,58 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 /* Count-independent stacked-paper cue: two offset sheets behind the first
    thumbnail, drawn with layered box-shadows (clean edges + a soft drop shadow)
    so it reads as a stack/list at a glance. The right margin leaves room to peek. */
-.group-thumb { margin: 4px 16px 0 2px; }
-.group-thumb .thumb {
-  box-shadow:
-    5px -5px 0 0 var(--surface-2), 5px -5px 0 1px var(--border),
-    10px -10px 0 0 color-mix(in oklab, var(--surface-2) 70%, var(--surface)), 10px -10px 0 1px var(--border),
-    9px -7px 12px -6px rgba(0,0,0,.5);
+/* ---- Playlist fold cover: a real stack of the list's own thumbnails ---------
+   The card behind the cover used to be two blank offset rectangles drawn with
+   box-shadow — the right shape, but it said nothing about what was inside. Now
+   each layer IS the next video's thumbnail, cropped into the cover's box and
+   blurred back so the cover still reads first. The stack still works with two
+   videos (one layer) or with a missing image (the layer's surface shows). */
+.group-thumb { margin: 9px 20px 0 2px; }
+.group-visuals { position: relative; z-index: 1; display: block; }
+.group-visuals > .thumb { position: relative; z-index: 1; }
+.group-visuals > .thumb,
+.group-stack {
+  box-shadow: 0 1px 3px rgba(0,0,0,.35);
 }
+.group-stack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 120px;
+  z-index: 0;
+  line-height: 0;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--surface-2);
+  outline: 1px solid var(--border);
+  outline-offset: -1px;
+  pointer-events: none;
+}
+/* The offsets that make it read as a pile: up and to the right, each layer
+   dimmer than the one in front of it. Wide enough that the peeking strip is
+   actually a piece of the video behind — at a 5px step it was just an edge. */
+.group-stack-1 { transform: translate(7px, -7px); }
+.group-stack-2 { transform: translate(14px, -14px); }
+.group-stack .thumb {
+  width: 100%;
+  /* Forced into the COVER's aspect ratio — a portrait Short behind a landscape
+     cover would otherwise change the card's silhouette. */
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 0;
+  box-shadow: none;
+  filter: blur(2px) saturate(.9);
+}
+.group-stack-1 .thumb { opacity: .85; }
+.group-stack-2 .thumb { opacity: .62; }
+/* Keep every layer on the portrait cover's real, narrow canvas. Without this
+   the front image shrank after load but the fixed landscape backing layers did
+   not, leaving a clipped/offset first-level preview. */
+.group-thumb.portrait .group-stack { width: 68px; }
+.group-thumb.portrait .group-stack .thumb { aspect-ratio: 9 / 16; }
 /* Video count: bottom-left pill (mirrors the .dur position). */
 .group-count {
-  position: absolute; bottom: 5px; left: 5px;
+  position: absolute; z-index: 2; bottom: 5px; left: 5px;
   min-width: 16px; height: 17px; padding: 0 5px;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; font-weight: 700; line-height: 1;
@@ -994,12 +1069,21 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 /* Whole-list play button: bottom-right. A real <button>, so it needs the button
    reset the item badge (a passive <span>) does not. */
-.play-badge.group-play { cursor: pointer; border: none; padding: 0; }
+.play-badge.group-play { z-index: 2; cursor: pointer; border: none; padding: 0; }
 @media (hover: hover) {
   .group-play:hover { background: var(--accent); transform: scale(1.08); }
 }
 .group-play:focus-visible { background: var(--accent); transform: scale(1.08); }
-.group-info { flex: 1 1 auto; min-width: 0; padding-top: 1px; }
+.group-info {
+  /* The title column gets the same flexible body as a regular video. List
+     controls live below it rather than reserving a permanent right rail: on a
+     phone that rail could leave just a couple of words for the list name. */
+  flex: 1 1 0;
+  min-width: 0;
+  padding-top: 1px;
+  display: flex;
+  flex-direction: column;
+}
 .group-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* Live download speed of the currently-running child, shown after the summary
    text while the fold is downloading. */
@@ -1007,10 +1091,13 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 /* Aggregate download progress bar (total across all children). Reuses the item
    .progress look; capped so it doesn't run under the right-rail actions. */
 .group-progress { margin-top: 6px; max-width: 220px; }
-/* Right rail: chevron parked top-right, whole-list actions sunk to bottom-right
-   (past the info column) so share/download always land at the card's corner. */
-.group-side { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; }
-.group-side .group-actions { margin-top: auto; padding-top: 0; }
+/* Chevron is overlaid at the top-right rather than occupying a flex column.
+   That lets the bottom action row reach the same right edge as a normal card. */
+.group-side { position: absolute; top: 10px; right: 10px; display: flex; align-items: flex-end; pointer-events: none; }
+.group-info > .title,
+.group-info > .group-sub,
+.group-info > .group-progress { margin-right: 24px; }
+.group-info .group-actions { margin-top: auto; align-self: flex-end; padding-top: 0; max-width: 100%; }
 .group-chevron { flex: 0 0 auto; color: var(--muted); transition: transform .18s ease; }
 .group-card:not(.collapsed) .group-chevron { transform: rotate(180deg); }
 /* Collapsed by default: the child list is hidden until the header is tapped. */
@@ -1024,6 +1111,44 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 /* Nested child cards read as a sub-level: lighter surface, no double border. */
 .group-body .item { background: var(--surface-2); }
+/* X treats several attachments as one post. The first-level card owns its
+   caption/source; expanded children are an attachment grid, like a compact
+   media gallery. No repeated title consumes vertical space, so one row holds
+   several images and actions sit directly on the relevant thumbnail. */
+.post-media-group .group-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 6px;
+  padding: 8px;
+}
+.post-media-group .group-body .item {
+  position: relative;
+  display: block;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.post-media-group .group-body .thumb-wrap,
+.post-media-group .group-body .thumb,
+.post-media-group .group-body .thumb-wrap.portrait,
+.post-media-group .group-body .thumb-wrap.portrait .thumb {
+  width: 100%;
+  aspect-ratio: 1;
+}
+.post-media-group .group-body .thumb { border-radius: calc(var(--r-md) - 1px); }
+.post-media-group .group-body .compact-media-body { display: contents; }
+.post-media-group .group-body .actions {
+  position: absolute;
+  z-index: 4;
+  right: 4px;
+  bottom: 4px;
+  margin: 0;
+  padding: 3px;
+  gap: 5px;
+  border-radius: var(--r-sm);
+  background: rgb(0 0 0 / .52);
+}
+.post-media-group .group-body .actions .act { color: #fff; }
 /* Selection state on the fold header: full = accent, partial = dashed hint. */
 .group-head.selected {
   background: color-mix(in oklab, var(--accent) 14%, var(--surface));
@@ -1170,6 +1295,8 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   text-decoration: none;
 }
 .thumb-play { cursor: pointer; }
+.thumb-image { cursor: zoom-in; }
+.thumb-image:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
 /* Stable thumbnail box: the height is derived from the width via `aspect-ratio`,
    NOT from the card's content height. Previously the thumb was stretched to the
    card height (align-self:stretch + height:100%), so when a long title wrapped
@@ -1260,9 +1387,16 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
 .body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .title {
   font-weight: 600;
+  font-size: 16px;
+  line-height: 1.35;
   display: flex;
   align-items: flex-start;
   gap: 6px;
+  /* A first-level list header and a regular video deliberately share this
+     title primitive. Disable Android WebView's per-block font boosting here so
+     both always render at the declared 16px scale. */
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
 }
 /* Title text sits next to the source logo and clamps to two lines.
    `-webkit-line-clamp` is the pattern YouTube/Netflix/Spotify all use: it cuts on
@@ -1284,18 +1418,62 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
 }
 /* Per-site logo before the title: brand glyph on a small white chip so dark
    brand marks (X, TikTok) stay visible on the dark card. */
+/* ---- Site brand marks ----
+   Drawn bare, on the card itself: a white plate behind every logo turned each
+   row of an OLED-black UI into a white square, which reads as chrome rather than
+   as the site's mark.
+   Bare only works because each icon is classified by its own colour at build
+   time (see siteIconTones() in build.ts) and the few marks that would disappear
+   are handled below — nothing here is a per-brand hand-tuning. */
 .src-logo {
   flex: 0 0 auto;
   width: 20px;
   height: 20px;
   box-sizing: border-box;
-  padding: 2px;
-  border-radius: var(--r-xs);
-  background: #fff;
   object-fit: contain;
   margin-top: 1px;
 }
+/* Same mark on the site registry cards, sitting on the row's baseline rather
+   than a title line's, so it needs no nudge. */
+.site-logo { margin-top: 0; }
+
+/* Dark is the default theme (see the palette block at the top), so the dark-theme
+   treatments are the unguarded rules and the two light cases below undo them.
+
+   `mono` marks are pure black by brand definition (X, TikTok, Threads, Tidal,
+   Patreon, 9GAG, Dailymotion, Niconico) and every one of those brands publishes
+   the same rule: black on light, white on dark. Inverting the ink is exactly that
+   rule, and it's the same one-asset-two-themes trick .brand-logo uses.
+   `deep` marks are coloured but too dark to read on black; inverting would throw
+   the hue away, so those — and only those — keep a plate. */
+.src-logo[data-tone='mono'] { filter: invert(1); }
+.src-logo[data-tone='deep'] {
+  padding: 2px;
+  border-radius: var(--r-xs);
+  background: #fff;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .src-logo[data-tone='mono'] { filter: none; }
+  :root:not([data-theme='dark']) .src-logo[data-tone='deep'] { padding: 0; background: none; }
+  :root:not([data-theme='dark']) .src-logo[data-tone='neon'] {
+    padding: 2px;
+    border-radius: var(--r-xs);
+    background: #16161a;
+  }
+}
+:root[data-theme='light'] .src-logo[data-tone='mono'] { filter: none; }
+:root[data-theme='light'] .src-logo[data-tone='deep'] { padding: 0; background: none; }
+:root[data-theme='light'] .src-logo[data-tone='neon'] {
+  padding: 2px;
+  border-radius: var(--r-xs);
+  background: #16161a;
+}
 .uploader { color: var(--muted); font-size: 13px; margin-top: 2px; }
+/* When the uploader name is a link to their page, it stays as quiet as the plain
+   text until hovered — a jump-off point, not a call to action. inline-block so it
+   only spans the name (the whole row isn't a click target) and keeps the nudge. */
+a.uploader-link { display: inline-block; text-decoration: none; cursor: pointer; }
+a.uploader-link:hover { color: var(--text); text-decoration: underline; }
 
 .statusline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 
@@ -1363,7 +1541,7 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
 @media (hover: hover) {
   .act:hover { color: var(--accent); }
 }
-.act svg { display: block; }
+.act svg { display: block; width: 18px; height: 18px; }
 /* Delete (trash) action: neutral by default, red on hover — its destructive
    intent, and it always routes through the confirm dialog. */
 .act-del:hover { color: var(--err); }
@@ -1429,6 +1607,10 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
    the card rather than three. */
 .chip-spin svg { width: 13px; height: 13px; animation: spin .8s linear infinite; }
 .chip-dl { color: var(--run); }
+/* Queued: waiting its turn, not working. Muted and STILL — the absence of motion
+   is the signal that separates it from .chip-dl's live spinner. */
+.chip-queued { color: var(--muted); }
+.chip-queued .dl-res { color: var(--muted); font-weight: 600; }
 .dl-res { color: var(--run); font-weight: 700; font-variant-numeric: tabular-nums; }
 /* The measured part of a chip stands out from its label/icon. */
 .hits-n { color: var(--text); }
@@ -1619,6 +1801,18 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   object-fit: contain;
   background: #000;
 }
+.player-image {
+  width: 100%;
+  height: 100%;
+  max-height: 100dvh;
+  display: none;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  background: #000;
+}
+.player-overlay[data-kind="image"] .player-video { display: none; }
+.player-overlay[data-kind="image"] .player-image { display: block; }
 .player-close {
   position: absolute;
   top: calc(env(safe-area-inset-top) + 10px);
@@ -1633,6 +1827,31 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
+}
+.player-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: rgb(0 0 0 / .45);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: opacity .18s ease, background-color .18s ease;
+}
+.player-nav.player-nav-idle { opacity: 0; pointer-events: none; }
+.player-nav svg { display: block; }
+.player-prev { left: max(12px, env(safe-area-inset-left)); }
+.player-next { right: max(12px, env(safe-area-inset-right)); }
+@media (hover: hover) { .player-nav:hover { background: rgb(0 0 0 / .7); } }
+@media (max-width: 520px) {
+  .player-nav { width: 40px; height: 40px; }
 }
 /* Freeze the list behind the player. */
 body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
@@ -1831,8 +2050,11 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 @media (max-width: 420px) {
   /* Only the width narrows on small screens; the height follows from the fixed
      aspect-ratio (no explicit height, so no force-compression / crop). */
-  .thumb-wrap, .thumb { width: 96px; }
+  .thumb-wrap, .thumb, .group-stack { width: 96px; }
   .thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 60px; }
+  .item { gap: 8px; }
+  .title { font-size: 16px; }
+  .uploader { font-size: 13px; }
 }
 
 /* ---- Diagnostics error log (settings) ----------------------------------- */

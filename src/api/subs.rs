@@ -253,11 +253,10 @@ async fn remote_track(state: &AppState, item: &Item, lang: &str) -> Result<Strin
         state.cfg.cookies.as_deref(),
         &item.webpage_url,
     );
-    let cookie_header = super::media::cookie_header_for(cookie_file.as_deref(), &sub.url);
     let bytes = super::media::fetch_upstream_bytes(
         &sub.url,
         &item.webpage_url,
-        cookie_header,
+        cookie_file.as_deref(),
         state.cfg.allow_private_dns,
         MAX_SUB_BYTES as usize,
     )

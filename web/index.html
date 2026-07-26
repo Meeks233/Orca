@@ -10,7 +10,8 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" media="(prefers-color-scheme: light)">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32-dark.png" media="(prefers-color-scheme: dark)">
   <link rel="apple-touch-icon" href="/icons/apple-touch-180.png">
   <!-- Anti-FOUC: apply a forced Light/Dark override before first paint. Absent
        (or "system") it falls through to the CSS prefers-color-scheme default. -->
@@ -27,7 +28,7 @@
        in a shared box would drag it off-screen as soon as that box scrolled. -->
   <header class="topbar">
     <div class="brand-wrap">
-      <!-- Brand mark. Black line art on a transparent ground, inverted to white
+      <!-- Brand mark. Black-and-white art on a transparent ground, inverted
            in dark mode by CSS — see .brand-logo in style.css. -->
       <img id="brand-logo" class="brand-logo" src="/icons/logo.png" width="26" height="26" alt="Orca">
       <!-- Server status heartbeat: green + breathing while the SSE stream is
@@ -336,11 +337,14 @@
     </div>
   </div>
 
-  <!-- In-app fullscreen player. Opened by tapping a completed thumbnail; the
-       Android back button pops it (see app.js) instead of exiting the app. -->
+  <!-- Native media viewer. Video uses browser controls; a saved still uses its
+       <img> renderer, so tapping an image never opens the upstream post. -->
   <div id="player" class="player-overlay hidden" aria-hidden="true">
     <button id="player-close" class="player-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    <button id="player-prev" class="player-nav player-prev hidden" type="button" aria-label="Previous item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+    <button id="player-next" class="player-nav player-next hidden" type="button" aria-label="Next item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
     <video id="player-video" class="player-video" crossorigin="anonymous" controls playsinline autoplay></video>
+    <img id="player-image" class="player-image" alt="">
   </div>
 
   <!-- Share dialog (Baidu-netdisk style). Opened by the share icon on a

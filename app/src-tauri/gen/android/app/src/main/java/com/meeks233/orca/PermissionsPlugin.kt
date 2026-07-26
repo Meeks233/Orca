@@ -61,6 +61,8 @@ class SaveArgs {
   /** Pixel height being saved; 0 when unknown. Lets a later, taller save
    *  recognise itself as an upgrade of this one. */
   var height: Int = 0
+  /** `image` saves to Pictures/Orca; all other values go to Downloads/Orca. */
+  var mediaType: String? = null
 }
 
 @InvokeArg
@@ -242,7 +244,7 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
       invoke.reject("storage_denied")
       return
     }
-    DownloadService.save(activity, url, args.name.orEmpty(), args.slug.orEmpty(), args.height)
+    DownloadService.save(activity, url, args.name.orEmpty(), args.slug.orEmpty(), args.height, args.mediaType.orEmpty())
     invoke.resolve(statusObject())
   }
 

@@ -10,3 +10,5 @@
 !src/**
 !web/
 !web/**
+!ytdlp-plugins/
+!ytdlp-plugins/**

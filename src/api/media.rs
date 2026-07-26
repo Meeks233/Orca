@@ -176,8 +176,35 @@ pub async fn stream(
     let path = req.uri().path().to_string();
     let session_key =
         super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
-    let (item, upstream, cookie) = resolve_stream_target(&state, &slug, height_param(&query)).await?;
-    let cookie_header = cookie_header_for(cookie.as_deref(), &upstream);
+    let item = state
+        .db
+        .find_by_slug(&slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    ensure_streamable(item.status)?;
+    // A finished download is the same media, already here. Serve it rather than
+    // asking yt-dlp to resolve the source again: a client that reaches this route
+    // for an item whose file it doesn't know about yet — its row was rendered
+    // while the download was still running, a play queue built from that row, a
+    // deep link — otherwise waits on a fresh probe, and gets "could not resolve
+    // stream from source" when the site refuses one, for a video sitting on disk.
+    if item.status == Status::Completed {
+        if let Ok(file_path) = resolve_local_file(&state.cfg.download_dir, &item) {
+            return match session_key {
+                Some(key) => {
+                    let range = req
+                        .headers()
+                        .get(crate::e2ee::HEADER_RANGE_REQ)
+                        .and_then(|v| v.to_str().ok());
+                    // Sealed under this route's own resource name, so the Service
+                    // Worker decrypts it exactly as it would a proxied window.
+                    emedia::serve_file(&key, &format!("stream:{slug}"), &file_path, range).await
+                }
+                None => serve_item(&state.cfg.download_dir, item, req).await,
+            };
+        }
+    }
+    let (upstream, cookie) = resolve_stream_source(&state, &item, height_param(&query)).await?;
 
     match session_key {
         // Secure channel: proxy the upstream window and seal it for the SW.
@@ -191,7 +218,7 @@ pub async fn stream(
                 &slug,
                 &upstream,
                 &item.webpage_url,
-                cookie_header,
+                cookie.as_deref(),
                 range,
                 state.cfg.allow_private_dns,
             )
@@ -209,7 +236,7 @@ pub async fn stream(
             proxy_upstream(
                 &upstream,
                 &item.webpage_url,
-                cookie_header,
+                cookie.as_deref(),
                 range,
                 state.cfg.allow_private_dns,
                 stream_pacing(&item),
@@ -229,7 +256,7 @@ async fn stream_encrypted(
     slug: &str,
     upstream: &str,
     referer: &str,
-    cookie_header: Option<String>,
+    cookies: Option<&FsPath>,
     range: Option<&str>,
     allow_private_dns: bool,
 ) -> Result<Response, AppError> {
@@ -243,7 +270,7 @@ async fn stream_encrypted(
     let (slab, total) = fetch_upstream_window(
         upstream,
         referer,
-        cookie_header,
+        cookies,
         &fetch_range,
         allow_private_dns,
         window_bytes,
@@ -302,6 +329,20 @@ async fn resolve_stream_target(
         .await?
         .ok_or(AppError::NotFound)?;
     ensure_streamable(item.status)?;
+    let (upstream, cookie) = resolve_stream_source(state, &item, max_height).await?;
+    Ok((item, upstream, cookie))
+}
+
+/// Resolve an already-loaded item's upstream media URL (and the cookie jar the
+/// fetch needs). Split out of [`resolve_stream_target`] so `stream` can look the
+/// item up once, answer from the local file when there is one, and only then pay
+/// for the resolve.
+async fn resolve_stream_source(
+    state: &AppState,
+    item: &Item,
+    max_height: Option<i64>,
+) -> Result<(String, Option<std::path::PathBuf>), AppError> {
+    let slug = &item.slug;
     // Defense in depth: re-validate the stored page URL before yt-dlp fetches it.
     crate::net_guard::guard(&item.webpage_url, state.cfg.allow_private_dns)
         .await
@@ -325,17 +366,17 @@ async fn resolve_stream_target(
         )
         .await
         .map_err(|e| AppError::Internal(format!("stream url resolve failed: {e}")))?;
-    Ok((item, upstream, cookie))
+    Ok((upstream, cookie))
 }
 
 /// Fetch `upstream` from this server and stream it back to the client, mirroring
 /// the headers a `<video>` needs to play and seek. `referer` is the original
-/// page URL (some CDNs gate on it); `cookie_header`, if present, carries the
-/// session for cookie-gated media.
+/// page URL (some CDNs gate on it); `cookies`, if present, is the site's jar,
+/// scoped per redirect hop by [`guarded_get`].
 async fn proxy_upstream(
     upstream: &str,
     referer: &str,
-    cookie_header: Option<String>,
+    cookies: Option<&FsPath>,
     range: Option<String>,
     allow_private_dns: bool,
     pacing: Option<(u64, u64)>,
@@ -343,7 +384,7 @@ async fn proxy_upstream(
     let resp = guarded_get(
         upstream,
         referer,
-        cookie_header.as_deref(),
+        cookies,
         range.as_deref(),
         allow_private_dns,
     )
@@ -530,19 +571,12 @@ async fn proxy_client(allow_private_dns: bool) -> Result<&'static reqwest::Clien
 async fn guarded_get(
     upstream: &str,
     referer: &str,
-    cookie_header: Option<&str>,
+    cookies: Option<&FsPath>,
     range: Option<&str>,
     allow_private_dns: bool,
 ) -> Result<reqwest::Response, AppError> {
     let client = proxy_client(allow_private_dns).await?;
     let mut url = upstream.to_string();
-    // The cookies were scoped to the host we were *asked* to fetch (see
-    // `cookie_header_for`). The Location of a redirect is chosen by the upstream,
-    // so replaying them on a hop to a different host would hand that host the
-    // site's session — the classic way a proxied fetch leaks credentials. Send
-    // them only while we are still on the original host; a hop away drops them,
-    // and a hop back legitimately gets them again.
-    let origin_host = host_of(upstream);
     let mut redirects = 0;
     loop {
         crate::net_guard::guard(&url, allow_private_dns)
@@ -553,7 +587,15 @@ async fn guarded_get(
             .get(&url)
             .header(reqwest::header::USER_AGENT, PROXY_UA)
             .header(reqwest::header::REFERER, referer);
-        if let Some(c) = cookie_header.filter(|_| host_of(&url) == origin_host) {
+        // Scope the jar to the hop we are about to make, not to the URL we were
+        // originally handed. The Location of a redirect is chosen by the upstream,
+        // so a header built once and replayed hands whatever host it names the
+        // site's session — the classic way a proxied fetch leaks credentials.
+        // Re-deriving per hop applies domain, path, `Secure` and expiry to the URL
+        // actually being fetched: a hop to another host selects nothing, a hop back
+        // legitimately selects again, and an https→http hop drops `Secure` cookies
+        // instead of putting them on the wire in the clear.
+        if let Some(c) = cookie_header_for(cookies, &url) {
             rb = rb.header(reqwest::header::COOKIE, c);
         }
         if let Some(r) = range {
@@ -626,15 +668,6 @@ fn playable_content_type(upstream: &str) -> String {
     }
 }
 
-/// Lowercased host of a URL, or `None` if it has none. Used to decide whether a
-/// redirect has left the host the request's credentials belong to.
-fn host_of(url: &str) -> Option<String> {
-    reqwest::Url::parse(url)
-        .ok()?
-        .host_str()
-        .map(|h| h.to_ascii_lowercase())
-}
-
 /// Buffer a response body into memory under a hard byte budget, streaming it
 /// chunk by chunk and giving up the moment the budget is passed.
 ///
@@ -673,7 +706,7 @@ async fn read_capped(
 async fn fetch_upstream_window(
     upstream: &str,
     referer: &str,
-    cookie_header: Option<String>,
+    cookies: Option<&FsPath>,
     range: &str,
     allow_private_dns: bool,
     cap: usize,
@@ -681,7 +714,7 @@ async fn fetch_upstream_window(
     let resp = guarded_get(
         upstream,
         referer,
-        cookie_header.as_deref(),
+        cookies,
         Some(range),
         allow_private_dns,
     )
@@ -817,20 +850,20 @@ pub(super) async fn thumbnail_data_uri(
 
 /// Fetch a small upstream text resource (a subtitle track) fully into memory,
 /// SSRF-guarding every redirect hop the way `proxy_upstream` does and carrying the
-/// session `cookie_header` for cookie-gated CDNs. `max_bytes` caps the buffer so a
-/// hostile row can't stream an unbounded body into memory. Returns the raw bytes;
-/// the caller decodes and converts them.
+/// site's `cookies` (scoped per hop) for cookie-gated CDNs. `max_bytes` caps the
+/// buffer so a hostile row can't stream an unbounded body into memory. Returns the
+/// raw bytes; the caller decodes and converts them.
 pub(super) async fn fetch_upstream_bytes(
     upstream: &str,
     referer: &str,
-    cookie_header: Option<String>,
+    cookies: Option<&FsPath>,
     allow_private_dns: bool,
     max_bytes: usize,
 ) -> Result<Vec<u8>, AppError> {
     let resp = guarded_get(
         upstream,
         referer,
-        cookie_header.as_deref(),
+        cookies,
         None,
         allow_private_dns,
     )
@@ -867,7 +900,7 @@ fn sanitize_slug(slug: &str) -> String {
 
 /// Build a scope-correct `Cookie:` header for an upstream URL from a Netscape
 /// cookies.txt. Domain, host-only, path, Secure, and expiry rules are enforced.
-pub(super) fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) -> Option<String> {
+fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) -> Option<String> {
     let text = std::fs::read_to_string(cookie_file?).ok()?;
     let url = reqwest::Url::parse(upstream).ok()?;
     let host = url.host_str()?.to_ascii_lowercase();
@@ -1070,18 +1103,6 @@ mod tests {
     }
 
     #[test]
-    fn host_of_is_case_folded_and_scheme_agnostic() {
-        assert_eq!(host_of("https://CDN.Example.com/a"), host_of("http://cdn.example.com:8080/b"));
-        assert_ne!(host_of("https://cdn.example.com/a"), host_of("https://evil.test/a"));
-        // A sub-domain is a different host: cookies must not follow it either.
-        assert_ne!(
-            host_of("https://example.com/a"),
-            host_of("https://media.example.com/a")
-        );
-        assert_eq!(host_of("not a url"), None);
-    }
-
-    #[test]
     fn bitrate_prefers_true_size_over_duration() {
         // 10 MB over 40 s = 2 Mbit/s — the true figure wins over the height ladder.
         assert_eq!(
@@ -1188,6 +1209,33 @@ mod tests {
         assert!(cookie_header_for(Some(f.path()), "https://youtube.com/watch").is_none());
         // No file at all → None.
         assert!(cookie_header_for(None, "https://video.x.com/media").is_none());
+    }
+
+    /// `guarded_get` re-derives the `Cookie` header from the jar at every hop, so
+    /// this walks a hostile redirect chain the way that loop does and asserts what
+    /// each hop would actually be sent. The Location of a hop is chosen by the
+    /// upstream, so every one of these is attacker-reachable.
+    #[test]
+    fn every_redirect_hop_is_scoped_on_its_own() {
+        let f = write_cookies(
+            "# Netscape HTTP Cookie File\n\
+             .x.com\tTRUE\t/media\tTRUE\t0\tauth_token\tSECRET\n",
+        );
+        let hop = |u: &str| cookie_header_for(Some(f.path()), u);
+
+        // The hop we were asked to make: in scope, cookies ride.
+        assert_eq!(hop("https://video.x.com/media/1").as_deref(), Some("auth_token=SECRET"));
+        // Redirected off-host — the session must not follow.
+        assert!(hop("https://evil.test/media/1").is_none());
+        // …not even to a host that merely *contains* the name.
+        assert!(hop("https://x.com.evil.test/media/1").is_none());
+        // Downgraded to plaintext on the same host: a `Secure` cookie must not go
+        // on the wire in the clear just because the host still matches.
+        assert!(hop("http://video.x.com/media/1").is_none());
+        // Redirected out of the cookie's path scope on the same host.
+        assert!(hop("https://video.x.com/other").is_none());
+        // A hop back into scope legitimately gets them again.
+        assert_eq!(hop("https://video.x.com/media/2").as_deref(), Some("auth_token=SECRET"));
     }
 
     #[test]

@@ -52,6 +52,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/YTDLP_SHA256
 COPY --from=builder /app/orca /usr/local/bin/orca
 RUN useradd -m -u 10001 orca && mkdir -p /data /downloads && chown orca /data /downloads
+# yt-dlp extractor plugins we ship ourselves (currently e621/e926/e6ai, which
+# upstream doesn't support at all). yt-dlp auto-loads every package under
+# ~/.config/yt-dlp/plugins, so no extra flag is needed on the probe/download
+# command lines — see ytdlp-plugins/README.md.
+COPY --chown=orca ytdlp-plugins/ /home/orca/.config/yt-dlp/plugins/
 USER orca
 ENV ORCA_DATA_DIR=/data ORCA_DOWNLOAD_DIR=/downloads ORCA_BIND=0.0.0.0:8080
 VOLUME ["/data", "/downloads"]

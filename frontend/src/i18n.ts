@@ -203,6 +203,11 @@ declare global {
       'item.upgrade': 'Upgrade',
       'item.cancel': 'Cancel',
       'item.downloading': 'Downloading',
+      'item.queued': 'Queued',
+      'group.cancelAll': 'Cancel all downloads in this list',
+      'group.cancelSub': 'Stop the {n} download(s) still outstanding in this list. Finished videos are kept.',
+      'group.cancelTitle': 'Stop these downloads?',
+      'group.cancelDo': 'Stop downloads',
       'queue.cancelAll': 'Cancel all downloads',
       'toast.canceledN': 'Canceled {n} download(s)',
       'toast.cancelFail': 'Could not cancel the download',
@@ -360,6 +365,8 @@ declare global {
       'status.duplicate': 'duplicate',
 
       'aria.save': 'Save',
+      'aria.saveImage': 'Save image',
+      'aria.downloadVideo': 'Download video',
       'aria.share': 'Share',
       'aria.delete': 'Delete',
 
@@ -582,6 +589,11 @@ declare global {
       'item.upgrade': '升级',
       'item.cancel': '取消',
       'item.downloading': '正在下载',
+      'item.queued': '排队中',
+      'group.cancelAll': '取消整个列表的下载',
+      'group.cancelSub': '停止此列表中剩余的 {n} 个下载，已完成的视频会保留。',
+      'group.cancelTitle': '停止这些下载？',
+      'group.cancelDo': '停止下载',
       'queue.cancelAll': '取消全部下载',
       'toast.canceledN': '已取消 {n} 个下载',
       'toast.cancelFail': '无法取消该下载',
@@ -739,6 +751,8 @@ declare global {
       'status.duplicate': '重复',
 
       'aria.save': '保存',
+      'aria.saveImage': '保存图片',
+      'aria.downloadVideo': '下载视频',
       'aria.share': '分享',
       'aria.delete': '删除',
 
@@ -961,6 +975,11 @@ declare global {
       'item.upgrade': '升級',
       'item.cancel': '取消',
       'item.downloading': '正在下載',
+      'item.queued': '排隊中',
+      'group.cancelAll': '取消整個列表的下載',
+      'group.cancelSub': '停止此列表中剩餘的 {n} 個下載，已完成的影片會保留。',
+      'group.cancelTitle': '停止這些下載？',
+      'group.cancelDo': '停止下載',
       'queue.cancelAll': '取消全部下載',
       'toast.canceledN': '已取消 {n} 個下載',
       'toast.cancelFail': '無法取消該下載',
@@ -1118,6 +1137,8 @@ declare global {
       'status.duplicate': '重複',
 
       'aria.save': '儲存',
+      'aria.saveImage': '儲存圖片',
+      'aria.downloadVideo': '下載影片',
       'aria.share': '分享',
       'aria.delete': '刪除',
 

@@ -160,6 +160,17 @@ pub(crate) fn parse_dump_json_line(line: &str) -> Option<ProbeResult> {
         .or_else(|| v.get("channel").and_then(|x| x.as_str()))
         .map(|s| s.to_string());
 
+    // The uploader's own page, so the UI can link the name back to who posted it.
+    // `uploader_url` names the person; `channel_url` is the fallback for sites that
+    // only surface the channel. Only keep an http(s) address — a stray scheme has
+    // no business becoming a link.
+    let uploader_url = v
+        .get("uploader_url")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("channel_url").and_then(|x| x.as_str()))
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .map(|s| s.to_string());
+
     let thumbnail_url = v
         .get("thumbnail")
         .and_then(|x| x.as_str())
@@ -175,19 +186,55 @@ pub(crate) fn parse_dump_json_line(line: &str) -> Option<ProbeResult> {
     // (only when siblings share a webpage_url).
     let playlist_index = v.get("playlist_index").and_then(|x| x.as_i64());
 
+    // The collection this entry came from, when the submitted URL was a playlist.
+    // Namespaced by extractor so two sites can't collide on a bare list id. Kept
+    // apart from `playlist_index` on purpose: this is descriptive metadata for the
+    // UI fold, never an argument to the download (see migration 0024).
+    let playlist = v
+        .get("playlist_id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|id| crate::types::PlaylistRef {
+            key: format!("{extractor}:{id}"),
+            title: v
+                .get("playlist_title")
+                .or_else(|| v.get("playlist"))
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            pos: playlist_index,
+        });
+
     // Distinct source heights, captured now so the resolution picker reads them
     // from the DB instead of re-probing on first open.
-    let available_heights = heights_from_json(&v);
+    let media_type = match v
+        .get("ext")
+        .and_then(|x| x.as_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("avif" | "bmp" | "gif" | "heic" | "heif" | "jpeg" | "jpg" | "png" | "webp") => "image",
+        _ => "video",
+    }
+    .to_string();
+    let available_heights = if media_type == "image" {
+        Vec::new()
+    } else {
+        heights_from_json(&v)
+    };
 
     Some(ProbeResult {
         extractor,
         video_id,
         title,
         uploader,
+        uploader_url,
         thumbnail_url,
         duration,
         webpage_url,
+        media_type,
         playlist_index,
+        playlist,
         available_heights,
     })
 }
@@ -215,6 +262,30 @@ mod tests {
     }
 
     #[test]
+    fn marks_still_images_for_the_image_download_path() {
+        let image = parse_dump_json_line(
+            r#"{"extractor":"generic","id":"photo","title":"Photo","webpage_url":"https://example.com/photo.jpg","ext":"jpg","height":1200}"#,
+        )
+        .unwrap();
+        assert_eq!(image.media_type, "image");
+        assert!(image.available_heights.is_empty());
+    }
+
+    #[test]
+    fn parses_playlist_collection_for_a_list_entry() {
+        // A playlist URL: every entry carries the list's id/title alongside its own.
+        let line = r#"{"extractor":"youtube","id":"abc123","title":"Ep 1","webpage_url":"https://www.youtube.com/watch?v=abc123","playlist_id":"PL999","playlist_title":"My Mix","playlist_index":1}"#;
+        let pl = parse_dump_json_line(line).unwrap().playlist.unwrap();
+        assert_eq!(pl.key, "youtube:PL999");
+        assert_eq!(pl.title.as_deref(), Some("My Mix"));
+        assert_eq!(pl.pos, Some(1));
+
+        // A standalone video reports no list at all.
+        let solo = r#"{"extractor":"youtube","id":"abc123","title":"Ep 1","webpage_url":"https://www.youtube.com/watch?v=abc123"}"#;
+        assert!(parse_dump_json_line(solo).unwrap().playlist.is_none());
+    }
+
+    #[test]
     fn uploader_falls_back_to_channel() {
         let line = r#"{"extractor":"youtube","id":"abc123","title":"Clip","uploader":null,"channel":"Some Channel","webpage_url":"https://example.com/watch?v=abc123"}"#;
 
@@ -228,6 +299,32 @@ mod tests {
 
         let r = parse_dump_json_line(line).expect("should parse");
         assert_eq!(r.uploader.as_deref(), Some("Only Channel"));
+    }
+
+    #[test]
+    fn uploader_url_prefers_uploader_url_then_channel_url() {
+        let line = r#"{"extractor":"youtube","id":"abc123","title":"Clip","uploader_url":"https://youtube.com/@rick","channel_url":"https://youtube.com/channel/UC123","webpage_url":"https://example.com/watch?v=abc123"}"#;
+        let r = parse_dump_json_line(line).unwrap();
+        assert_eq!(r.uploader_url.as_deref(), Some("https://youtube.com/@rick"));
+
+        // No uploader_url → fall back to channel_url.
+        let ch = r#"{"extractor":"youtube","id":"abc123","title":"Clip","channel_url":"https://youtube.com/channel/UC123","webpage_url":"https://example.com/watch?v=abc123"}"#;
+        assert_eq!(
+            parse_dump_json_line(ch).unwrap().uploader_url.as_deref(),
+            Some("https://youtube.com/channel/UC123")
+        );
+    }
+
+    #[test]
+    fn uploader_url_rejects_non_http_scheme_and_absence() {
+        // A non-http(s) scheme has no business becoming a link.
+        let bad = r#"{"extractor":"x","id":"1","title":"t","uploader_url":"javascript:alert(1)","webpage_url":"https://example.com/1"}"#;
+        assert_eq!(parse_dump_json_line(bad).unwrap().uploader_url, None);
+
+        // Neither field present → None.
+        let none =
+            r#"{"extractor":"x","id":"1","title":"t","webpage_url":"https://example.com/1"}"#;
+        assert_eq!(parse_dump_json_line(none).unwrap().uploader_url, None);
     }
 
     #[test]

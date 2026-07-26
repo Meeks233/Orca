@@ -308,6 +308,14 @@ export function pushSessionToWorker(): void {
   if (cached) notifyWorker(cached);
 }
 
+/// Renew the secure-channel session after the worker receives a 401. A server
+/// restart invalidates its in-memory session store; re-sending the cached key
+/// would only repeat the failure, so this must force a fresh handshake first.
+export function refreshSessionForWorker(): void {
+  if (!cached || !cachedToken) return;
+  void ensureSession(cached.base, cachedToken, true).catch(() => { /* worker times out and reports the fetch failure */ });
+}
+
 /// Rebuild a `Session` from the raw material handed to the service worker over
 /// `postMessage` (the SW never handshakes itself).
 export async function sessionFromRaw(base: string, sid: string, keyB64: string): Promise<Session> {

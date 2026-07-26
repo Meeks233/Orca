@@ -91,10 +91,10 @@ object MediaSaver {
    * against ONE directory read instead of one per item. Sizes come straight from
    * the listing — no file is opened, and nothing is decoded.
    */
-  class FolderIndex(dir: File, claimed: Set<String>) {
+  class FolderIndex(dirs: List<File>, claimed: Set<String>) {
     /** Every regular file in the folder, keyed by exact byte length. */
     private val bySize: Map<Long, List<File>> =
-      (dir.listFiles() ?: emptyArray())
+      dirs.flatMap { it.listFiles()?.asList() ?: emptyList() }
         .filter { it.isFile && it.name != ".nomedia" && !it.name.endsWith(".part") }
         .groupBy { it.length() }
 
@@ -175,12 +175,12 @@ object MediaSaver {
     return deleted
   }
 
-  /** A folder index for the active save folder, pre-claiming every registered path. */
+  /** Index both video and image save folders, pre-claiming registered paths. */
   fun folderIndex(ctx: Context): FolderIndex {
     val claimed = filesPrefs(ctx).all.values.mapNotNull { raw ->
       try { org.json.JSONObject(raw as String).getString("path") } catch (_: Exception) { null }
     }.toSet()
-    return FolderIndex(dir(ctx), claimed)
+    return FolderIndex(listOf(dir(ctx), imageDir(ctx)), claimed)
   }
 
   /** Re-point registry entries after [setHidden] moves files between folders. */
@@ -220,6 +220,12 @@ object MediaSaver {
   fun dir(ctx: Context, hidden: Boolean = isHidden(ctx)): File = File(
     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
     if (hidden) HIDDEN_DIR else VISIBLE_DIR,
+  )
+
+  /** Images intentionally live in Pictures/Orca so Gallery can discover them. */
+  private fun imageDir(ctx: Context): File = File(
+    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+    VISIBLE_DIR,
   )
 
   /**
@@ -302,12 +308,14 @@ object MediaSaver {
     fallbackName: String,
     slug: String = "",
     height: Int = 0,
+    mediaType: String = "",
     onProgress: (pct: Int) -> Unit,
   ): File {
     check(granted(ctx)) { "storage permission not granted" }
-    val dir = dir(ctx)
+    val isImage = mediaType == "image"
+    val dir = if (isImage) imageDir(ctx) else dir(ctx)
     if (!dir.mkdirs() && !dir.isDirectory) error("can't create ${dir.absolutePath}")
-    applyNomedia(dir, isHidden(ctx))
+    applyNomedia(dir, !isImage && isHidden(ctx))
 
     val conn = (URL(url).openConnection() as HttpURLConnection).apply {
       requestMethod = "GET"

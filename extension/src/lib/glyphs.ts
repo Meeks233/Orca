@@ -2,7 +2,16 @@
 // and the toolbar-icon state machine (rasterised onto an OffscreenCanvas).
 // Path data is the exact lucide artwork the product spec calls for.
 
-export type GlyphName = 'cloudDownload' | 'loader' | 'x' | 'cloudCheck' | 'retry';
+export type GlyphName =
+  | 'cloudDownload'
+  | 'loader'
+  | 'x'
+  | 'cloudCheck'
+  | 'retry'
+  | 'clock'
+  | 'check'
+  | 'squareCheck'
+  | 'globeOff';
 
 export const GLYPH_PATHS: Record<GlyphName, string[]> = {
   cloudDownload: [
@@ -23,6 +32,15 @@ export const GLYPH_PATHS: Record<GlyphName, string[]> = {
     'm17 15-5.5 5.5L9 18',
     'M5.516 16.07A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 3.501 7.327',
   ],
+  // lucide clock — a download the server has accepted but not started. It is
+  // deliberately STILL: a spinner claims work is happening, and for the 45 items
+  // behind the one actually downloading, nothing is.
+  clock: ['M12 6v6l4 2', 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z'],
+  // lucide check — the tick drawn inside a selected thumbnail's checkbox.
+  check: ['M20 6 9 17l-5-5'],
+  // lucide square-check-big — the multi-select toggle affordance.
+  squareCheck: ['M21 10.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11.5', 'm9 11 3 3L22 4'],
+  globeOff: ['M10.114 4.462A14.5 14.5 0 0 1 12 2a10 10 0 0 1 9.313 13.643', 'M15.557 15.556A14.5 14.5 0 0 1 12 22 10 10 0 0 1 4.929 4.929', 'M15.892 10.234A14.5 14.5 0 0 0 12 2a10 10 0 0 0-3.643.687', 'M17.656 12H22', 'M19.071 19.071A10 10 0 0 1 12 22 14.5 14.5 0 0 1 8.44 8.45', 'M2 12h10', 'm2 2 20 20'],
 };
 
 /** lucide viewBox side length. */

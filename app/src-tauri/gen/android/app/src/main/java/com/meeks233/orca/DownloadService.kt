@@ -82,8 +82,9 @@ class DownloadService : Service() {
       // which is a different item from the one being saved.
       val saveSlug = intent.getStringExtra(EXTRA_SAVE_SLUG).orEmpty()
       val height = intent.getIntExtra(EXTRA_SAVE_HEIGHT, 0)
+      val mediaType = intent.getStringExtra(EXTRA_SAVE_MEDIA_TYPE).orEmpty()
       submitting.incrementAndGet()
-      Thread { saveToDevice(saveUrl, name, saveSlug, height) }.start()
+      Thread { saveToDevice(saveUrl, name, saveSlug, height, mediaType) }.start()
     }
 
     if (tracked.isEmpty() && submitting.get() == 0) stopSelf()
@@ -283,7 +284,7 @@ class DownloadService : Service() {
    * notification. Every outcome is surfaced: a silent failure here is exactly
    * the bug this feature exists to fix.
    */
-  private fun saveToDevice(url: String, name: String, slug: String, height: Int) {
+  private fun saveToDevice(url: String, name: String, slug: String, height: Int, mediaType: String) {
     val notif = SAVE_NOTIF_BASE + (url.hashCode() and 0x0ffffff)
     val title = name.ifEmpty { "Orca" }
     try {
@@ -296,7 +297,7 @@ class DownloadService : Service() {
       }
       postNotif(applicationContext, notif, title, "Saving to device…", null, true, 0)
       var lastShown = -1
-      val saved = MediaSaver.save(applicationContext, url, name, slug, height) { pct ->
+      val saved = MediaSaver.save(applicationContext, url, name, slug, height, mediaType) { pct ->
         // Repaint at most once per whole percent (MediaSaver already dedupes)
         // and never re-alert — a progress bar that buzzes is a bug.
         if (pct != lastShown) {
@@ -304,9 +305,10 @@ class DownloadService : Service() {
           postNotif(applicationContext, notif, title, "Saving to device… $pct%", null, true, pct)
         }
       }
+      val location = if (mediaType == "image") "Pictures" else "Downloads"
       val folder = saved.parentFile?.name ?: MediaSaver.VISIBLE_DIR
-      postNotif(applicationContext, notif, title, "Saved to Downloads/$folder", null, false, -1)
-      toast(applicationContext, "Orca · Saved to Downloads/$folder")
+      postNotif(applicationContext, notif, title, "Saved to $location/$folder", null, false, -1)
+      toast(applicationContext, "Orca · Saved to $location/$folder")
     } catch (e: Exception) {
       Log.e(TAG, "save failed", e)
       val why = e.message ?: "Save failed"
@@ -381,6 +383,7 @@ class DownloadService : Service() {
     private const val EXTRA_SAVE_NAME = "orca.saveName"
     private const val EXTRA_SAVE_SLUG = "orca.saveSlug"
     private const val EXTRA_SAVE_HEIGHT = "orca.saveHeight"
+    private const val EXTRA_SAVE_MEDIA_TYPE = "orca.saveMediaType"
 
     /** Notification id namespace: one stable slot per item, derived from its
      *  private slug, so progress updates replace in place instead of stacking. */
@@ -493,7 +496,7 @@ class DownloadService : Service() {
      * `name` is a human title used only if the server sends no filename.
      * Must be called from a foreground context (see [track]).
      */
-    fun save(ctx: Context, url: String, name: String, slug: String = "", height: Int = 0) {
+    fun save(ctx: Context, url: String, name: String, slug: String = "", height: Int = 0, mediaType: String = "") {
       if (url.isEmpty()) return
       start(
         ctx,
@@ -501,7 +504,8 @@ class DownloadService : Service() {
           .putExtra(EXTRA_SAVE_URL, url)
           .putExtra(EXTRA_SAVE_NAME, name)
           .putExtra(EXTRA_SAVE_SLUG, slug)
-          .putExtra(EXTRA_SAVE_HEIGHT, height),
+          .putExtra(EXTRA_SAVE_HEIGHT, height)
+          .putExtra(EXTRA_SAVE_MEDIA_TYPE, mediaType),
       )
     }
 
