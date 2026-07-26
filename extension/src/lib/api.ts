@@ -231,13 +231,13 @@ export class OrcaClient {
 
   // The registry endpoint wraps the array as `{ websites: [...] }`; unwrap it so
   // callers get a real array (an object here is what fed the `x.filter is not a
-  // function` crash in the popup).
+  // function` crash when the registry was read as an array).
   async listWebsites(): Promise<Website[]> {
     const res = await this.request<{ websites: Website[] } | Website[]>('GET', '/api/websites');
     return Array.isArray(res) ? res : (res?.websites ?? []);
   }
 
-  // Recent items for the popup's Downloads view. Same wrapper-unwrap shape.
+  // Recent items. Same wrapper-unwrap shape.
   async listItems(limit = 20): Promise<Item[]> {
     const res = await this.request<{ items: Item[] } | Item[]>(
       'GET',

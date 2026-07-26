@@ -26,6 +26,29 @@ declare function GM_setValue(key: string, value: unknown): void;
 declare function GM_addStyle(css: string): void;
 declare function GM_xmlhttpRequest(details: GMXhrDetails): void;
 declare function GM_registerMenuCommand(caption: string, onClick: () => void): void;
+// Tampermonkey ≥4.13 / Violentmonkey ≥2.15. Unlike `document.cookie` this reads
+// HttpOnly cookies — which are exactly the session cookies that make a login
+// usable — so it is the difference between a working import and a useless one.
+// Feature-detected, never assumed: `@grant GM_cookie` is silently a no-op in a
+// manager that doesn't implement it.
+declare const GM_cookie:
+  | {
+      list(
+        details: { url?: string; domain?: string },
+        cb: (cookies: GMCookie[], error?: unknown) => void,
+      ): void;
+    }
+  | undefined;
+
+interface GMCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  secure?: boolean;
+  session?: boolean;
+  expirationDate?: number;
+}
 // The content CSS, inlined by the build (esbuild `define`) — mirrors how the
 // background's build injects __ORCA_DEV_BASE__ etc. Never a runtime fetch.
 declare const __ORCA_CSS__: string;
@@ -139,6 +162,12 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Resp
 let client: OrcaClient | null = null;
 function getClient(): OrcaClient {
   const cfg = loadCfg();
+  // Re-arm the fetch shim's base before every call. The GM store is shared across
+  // tabs, so credentials set in ANOTHER tab (the config menu, or the dashboard's
+  // token bridge) leave this tab's cached `orcaBase` empty — and an empty base
+  // routes API calls to the page's real fetch, where a cross-origin/loopback
+  // server fails CORS instead of going through GM_xmlhttpRequest.
+  orcaBase = cfg.base;
   if (!cfg.base || !cfg.token) throw new Error('not configured');
   if (!client || client.base !== cfg.base || client.token !== cfg.token) {
     client = new OrcaClient(cfg.base, cfg.token);
@@ -162,6 +191,10 @@ async function handle(req: { type: string; [k: string]: unknown }): Promise<unkn
     }
     case 'health':
       return { online: (await getClient().validate()) === '' };
+    case 'listWebsites':
+      // The site registry — the content script uses its host list to decide where
+      // permissive video recognition is allowed (see content/sites.ts).
+      return { websites: await getClient().listWebsites() };
     case 'setSiteAdapters': {
       saveCfg({ siteAdapters: (req.siteAdapters as UserSiteAdapter[]) ?? [] });
       return { siteAdapters: loadCfg().siteAdapters };
@@ -305,6 +338,122 @@ function installLiveTokenSync(): void {
 // gap: a user who has never opened the dashboard has no way in, and a stale token
 // has no reset. These menu entries cover both, and double as a debugging surface.
 
+// ---- one-click cookie import ------------------------------------------------
+//
+// yt-dlp needs the user's own cookies to fetch anything behind a login (a private
+// video, an age gate, a members-only post). The extension pulled them from the
+// privileged `browser.cookies` API; a userscript has no such API, so this uses
+// GM_cookie — the userscript-manager equivalent, and like `browser.cookies` it
+// sees HttpOnly cookies. Where the manager doesn't implement it we fall back to
+// `document.cookie`, which is strictly weaker: it CANNOT see the HttpOnly session
+// cookies most logins rely on, so the import is announced as partial rather than
+// silently uploading something that won't authenticate anything.
+//
+// The cookies leave the browser only on an explicit menu click, and only to the
+// user's own configured Orca server, over the same sealed E2EE channel as every
+// other request.
+
+// Second-level registries where the last two labels are a *public suffix* rather
+// than a registrable domain: `tesco.co.uk` is a site, `co.uk` is a whole TLD.
+const SECOND_LEVEL_SUFFIX = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'or', 'ne', 'go']);
+
+function registrableDomain(host: string): string {
+  const h = host.replace(/^www\./, '').toLowerCase();
+  const parts = h.split('.');
+  if (parts.length <= 2) return h;
+  const take =
+    parts[parts.length - 1]!.length <= 3 && SECOND_LEVEL_SUFFIX.has(parts[parts.length - 2]!) ? 3 : 2;
+  return parts.slice(-take).join('.');
+}
+
+// Would the browser send this cookie to `host`? A domain query also returns
+// SIBLING domains under it, so without this filter one import on a `*.co.uk` page
+// would upload every unrelated `.co.uk` login on the machine.
+function cookieBelongsTo(cookieDomain: string, host: string): boolean {
+  const d = cookieDomain.replace(/^\./, '').toLowerCase();
+  return host === d || host.endsWith('.' + d);
+}
+
+// Netscape cookies.txt — the format yt-dlp reads.
+function toNetscape(cookies: GMCookie[]): string {
+  const lines = ['# Netscape HTTP Cookie File'];
+  for (const c of cookies) {
+    const includeSub = c.domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const expiry = c.session || c.expirationDate == null ? 0 : Math.floor(c.expirationDate);
+    lines.push(
+      [c.domain, includeSub, c.path || '/', c.secure ? 'TRUE' : 'FALSE', String(expiry), c.name, c.value]
+        .join('\t'),
+    );
+  }
+  return lines.join('\n') + '\n';
+}
+
+/** Read this page's cookies. `httpOnly` reports whether the privileged path was
+ *  available — a `document.cookie` import is missing the session cookies. */
+function readPageCookies(): Promise<{ cookies: GMCookie[]; httpOnly: boolean }> {
+  const host = location.hostname.toLowerCase();
+  return new Promise((resolve) => {
+    if (typeof GM_cookie?.list === 'function') {
+      GM_cookie.list({ url: location.href }, (list, error) => {
+        if (error || !Array.isArray(list)) return resolve({ cookies: fromDocument(), httpOnly: false });
+        const kept = list.filter((c) => cookieBelongsTo(c.domain, host));
+        resolve({ cookies: kept, httpOnly: true });
+      });
+      return;
+    }
+    resolve({ cookies: fromDocument(), httpOnly: false });
+  });
+
+  function fromDocument(): GMCookie[] {
+    const out: GMCookie[] = [];
+    for (const pair of document.cookie.split(';')) {
+      const i = pair.indexOf('=');
+      if (i <= 0) continue;
+      const name = pair.slice(0, i).trim();
+      if (!name) continue;
+      // `document.cookie` reports no metadata, so record the cookie against the
+      // host we read it on: the narrowest claim the data supports.
+      out.push({ name, value: pair.slice(i + 1).trim(), domain: host, path: '/', secure: true });
+    }
+    return out;
+  }
+}
+
+async function importCookies(): Promise<string> {
+  const c = getClient();
+  const host = location.hostname.toLowerCase();
+  const reg = registrableDomain(host);
+  const { cookies, httpOnly } = await readPageCookies();
+  if (cookies.length === 0) throw new Error('No cookies found for this page — are you logged in?');
+
+  // File them under the website that already covers this domain; create an entry
+  // only when none does, so repeat imports never spawn duplicate sites.
+  const sites = await c.listWebsites();
+  const match = sites.find((s) =>
+    s.hosts.some((h) => {
+      const b = h.replace(/^\./, '');
+      return host === b || host.endsWith('.' + b) || reg === b;
+    }),
+  );
+  let key = match?.key;
+  let created = false;
+  if (!key) {
+    const base = reg.split('.')[0]!.replace(/[^a-z0-9_]/gi, '').toLowerCase() || 'site';
+    key = sites.some((s) => s.key === base) ? reg.replace(/[^a-z0-9_]/gi, '_').toLowerCase() : base;
+    await c.upsertWebsite(key, { name: reg, hosts: reg, enabled: true });
+    created = true;
+  }
+  await c.setCookies(key, toNetscape(cookies));
+
+  const site = `${match?.name ?? reg}${created ? ' (new site)' : ''}`;
+  const caveat = httpOnly
+    ? ''
+    : '\n\nNote: this userscript manager has no GM_cookie support, so only ' +
+      'non-HttpOnly cookies could be read. Logins that use an HttpOnly session ' +
+      'cookie will still fail — import those from the Orca web app instead.';
+  return `Orca: imported ${cookies.length} cookie(s) for ${site}.${caveat}`;
+}
+
 function maskToken(t: string): string {
   if (!t) return '(none)';
   return t.length <= 6 ? '••••' : `${t.slice(0, 3)}…${t.slice(-2)}`;
@@ -329,6 +478,23 @@ function registerMenu(): void {
     void new OrcaClient(cleanBase, cleanToken).validate().then(
       (r) => window.alert(r === '' ? 'Orca: connected ✓' : `Orca: saved, but validation failed (${r}).`),
       () => window.alert('Orca: saved, but could not reach the server.'),
+    );
+  });
+  GM_registerMenuCommand('Orca: import cookies for this site', () => {
+    if (!loadCfg().token) {
+      window.alert('Orca: set the server + token first.');
+      return;
+    }
+    if (
+      !window.confirm(
+        `Send this site's cookies (${location.hostname}) to your Orca server so yt-dlp ` +
+          'can download logged-in content?',
+      )
+    )
+      return;
+    void importCookies().then(
+      (msg) => window.alert(msg),
+      (e: unknown) => window.alert(`Orca: cookie import failed — ${(e as Error).message || e}`),
     );
   });
   GM_registerMenuCommand('Orca: show current config', () => {

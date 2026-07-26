@@ -4,6 +4,9 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    // The content script still talks to a `browser.runtime`-shaped object — now
+    // the userscript shim's (src/userscript/shim.ts), not a real extension's — so
+    // these typings stay as the contract both sides are checked against.
     "types": ["firefox-webext-browser"],
     "strict": true,
     "noUnusedLocals": true,

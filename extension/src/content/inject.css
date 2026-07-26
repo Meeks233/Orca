@@ -296,7 +296,10 @@
 .orca-fab-stack {
   position: fixed;
   right: 24px;
+  /* Resting offset. Raised inline by positionFabStack() when the page parks its
+     own floating control (X's Grok button, a back-to-top bubble) in this corner. */
   bottom: 24px;
+  transition: bottom 0.15s ease;
   z-index: 2147483001;
   display: flex;
   flex-direction: column;

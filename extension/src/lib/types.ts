@@ -1,5 +1,5 @@
 // Shared DTOs (mirrors of the Rust `src/types.rs` shapes we consume) and the
-// runtime-message protocol between the content script / popup and the background.
+// runtime-message protocol between the content script and the userscript shim.
 
 export type Status =
   | 'queued'
@@ -99,7 +99,7 @@ export interface FeatureFlags {
   toolbarStatus: boolean;
   /** Inject the cloud-download button onto video pages / posts. */
   inpageButton: boolean;
-  /** Website-management tab in the popup. */
+  /** Website management (the site registry + per-site cookies). */
   websiteManagement: boolean;
 }
 
@@ -115,35 +115,24 @@ export interface PlaylistRef {
   pos?: number;
 }
 
-// ---- Messages: content/popup -> background (request) ----
+// ---- Messages: content script -> userscript shim (request) ----
 
 export type BgRequest =
   | { type: 'getConfig' }
   | { type: 'health' }
-  | { type: 'setConnection'; base: string; token: string }
-  | { type: 'validate'; base: string; token: string }
-  | { type: 'setFeatures'; features: Partial<FeatureFlags> }
-  | { type: 'submit'; url: string; tabWatch?: boolean; playlist?: PlaylistRef }
+  | { type: 'submit'; url: string; playlist?: PlaylistRef }
   // Submit a COLLECTION url (a playlist page) and get back every item the server
   // expanded it into — one request, one probe, all rows created together.
   | { type: 'submitList'; url: string }
   | { type: 'itemStatus'; slug: string }
   | { type: 'cancelItem'; slug: string }
-  | { type: 'retryItem'; slug: string; tabWatch?: boolean }
-  | { type: 'deleteItem'; slug: string }
+  | { type: 'retryItem'; slug: string }
   | { type: 'lookupItem'; url: string; any?: boolean }
   | { type: 'lookupBatch'; urls: string[] }
   | { type: 'setSiteAdapters'; siteAdapters: UserSiteAdapter[] }
-  | { type: 'listItems'; limit?: number }
-  | { type: 'thumb'; slug: string }
-  | { type: 'extractCookies'; url: string }
+  // The site registry — its host list is what licenses permissive video
+  // recognition on a page (see content/sites.ts).
   | { type: 'listWebsites' }
-  | { type: 'upsertWebsite'; key: string; body: Record<string, unknown> }
-  | { type: 'deleteWebsite'; key: string }
-  | { type: 'setCookies'; key: string; cookies: string }
-  | { type: 'toggleCookies'; key: string; enabled: boolean }
-  | { type: 'deleteCookies'; key: string }
-  | { type: 'openDashboard' }
   | { type: 'openWebItem'; slug: string };
 
 export type BgResponse<T = unknown> =

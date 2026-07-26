@@ -48,8 +48,8 @@ export const GLYPH_VB = 24;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-// Build a lucide glyph as real SVG nodes (no innerHTML) for the content script /
-// popup. `currentColor` + CSS drive stroke/size. Only call in a DOM context.
+// Build a lucide glyph as real SVG nodes (no innerHTML) for the content script.
+// `currentColor` + CSS drive stroke/size. Only call in a DOM context.
 export function glyphSvg(name: GlyphName, cls = ''): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');

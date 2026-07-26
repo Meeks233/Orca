@@ -1,128 +1,95 @@
-# Orca browser extension
+# Orca userscript
 
 Submit videos to your self-hosted [Orca](../README.md) over the **same
 end-to-end-encrypted channel** the web UI uses (OSC v2 — ephemeral P-256 ECDH +
 HKDF-SHA256 with `SHA256(token)` as a pre-shared key, AES-256-GCM envelopes), and
 download them straight from any video page.
 
-Firefox first (Manifest V3, `browser_specific_settings.gecko`). The code is
-written to be Chrome-portable: no `EventSource` (SSE is parsed from a streaming
-`fetch`), `browser.*` via the Firefox types, and MV3 throughout.
+Ships as a **single self-contained `.user.js`** for Tampermonkey / Violentmonkey.
+The browser extension this directory once also built has been **retired** — the
+userscript is the only client, and owns the content script, API client and OSC
+crypto outright.
 
 ## What it does
 
-- **Toolbar status icon (default surface).** The toolbar button reflects the
-  active download's whole lifecycle: cloud-download → spinner → live progress
-  ring (with a percent badge) → cloud-check on success / X on failure.
 - **In-page download button.** A cloud-download button is mounted on video
-  pages/posts. Click → spinner → progress ring → cloud-check (click it to preview
-  the finished video in a new tab) or X on failure.
-- **X / Twitter thread saving.** On an X/Twitter post-detail page, a fixed
-  bottom-right **Save thread · N** control appears when the rendered contiguous
-  posts by the thread author contain media. It submits only those image/video
-  posts, in reading order, and records them as one `x-thread:<root-post-id>`
-  group in Orca. It deliberately stops before replies by other authors; scroll or
-  expand the thread first when X has not rendered all continuation posts yet.
-- **Popup.** First launch shows a **welcome** screen (server URL + token, then the
-  E2EE handshake). Afterwards: a **Connection** tab (edit server/token, feature
-  toggles) and a **Website management** tab (per-site cookies, resolution, share
-  quality, format, subtitles, blur; add / edit / delete; search).
-- **In-tab preview.** Finished videos are fetched over the sealed media transport
-  and decrypted locally (64 KiB chunks) into a playable blob — the token never
-  leaves the privileged extension context.
+  pages/posts and on recognised thumbnails. Click → spinner → progress ring →
+  cloud-check (click it to open the finished video in the Orca web app) or X on
+  failure. A video already in your library wears the check from the start.
+- **Multi-select.** Where a page shows a grid of videos, a bottom-right
+  **Select** toggle turns the thumbnails into checkboxes — with *All*, *All in
+  list*, shift-click range selection — and downloads just the ticked ones. The
+  stack automatically climbs clear of the page's own floating buttons (X's Grok
+  button, a back-to-top bubble) rather than covering them.
+- **Download all.** On a real collection the server can expand whole (a YouTube
+  `/playlist?list=…`, or a watch page's `?list=` queue) a **Download all · N**
+  pill submits the collection in one request.
+- **X / Twitter thread saving.** On an X/Twitter post-detail page, a **Save
+  thread · N** control appears when the rendered contiguous posts by the thread
+  author contain media. It submits only those image/video posts, in reading
+  order, and records them as one `x-thread:<root-post-id>` group. It deliberately
+  stops before replies by other authors; scroll or expand the thread first when X
+  has not rendered all continuation posts yet.
+- **One-click cookie import.** A menu command uploads the current site's cookies
+  to your Orca server so yt-dlp can fetch logged-in content (see below).
 
-## Architecture
+## Where videos are recognised
 
-| Context | File | Role |
-|---|---|---|
-| Crypto core | `src/lib/e2ee.ts` | OSC handshake + AEAD envelope + media-chunk decrypt (WebCrypto) |
-| API client | `src/lib/api.ts` | Sealed request wrapper, submit, SSE-over-fetch |
-| Background | `src/background.ts` | Owns the session; SSE fan-out; toolbar-icon state machine |
-| Content | `src/content/detect.ts` | Site detection + per-button state machine |
-| Popup | `src/popup/*` | Welcome, Connection, Website management |
-| Preview | `src/preview/*` | Local decrypt-and-play page |
+Two tiers, because the script runs on `*://*/*` and must not decorate arbitrary
+websites:
 
-The token and session key live only in the background / privileged pages; content
-scripts talk to the background over `runtime` messaging and never see either.
+- **Built-in adapters** (`src/content/sites.ts`) tune YouTube and X/Twitter,
+  whose DOM and URL shapes need per-site knowledge.
+- **Structural recognition** applies on any host the **server's website
+  registry** lists (`GET /api/websites`): a thumbnail-sized, same-site link whose
+  path carries an id-like segment (or an id-like query param) is a video. That is
+  what lights up Vimeo (`/1210585745`), Reddit (`/r/x/comments/<id>/…`), XVideos
+  (`/video.<id>/…`), Pornhub (`/view_video.php?viewkey=…`) and the rest without a
+  line of per-site code.
+- **Everywhere else** only the conservative URL shapes (`/watch?v=`, `/video/<id>`,
+  `/status/<id>`, …) count, so an unrelated site gets nothing.
+
+Add a platform the registry doesn't cover via **Orca: import site adapters
+(JSON)** in the userscript menu — see `UserSiteAdapter` in `src/lib/types.ts`.
 
 ## Build
 
 ```sh
 npm install
-npm run dist        # typecheck -> esbuild bundle (dist-ext/) -> web-ext zip
+npm run dist      # typecheck -> dist-userscript/orca.user.js
+npm run build     # esbuild only
 ```
 
-- `npm run build` — assemble `dist-ext/` (loadable unpacked extension).
-- `npm run lint` — `web-ext lint` the assembled extension.
-- `npm run package` — zip into `web-ext-artifacts/orca-<version>.zip`.
-- `npx tsx scripts/verify-e2ee.ts` — drive the crypto against a live server
-  (`ORCA_BASE`, `ORCA_TOKEN`) as an end-to-end handshake/seal check.
+Or from the repo root: `scripts/pack-clients.zsh` (`--fast` to skip the
+typecheck). The output is git-ignored.
 
-## Install for testing
+`npm run verify:e2ee` drives the crypto against a live server (`ORCA_BASE`,
+`ORCA_TOKEN`) as an end-to-end handshake / seal / open check.
 
-**Manual.** Firefox → `about:debugging` → **This Firefox** → **Load Temporary
-Add-on** → pick `dist-ext/manifest.json` (or the zip in `web-ext-artifacts/`).
+## Install
 
-**Automated (no clicks).** The [`firefox-devtools-mcp`][ffmcp] MCP server loads
-`dist-ext/` as a temporary add-on over WebDriver BiDi and drives Firefox with the
-same click / snapshot / console / network / `evaluate_script` tools the
-chrome-devtools MCP offers — the Firefox equivalent of that flow.
+Drag `dist-userscript/orca.user.js` into Tampermonkey / Violentmonkey, or open it
+as a `file://` URL — the manager intercepts `*.user.js`. Re-import after a
+rebuild to pick up changes.
 
-- One-shot acceptance gate:
-
-  ```sh
-  npm run build && npm run verify:ext
-  ```
-
-  This launches Firefox Developer Edition (headless), temporarily loads the
-  extension, opens a page, and asserts the content script + background boot with
-  no extension-origin console errors (saves a screenshot to
-  `web-ext-artifacts/verify.png`). Point it at a real video page to exercise the
-  in-page button:
-
-  ```sh
-  ORCA_VERIFY_URL='https://www.youtube.com/watch?v=…' npm run verify:ext
-  ```
-
-  Overrides: `ORCA_FIREFOX` (Firefox 153+ binary path — `evaluate_script` /
-  logpoints require 153+), `HEADFUL=1` (show the window), `MCP_SERVER_JS` (path
-  to a local `firefox-devtools-mcp`; otherwise falls back to `npx`).
-
-- Interactive agent debugging: the repo registers the server in `.mcp.json`
-  (`firefox-devtools`, pointed at `/opt/firefox-devedition/firefox`). After
-  approving it (`/mcp`), an agent can call `install_extension` →
-  `new_page`/`click_by_uid`/`fill_by_uid`/`take_snapshot` →
-  `list_console_messages`/`list_network_requests`/`evaluate_script`, plus
-  `enable_debugger`/`set_logpoint` for background-script breakpoints.
-
-[ffmcp]: https://github.com/mozilla/firefox-devtools-mcp
-
-## Headless userscript (Tampermonkey / Violentmonkey)
-
-For browsers where you'd rather run a userscript than install an extension, the
-same code ships as a **single-file userscript** — `dist-userscript/orca.user.js`.
-It is the headless twin of the extension: the in-page **download / status
-button** (and X/Twitter's **Save thread** global control) and the **token bridge** come from the *exact
-same sources* as the extension, so you maintain one codebase, not two.
-
-```sh
-npm run dist:userscript   # typecheck -> dist-userscript/orca.user.js
-```
-
-Then open the file (or drag it into your userscript manager) to install.
-
-**How it reuses the extension code.** The bundle is built from
-`src/content/detect.ts` + `src/lib/*` **unchanged** — the button, the OSC v2
-crypto (`e2ee.ts`), the API client (`api.ts`) and the progress math are shared
-verbatim. The only userscript-specific glue is `src/userscript/`:
+## Architecture
 
 | File | Role |
 |---|---|
-| `src/userscript/shim.ts` | Stands in for the background page: recreates the sliver of `browser.*` `detect.ts` talks to, backed by the real `OrcaClient`; bridges the token; routes API calls through `GM_xmlhttpRequest`. |
-| `src/userscript/main.ts` | Entry point — imports the shim (first) then the shared content script. |
-| `build-userscript.ts` | esbuild → one `.user.js` with the userscript header; inlines `inject.css`. |
+| `src/lib/e2ee.ts` | OSC handshake + AEAD envelope + media-chunk decrypt (WebCrypto) |
+| `src/lib/api.ts` | `OrcaClient`: sealed request wrapper, submit, lookup, SSE-over-fetch |
+| `src/content/detect.ts` | Site scanning, button mounting, per-button state machine, multi-select |
+| `src/content/sites.ts` | Site adapters: which links are videos, and their canonical URLs |
+| `src/userscript/shim.ts` | The runtime: recreates the `browser.*` sliver `detect.ts` talks to, backed by the real `OrcaClient`; token bridge; menu commands; routes API calls through `GM_xmlhttpRequest` |
+| `src/userscript/main.ts` | Entry point — imports the shim (first) then the content script |
+| `build-userscript.ts` | esbuild → one `.user.js` with the metadata header; inlines `inject.css` |
 
-**Token flow (zero-config).** There is no popup. Instead:
+`detect.ts` still talks to a `browser.runtime`-shaped object — now the shim's —
+which is why the Firefox WebExtension typings remain a dev dependency.
+
+## Token flow (zero-config)
+
+There is no popup. Instead:
 
 - On your **Orca dashboard** page, the script reads `localStorage.orca_token` and
   mirrors it (plus the server base) into the userscript manager's cross-origin GM
@@ -132,24 +99,39 @@ verbatim. The only userscript-specific glue is `src/userscript/`:
   so the dashboard boots logged in again (guarded against reload loops).
 
 So: log in to your Orca web app once, and the button starts working everywhere.
-Token changes made later on the dashboard (Settings / welcome field) are picked up
-live — a `storage` listener for other tabs, plus a light poll on the dashboard page
-for same-tab edits the event can't see. Because API calls go over `GM_xmlhttpRequest`
-(declared `@connect *`), the E2EE channel reaches a self-hosted server on any origin
-— LAN, localhost or a domain — without CORS / Private-Network-Access friction.
+Token changes made later on the dashboard are picked up live — a `storage`
+listener for other tabs, plus a light poll on the dashboard page for same-tab
+edits the event can't see. Because API calls go over `GM_xmlhttpRequest`
+(declared `@connect *`), the E2EE channel reaches a self-hosted server on any
+origin — LAN, localhost or a domain — without CORS / Private-Network-Access
+friction.
 
-**Manual fallback (no web app needed).** The userscript-manager menu (the extension
-icon → *Orca*) offers **set server + token**, **show current config**, and **clear
-config** — for anyone who hasn't opened the dashboard, to reset a stale token, or to
-debug. *Set* validates the credentials with a real handshake and reports the result.
+## Menu commands
+
+The userscript-manager menu offers:
+
+- **set server + token** — manual config for anyone who hasn't opened the
+  dashboard, or to reset a stale token. Validates with a real handshake.
+- **show current config** / **clear config**.
+- **import site adapters (JSON)** — teach it a platform the registry misses.
+- **import cookies for this site** — see below.
+
+## Cookie import
+
+yt-dlp needs your own cookies to fetch anything behind a login (a private video,
+an age gate, a members-only post). **Orca: import cookies for this site** files
+the current site's cookies under the matching entry in the server's website
+registry (creating one if none matches) and uploads them as a Netscape
+`cookies.txt` over the sealed channel. It asks for confirmation first, and the
+cookies go nowhere but your own server.
+
+**Manager support matters.** With `GM_cookie` (Tampermonkey ≥4.13, Violentmonkey
+≥2.15) the import includes **HttpOnly** cookies — the session cookies most logins
+actually rely on. Without it the script falls back to `document.cookie`, which
+cannot see them; the import still runs but says so explicitly, and such a login
+will not authenticate. Import from the Orca web app instead in that case.
+
+## Notes
 
 There is no SSE fan-out in the userscript; `detect.ts`'s built-in poll fallback
-drives the live progress ring, so behaviour matches the extension.
-
-## Publishing to AMO
-
-The build passes `web-ext lint` with 0 errors/warnings/notices and declares
-`data_collection_permissions: { required: ["none"] }` (the extension collects
-nothing — everything is E2EE to your own server). Submit the zip at
-[addons.mozilla.org](https://addons.mozilla.org/developers/) after setting your
-own `gecko.id`.
+drives the live progress ring.

@@ -14,7 +14,13 @@ import type {
   Status,
   SubmitResult,
 } from '../lib/types.js';
-import { resolveAdapter, sanitizeUserAdapters, type SiteAdapter, type UserSiteAdapter } from './sites.js';
+import {
+  hostInRegistry,
+  resolveAdapter,
+  sanitizeUserAdapters,
+  type SiteAdapter,
+  type UserSiteAdapter,
+} from './sites.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -1099,6 +1105,17 @@ function scanThumbs(): void {
   if (thumbQueue.length) void pumpThumbQueue();
 }
 
+// An anchor has to RENDER at least this big to pass as a video card. Sized to the
+// smallest real thumbnail tile (a sidebar rec, a mobile row) while excluding text
+// links, breadcrumbs and icon buttons — see SiteAdapter.requireThumbBox.
+const MIN_THUMB_W = 96;
+const MIN_THUMB_H = 54;
+
+function isThumbSized(anchor: HTMLAnchorElement): boolean {
+  const r = anchor.getBoundingClientRect();
+  return r.width >= MIN_THUMB_W && r.height >= MIN_THUMB_H;
+}
+
 function thumbAnchors(): HTMLAnchorElement[] {
   if (!adapter.thumbSelector) return [];
   try {
@@ -1106,6 +1123,7 @@ function thumbAnchors(): HTMLAnchorElement[] {
     for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>(adapter.thumbSelector))) {
       const url = anchorUrl(anchor);
       if (!url) continue;
+      if (adapter.requireThumbBox && !isThumbSized(anchor)) continue;
       // X (and several SPA social sites) places a photo link and its containing
       // post link over the very same image. Both normalize to one post URL, so
       // mounting both produces two SVG controls that truthfully share state but
@@ -1363,6 +1381,7 @@ function ensureListButton(): void {
     fabView = null;
   }
   ensureSelectToggle();
+  positionFabStack();
   // Paint whatever views exist (the FAB, the player overlay, or both).
   if (listViews().length && !listArmed) renderListButton(total);
 }
@@ -1627,8 +1646,69 @@ function fabStack(): HTMLElement {
     fabStackEl = document.createElement('div');
     fabStackEl.className = 'orca-fab-stack';
     document.body.appendChild(fabStackEl);
+    window.addEventListener('resize', positionFabStack, { passive: true });
   }
   return fabStackEl;
+}
+
+// The bottom-right corner is the web's default home for a floating action button,
+// so it is routinely already taken — X parks its Grok button there, and plenty of
+// sites put a back-to-top or chat bubble in the same spot. Sitting on top of one
+// hides a control the user came for, and (because the toggle is clickable) steals
+// its clicks.
+//
+// So the stack ASKS what is under it and climbs above whatever it finds, rather
+// than hard-coding an offset per site. Only compact floating controls count as
+// blockers: a full-width sticky header/footer or a page-sized overlay is not
+// something to dodge — there would be nowhere to go.
+const FAB_BASE = 24; // resting offset from the viewport bottom (matches the CSS)
+const FAB_GAP = 12; // breathing room left between us and the control we cleared
+
+function ownFixedBox(el: Element): DOMRect | null {
+  for (let n: HTMLElement | null = el as HTMLElement; n && n !== document.body; n = n.parentElement) {
+    const position = getComputedStyle(n).position;
+    if (position === 'fixed' || position === 'sticky') return n.getBoundingClientRect();
+  }
+  return null;
+}
+
+// The foreign floating control overlapping the stack right now, if any.
+function fabBlocker(stack: HTMLElement): DOMRect | null {
+  const r = stack.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return null;
+  const probes: [number, number][] = [
+    [r.left + r.width / 2, r.top + r.height / 2],
+    [r.right - 6, r.bottom - 6],
+    [r.right - 6, r.top + 6],
+  ];
+  for (const [x, y] of probes) {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (stack.contains(el) || el === document.body || el === document.documentElement) continue;
+      const box = ownFixedBox(el);
+      if (!box) continue;
+      if (box.width > window.innerWidth * 0.5 || box.height > window.innerHeight * 0.5) continue;
+      return box;
+    }
+  }
+  return null;
+}
+
+function positionFabStack(): void {
+  const stack = fabStackEl;
+  if (!stack || !stack.firstElementChild) return;
+  let bottom = FAB_BASE;
+  stack.style.bottom = `${bottom}px`;
+  // Climbing clear of one control can land on the next one up (a site with a
+  // whole rail of floating buttons), so re-probe — but only a few times, and
+  // never so far up that the stack ends up marooned in the middle of the page.
+  for (let i = 0; i < 3; i++) {
+    const blocker = fabBlocker(stack);
+    if (!blocker) break;
+    const next = Math.round(window.innerHeight - blocker.top + FAB_GAP);
+    if (next <= bottom || next > window.innerHeight * 0.5) break;
+    bottom = next;
+    stack.style.bottom = `${bottom}px`;
+  }
 }
 
 function textSpan(text: string, cls = ''): HTMLElement {
@@ -1844,12 +1924,37 @@ function scan(): void {
 // Swap in the adapter set for freshly imported user rules (dynamic import), forget
 // cached verdicts, and re-scan from scratch. Keyed on the serialized rule list so a
 // no-op refresh costs nothing.
+// The hosts the SERVER's website registry covers. Empty until the first fetch
+// lands (or forever, if the server is unreachable) — in which case recognition
+// stays on the conservative generic adapter, exactly as before.
+let registryHosts: string[] = [];
+
+// Ask the server which sites it is configured to download from. One cheap sealed
+// request per tab: the registry is operator-edited, not per-page state. A failure
+// leaves `registryHosts` untouched so a transient outage never downgrades a page
+// that is already recognising videos.
+async function refreshRegistryHosts(): Promise<void> {
+  try {
+    const { websites } = await send<{ websites: { hosts: string[]; enabled: boolean }[] }>({
+      type: 'listWebsites',
+    });
+    if (!Array.isArray(websites)) return;
+    registryHosts = websites.filter((w) => w.enabled !== false).flatMap((w) => w.hosts ?? []);
+    applyAdapters(lastUserAdapters);
+  } catch {
+    /* offline / not configured — keep whatever we already know */
+  }
+}
+
+let lastUserAdapters: UserSiteAdapter[] = [];
 let adaptersKey = '';
 function applyAdapters(userAdapters: UserSiteAdapter[]): void {
-  const key = JSON.stringify(userAdapters);
+  lastUserAdapters = userAdapters;
+  const knownVideoHost = hostInRegistry(location.hostname, registryHosts);
+  const key = JSON.stringify([userAdapters, knownVideoHost]);
   if (key === adaptersKey) return;
   adaptersKey = key;
-  adapter = resolveAdapter(location.hostname, userAdapters);
+  adapter = resolveAdapter(location.hostname, userAdapters, knownVideoHost);
   thumbResult.clear();
   thumbQueued.clear();
   thumbQueue.length = 0;
@@ -1872,6 +1977,10 @@ async function refreshAdapters(): Promise<void> {
   } catch {
     /* offline / not configured — keep the current adapter */
   }
+  // Retry the registry until it lands: on a tab opened before the server came up
+  // (or before a token existed) the first attempt fails, and without this the page
+  // would stay on conservative recognition for its whole life.
+  if (registryHosts.length === 0) await refreshRegistryHosts();
 }
 
 let scanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1897,6 +2006,7 @@ function start(): void {
   if (started) return;
   started = true;
   void refreshBackendHealth();
+  void refreshRegistryHosts();
   // A config read only says credentials exist; this real authenticated probe is
   // what turns every in-page control into the warning globe as soon as the
   // backend drops, and restores it when the server returns.

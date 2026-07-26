@@ -24,6 +24,11 @@ export interface SiteAdapter {
   /** CSS selector for thumbnail (image) anchors to consider for a tick. Empty =
    *  fall back to the generic image-anchor selector. */
   thumbSelector: string;
+  /** Only treat a matched anchor as a video card when it RENDERS at thumbnail
+   *  size. The permissive adapter selects every `<a href>` (many video sites build
+   *  their cards out of custom elements or CSS backgrounds, so `:has(img)` misses
+   *  them), and this is what keeps a text link in the footer from becoming one. */
+  requireThumbBox?: boolean;
   /** Canonicalize a candidate href into the stable video URL Orca stores, or null
    *  if it isn't a watchable video on this site. */
   videoUrl(href: string): string | null;
@@ -119,6 +124,102 @@ const genericAdapter: SiteAdapter = {
   id: 'generic',
   thumbSelector: GENERIC_THUMB_SELECTOR,
   videoUrl: genericVideoUrl,
+  playlistPage: noPlaylist,
+  listMemberSelector: noMemberScope,
+  pageList: noPageList,
+};
+
+// ---- permissive recognition (hosts the Orca server is configured for) ----
+//
+// The generic adapter above only recognises a handful of URL shapes, so on most
+// video sites NO thumbnail resolved to a video — which is why the per-page
+// controls (the "Select" multi-select toggle, the tick on saved thumbnails) only
+// ever appeared on YouTube and X. Their permalinks simply don't look like
+// `/video/<id>`: Vimeo files a video at `/1210585745`, Reddit at
+// `/r/<sub>/comments/<id>/<slug>`, XVideos at `/video.<id>/<n>/<slug>`, Pornhub
+// at `/view_video.php?viewkey=<id>`.
+//
+// Rather than hand-write an adapter per platform, recognise a CONTENT PERMALINK
+// structurally: a same-site link whose path carries an id-like segment (or an
+// id-like query param on a script-style path), minus the navigation paths that
+// share that shape (a profile, a channel, a tag, a category…).
+//
+// That heuristic is deliberately loose, so it is only ever used on a host the
+// SERVER already lists in its website registry (see resolveAdapter's
+// `knownVideoHost`). On an arbitrary website the conservative generic adapter
+// still applies, and nothing is mounted where nothing is downloadable.
+
+// Path segments that mark a listing / account / meta page rather than one piece
+// of content. Matched whole-segment (so Reddit's `/r/`, YouTube's `/c/` and other
+// short section prefixes are untouched) and case-insensitively.
+const NON_CONTENT_SEGMENTS = new Set([
+  'user', 'users', 'profile', 'profiles', 'channel', 'channels', 'account',
+  'tag', 'tags', 'category', 'categories', 'genre', 'genres',
+  'search', 'login', 'signin', 'signup', 'register', 'logout',
+  'settings', 'preferences', 'about', 'help', 'support', 'contact', 'faq',
+  'terms', 'privacy', 'legal', 'dmca', 'sitemap', 'wiki',
+  'subscribe', 'subscriptions', 'following', 'followers', 'feed',
+  'model', 'models', 'pornstar', 'pornstars', 'member', 'members', 'author',
+  'premium', 'upload', 'studio', 'cart', 'checkout', 'notifications', 'messages',
+]);
+
+// Query params that carry a video id on script-style paths (`/view_video.php`,
+// `/watch.html`) — the shape a path-only rule can never see.
+const ID_QUERY_PARAMS = ['v', 'viewkey', 'video_id', 'videoid', 'vid', 'watch', 'post', 'aid', 'bvid'];
+
+// Does this path segment look like an id (rather than a word)? Digits are the
+// signal that survives across platforms — `1210585745`, `1v70xbs`, `BV1DAgS6SEqa`,
+// `video.opbtthi900a`. A pure word (`documentary`, `staffpicks`) is not content.
+function idLike(segment: string): boolean {
+  return segment.length >= 2 && /\d/.test(segment);
+}
+
+function permissiveVideoUrl(href: string): string | null {
+  // The precise shapes win — they canonicalize better (a `/watch?v=` id, an X
+  // post stripped of its `/photo/2` suffix) than "keep the whole path" ever could.
+  const exact = genericVideoUrl(href);
+  if (exact) return exact;
+
+  const u = parseUrl(href);
+  if (!u) return null;
+  // A video card links to its own site. An off-site link on a video page is an
+  // ad, a sponsor, or a share button.
+  if (bareHost(u.hostname) !== bareHost(location.hostname)) return null;
+
+  const segments = u.pathname.split('/').filter(Boolean);
+  if (segments.length === 0) return null; // the site root is not a video
+  for (const segment of segments) {
+    const s = segment.toLowerCase();
+    if (NON_CONTENT_SEGMENTS.has(s)) return null;
+    // Vimeo files profiles at `/user251780882` — id-like, but not a video.
+    if (/^(user|profile|channel)\d/.test(s) || s.startsWith('@')) return null;
+  }
+
+  const path = '/' + segments.join('/');
+  if (segments.some(idLike)) return u.origin + path;
+  for (const param of ID_QUERY_PARAMS) {
+    const value = u.searchParams.get(param);
+    // Keep ONLY the id param: the rest of the query is tracking, and carrying it
+    // would defeat the server's dedup of a video already saved from another link.
+    if (value && /^[\w.-]{4,}$/.test(value)) {
+      return `${u.origin}${path}?${param}=${encodeURIComponent(value)}`;
+    }
+  }
+  return null;
+}
+
+function bareHost(hostname: string): string {
+  return hostname.replace(/^www\./i, '').toLowerCase();
+}
+
+const permissiveAdapter: SiteAdapter = {
+  id: 'permissive',
+  // Every link, filtered down by `requireThumbBox` + `permissiveVideoUrl`. A card
+  // built from a custom element (Reddit's `<shreddit-post>`) or a CSS background
+  // has no `<img>` for `:has()` to find, so the selector cannot be the filter.
+  thumbSelector: 'a[href]',
+  requireThumbBox: true,
+  videoUrl: permissiveVideoUrl,
   playlistPage: noPlaylist,
   listMemberSelector: noMemberScope,
   pageList: noPageList,
@@ -333,8 +434,17 @@ function compileUserAdapter(u: UserSiteAdapter): SiteAdapter | null {
 }
 
 // Resolve the adapter for the current host: a user adapter first (users override
-// built-ins), then a built-in, else the generic adapter.
-export function resolveAdapter(hostname: string, userAdapters: UserSiteAdapter[]): SiteAdapter {
+// built-ins), then a built-in, else one of the two fallbacks.
+//
+// `knownVideoHost` says the SERVER's website registry covers this host — i.e. the
+// operator has declared it a site Orca downloads from. That is what licenses the
+// permissive structural recognition; everywhere else the conservative generic
+// adapter keeps Orca's controls off pages that have nothing to download.
+export function resolveAdapter(
+  hostname: string,
+  userAdapters: UserSiteAdapter[],
+  knownVideoHost = false,
+): SiteAdapter {
   for (const u of userAdapters) {
     if (hostMatches(u.hosts, hostname)) {
       const compiled = compileUserAdapter(u);
@@ -344,7 +454,14 @@ export function resolveAdapter(hostname: string, userAdapters: UserSiteAdapter[]
   for (const b of BUILTINS) {
     if (hostMatches(b.hosts, hostname)) return b.adapter;
   }
-  return genericAdapter;
+  return knownVideoHost ? permissiveAdapter : genericAdapter;
+}
+
+/** Does the server's website registry cover this host? Mirrors the backend's own
+ *  suffix match (`websites::host_matches`) so client and server agree on which
+ *  site a page belongs to. */
+export function hostInRegistry(hostname: string, registryHosts: string[]): boolean {
+  return hostMatches(registryHosts, bareHost(hostname));
 }
 
 // Validate + normalize a raw user-adapter list (from JSON import). Drops entries

@@ -33,10 +33,8 @@ export function isPrivateHost(hostname: string): boolean {
 }
 
 // Does this URL look like a single, identifiable media permalink (one main
-// video) rather than a feed / home / search / playlist page? Used by the popup's
-// "Current page" card to decide whether it can confidently offer a download: we
-// only recognise the well-known single-video shapes and treat everything else as
-// ambiguous (so the popup falls back to cookies instead of guessing a download).
+// video) rather than a feed / home / search / playlist page? We only recognise
+// the well-known single-video shapes and treat everything else as ambiguous.
 export function looksLikeMediaPage(rawUrl: string): boolean {
   let u: URL;
   try {
