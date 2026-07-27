@@ -135,27 +135,33 @@ function mirrorShareCreds(): void {
   try { T.core.invoke('save_share_creds', { base: apiBase(), token: getToken() }); } catch (_) { /* desktop / not ready */ }
 }
 
-// Project links (issue tracker, privacy policy, source) open in the system
-// browser on native, and in a new tab on the web — where the plain
-// <a target="_blank"> already does exactly that, so this only engages in the app.
-// A `target="_blank"` inside the Tauri WebView otherwise either does nothing or
-// loads GitHub over the app itself, and that WebView has no tabs, no address bar
-// and no back button — the user just ends up stuck.
+// Outbound links (project pages, a site's login page, an item's source post, an
+// uploader's profile) open in the system browser on native, and in a new tab on
+// the web — where the plain <a target="_blank"> already does exactly that, so
+// this only engages in the app. A `target="_blank"` inside the Tauri WebView
+// otherwise either does nothing or loads the page over the app itself, and that
+// WebView has no tabs, no address bar and no back button — the user just ends up
+// stuck.
 //
-// Deliberately keyed to github.com rather than every external link: the opener's
-// capability scope (capabilities/default.json) only allows this project's own
-// URLs, so casting wider here would hand user-supplied links (a site's login URL,
-// an item's source page) to a call that fails closed and toasts an error. Those
-// keep whatever behaviour they have today.
-const PROJECT_LINK_ORIGIN = 'https://github.com';
+// The whitelist is twofold, and both halves matter:
+//   * only `target="_blank"` anchors — the UI's other anchors (Save, media) are
+//     app plumbing pointing at the Orca server, and must keep their in-app
+//     behaviour rather than being thrown at the browser;
+//   * only http(s) — a `javascript:`/`intent:`/`file:` href in attacker-supplied
+//     metadata never reaches the OS. The opener's capability scope
+//     (capabilities/default.json) allows the same two schemes and nothing else,
+//     so this fails closed even if a call slips past.
+function externalHref(a: HTMLAnchorElement | null): string {
+  return a ? httpHref(a.href) : '';
+}
 document.addEventListener('click', (e) => {
   if (!isNativeApp) return;
-  const a = (e.target as HTMLElement).closest('a[target="_blank"]') as HTMLAnchorElement | null;
-  if (!a || !a.href.startsWith(PROJECT_LINK_ORIGIN + '/')) return;
+  const url = externalHref((e.target as HTMLElement).closest('a[target="_blank"]'));
+  if (!url) return;
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) return; // no bridge (desktop dev) — leave the default behaviour
   e.preventDefault();
-  invoke('plugin:opener|open_url', { url: a.href });
+  invoke('plugin:opener|open_url', { url });
 });
 
 // ---- Server base URL ------------------------------------------------------
@@ -260,6 +266,7 @@ const els = {
   settingsClose: byId('settings-close'),
   websites: byId('websites'),
   websitesToggle: byId('websites-toggle'),
+  blurToggle: byId<HTMLButtonElement>('blur-toggle'),
   websitesClose: byId('websites-close'),
   websiteList: byId('website-list'),
   sitesAdd: byId<HTMLButtonElement>('sites-add'),
@@ -282,6 +289,7 @@ const els = {
   siteEditName: byId<HTMLInputElement>('site-edit-name'),
   siteEditKey: byId<HTMLInputElement>('site-edit-key'),
   siteEditHosts: byId<HTMLTextAreaElement>('site-edit-hosts'),
+  siteEditPrefs: byId('site-edit-prefs'),
   siteEditErr: byId('site-edit-err'),
   token: byId<HTMLInputElement>('token'),
   tokenHint: byId('token-hint'),
@@ -891,13 +899,26 @@ function nativeMediaFallback(): boolean {
 // Decrypted thumbnails, cached by slug so a re-render/scroll is a zero-cost hit and
 // the object URL stays stable (mirrors the worker's blobCache).
 const thumbObjectUrls = new Map<string, string>();
-const thumbFetches = new Set<string>();
+// In-flight fetches, keyed by slug. The SAME slug is routinely requested by
+// several <img> at once — a fold header paints the first child as its cover plus
+// the next two as the blurred stack, while those children's own rows hydrate in
+// the same pass. Callers therefore share the one fetch's promise; an earlier
+// "already fetching → give up" guard left every loser src-less forever (the
+// first-level card of a multi-image post being the most visible casualty, since
+// the header hydrates after its rows).
+const thumbFetches = new Map<string, Promise<string | null>>();
 
-async function loadThumb(slug: string): Promise<string | null> {
+function loadThumb(slug: string): Promise<string | null> {
   const existing = thumbObjectUrls.get(slug);
-  if (existing) return existing;
-  if (thumbFetches.has(slug)) return null;
-  thumbFetches.add(slug);
+  if (existing) return Promise.resolve(existing);
+  const inflight = thumbFetches.get(slug);
+  if (inflight) return inflight;
+  const p = fetchThumb(slug);
+  thumbFetches.set(slug, p);
+  return p;
+}
+
+async function fetchThumb(slug: string): Promise<string | null> {
   try {
     // Disk cache first: a cold launch (or an offline one) paints thumbnails from
     // the persistent store instead of re-downloading every one over the link.
@@ -920,6 +941,12 @@ async function loadThumb(slug: string): Promise<string | null> {
   }
 }
 
+// Hydration retries: a failed thumbnail fetch (offline, channel not up yet)
+// otherwise leaves a permanently blank card, because nothing re-runs
+// hydrateThumbs for that <img> until the row is rebuilt.
+const thumbRetries = new WeakMap<HTMLImageElement, number>();
+const THUMB_MAX_RETRIES = 3;
+
 // Thumbnail markup for a row/group header. Native without a worker ships a
 // src-less <img data-thumb-slug> that hydrateThumbs() fills in after insertion;
 // everywhere else keeps the direct (SW or ?token=) URL.
@@ -941,7 +968,17 @@ function hydrateThumbs(root: ParentNode): void {
   root.querySelectorAll<HTMLImageElement>('img.thumb[data-thumb-slug]:not([src])').forEach((img) => {
     const slug = img.dataset.thumbSlug;
     if (!slug) return;
-    void loadThumb(slug).then((url) => { if (url) img.src = url; });
+    void loadThumb(slug).then((url) => {
+      if (url) { img.src = url; return; }
+      // Fetch failed — retry this element a few times (a later attempt may hit
+      // the by-then populated cache, or a channel that has since come up).
+      const tries = (thumbRetries.get(img) || 0) + 1;
+      if (tries > THUMB_MAX_RETRIES) return;
+      thumbRetries.set(img, tries);
+      setTimeout(() => {
+        if (img.isConnected && !img.getAttribute('src')) hydrateThumbs(img.parentNode!);
+      }, 800 * tries);
+    });
   });
 }
 
@@ -1256,7 +1293,8 @@ function sourceLabel(extractor: string | undefined): string {
     youtube: 'YouTube', twitter: 'X', x: 'X', bilibili: 'Bilibili', tiktok: 'TikTok',
     instagram: 'Instagram', soundcloud: 'SoundCloud', vimeo: 'Vimeo', twitch: 'Twitch',
     facebook: 'Facebook', reddit: 'Reddit', weibo: 'Weibo', niconico: 'Niconico',
-    dailymotion: 'Dailymotion', pornhub: 'Pornhub', generic: 'Web',
+    dailymotion: 'Dailymotion', pornhub: 'Pornhub', rule34video: 'Rule34Video',
+    generic: 'Web',
   };
   return NAMES[base] || (base.charAt(0).toUpperCase() + base.slice(1));
 }
@@ -1287,7 +1325,7 @@ const SITE_ICONS: Record<string, string> = {
   netflix: 'netflix', peertube: 'peertube', odnoklassniki: 'ok', ok: 'ok',
   imgur: 'imgur', ninegag: 'ninegag', loom: 'loom', wistia: 'wistia',
   dropbox: 'dropbox', googledrive: 'googledrive', mega: 'mega', e621: 'e621',
-  xvideos: 'xvideos',
+  xvideos: 'xvideos', pornhub: 'pornhub', rule34: 'rule34', rule34video: 'rule34',
 };
 
 // Host suffix → bundled slug, for sources whose extractor says nothing about the
@@ -1318,6 +1356,8 @@ const HOST_ICONS: Record<string, string> = {
   'wistia.com': 'wistia', 'dropbox.com': 'dropbox', 'drive.google.com': 'googledrive',
   'mega.nz': 'mega', 'podcasts.apple.com': 'applepodcasts', 'music.apple.com': 'applemusic',
   'e621.net': 'e621', 'e926.net': 'e621', 'e6ai.net': 'e621', 'xvideos.com': 'xvideos',
+  'pornhub.com': 'pornhub', 'pornhubpremium.com': 'pornhub',
+  'rule34.xxx': 'rule34', 'rule34video.com': 'rule34', 'rule34.paheal.net': 'rule34',
 };
 
 // The bundled slug for a host, or '' when we ship no mark for it. Walks the host
@@ -1353,19 +1393,93 @@ function websiteIconSlug(w: Website): string {
   return 'generic';
 }
 
+// Favicons the userscript scraped off sites we ship no bundled mark for, keyed by
+// host (see GET /api/websites/icons). They only ever stand in for the generic
+// globe — a bundled mark is a proper brand asset and always wins.
+//
+// Cached in localStorage for the same reason the blur hosts are: the fetch lands
+// well after the first paint, and a row that renders the globe and then swaps to
+// the real mark reads as a glitch.
+const SITE_ICONS_KEY = 'orca_site_icons';
+function loadSiteIconCache(): Record<string, string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(SITE_ICONS_KEY) || 'null');
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, string>) : {};
+  } catch (_) { return {}; }
+}
+let harvestedIcons: Record<string, string> = loadSiteIconCache();
+
+// The harvested favicon for a host, or '' — same parent walk as hostIconSlug, so
+// `www.` and subdomains resolve to the registered host.
+function harvestedIcon(host: string): string {
+  if (!host) return '';
+  const parts = host.toLowerCase().replace(/^www\./, '').split('.');
+  for (let i = 0; i < parts.length - 1; i++) {
+    const icon = harvestedIcons[parts.slice(i).join('.')];
+    if (icon) return icon;
+  }
+  return '';
+}
+
+async function loadSiteIcons(): Promise<void> {
+  try {
+    const res = await apiFetch('/api/websites/icons');
+    if (!res.ok) return;
+    const data = await res.json();
+    harvestedIcons = (data.icons || {}) as Record<string, string>;
+    try { localStorage.setItem(SITE_ICONS_KEY, JSON.stringify(harvestedIcons)); } catch (_) { /* quota */ }
+    applySiteIconsToRows();
+  } catch (_) {
+    // Offline / unauthorized — the globe is a working fallback.
+  }
+}
+
+// Repaint the globes already on screen once the icons land. Each fell back with
+// its source host recorded, so this is a direct lookup rather than a re-render.
+function applySiteIconsToRows(): void {
+  for (const img of Array.from(document.querySelectorAll<HTMLImageElement>('img.src-logo[data-host]'))) {
+    const icon = harvestedIcon(img.dataset.host || '');
+    if (icon) img.src = icon;
+  }
+}
+
 // How each bundled mark has to be treated so it stays visible on the current
 // theme, computed from the icon's own colour at build time (see build.ts). Only
 // the marks that need help carry a tone; everything else renders bare.
 declare const __SITE_ICON_TONES__: Record<string, string>;
 
-function siteLogoImg(slug: string, name: string, extra = ''): string {
+// `host` is only meaningful when the slug fell back to 'generic': it is what a
+// harvested favicon is looked up by, now and on the next repaint.
+function siteLogoImg(slug: string, name: string, extra = '', host = ''): string {
   const tone = __SITE_ICON_TONES__[slug];
   const toned = tone ? ` data-tone="${tone}"` : '';
-  return `<img class="src-logo${extra}" src="/icons/sites/${slug}.svg"${toned} alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
+  const fallback = slug === 'generic' && host ? harvestedIcon(host) : '';
+  const src = fallback || `/icons/sites/${slug}.svg`;
+  const marker = slug === 'generic' && host ? ` data-host="${esc(host)}"` : '';
+  return `<img class="src-logo${extra}" src="${esc(src)}"${toned}${marker} alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
+}
+
+// The title is the way back to where the media came from: tapping it opens the
+// original post (new tab in the browser, system browser in the app — see the
+// outbound-link handler). It keeps the plain `<span>` inside the anchor so the
+// two-line clamp and the privacy blur, which both key off `.title span`, are
+// untouched; and it stays a bare span when the source page isn't an http(s)
+// address, so nothing ever renders as a dead link.
+function titleLinkHtml(webpageUrl: unknown, title: unknown): string {
+  const href = httpHref(webpageUrl);
+  const text = `<span>${esc(title)}</span>`;
+  return href
+    ? `<a class="title-link" href="${esc(href)}" target="_blank" rel="noopener">${text}</a>`
+    : text;
 }
 
 function sourceLogoHtml(item: Item): string {
-  return siteLogoImg(siteIconSlug(item), sourceLabel(item.extractor) || 'Source');
+  return siteLogoImg(
+    siteIconSlug(item),
+    sourceLabel(item.extractor) || 'Source',
+    '',
+    hostOfUrl(item.webpage_url),
+  );
 }
 
 // Thumbnail block. Playable items become a play button (tap → fullscreen player);
@@ -1428,7 +1542,7 @@ function rowHtml(item: Item): string {
   return `
     ${thumbHtml(item, thumb, dur)}
     <div class="body">
-      <div class="title">${logo}<span>${esc(item.title)}</span></div>
+      <div class="title">${logo}${titleLinkHtml(item.webpage_url, item.title)}</div>
       ${uploader}
       <div class="statusline">
         <span class="badge badge-${esc(item.status)}${badgeFlashClass(item.id, item.status)}">${esc(statusLabel(item.status))}</span>
@@ -1661,7 +1775,7 @@ function updateGroupHeader(gkey: string): void {
       ${MEDIA_LOADER}
     </div>
     <div class="group-info">
-      <div class="title">${sourceLogoHtml(first)}<span>${esc(base)}</span></div>
+      <div class="title">${sourceLogoHtml(first)}${titleLinkHtml(first.webpage_url, base)}</div>
       <div class="group-sub"><span class="group-status"></span><span class="group-speed"></span></div>
       <div class="progress group-progress hidden"><div class="progress-fill" style="width:0%"></div></div>
       ${listActions}
@@ -2539,7 +2653,7 @@ function fmtBytes(n: number | undefined): string {
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-interface CookieStatus { present: boolean; enabled: boolean; bytes: number; updated_at: number; expires_at?: number | null; }
+interface CookieStatus { present: boolean; enabled: boolean; bytes: number; updated_at: number; expires_at?: number | null; has_login?: boolean; }
 interface Website {
   key: string;
   name: string;
@@ -2561,6 +2675,9 @@ interface Website {
   /// blur-on don't all float to the top of the list as if the user had set them.
   blur_default: boolean;
   sort: number;
+  /// Whether a favicon has been harvested for this site (bytes come from
+  /// /api/websites/icons, never inline here).
+  has_icon?: boolean;
   cookie?: CookieStatus;
 }
 
@@ -2601,13 +2718,28 @@ function hostOfUrl(url?: string | null): string {
   s = (s.split(':')[0] ?? '').toLowerCase().replace(/\.$/, '');
   return s.startsWith('www.') ? s.slice(4) : s;
 }
-// True when a URL's host belongs to a blur-on site. Shared by the history rows and
-// the prepare cards so the stage/clipboard grabber honours the same blur setting.
-function urlIsBlurred(url?: string | null): boolean {
+// Global override for the per-site privacy blur, driven by the topbar's eye
+// button. Blur on (the eye crossed out) is the default and what a fresh install
+// gets; lifting it reveals every row until it is switched back. Persisted so the
+// state the user left the app in is the one they come back to, and read
+// synchronously at module load for the same first-paint reason blurredHosts is.
+const UNBLUR_KEY = 'orca_unblur';
+let globalUnblur = (() => {
+  try { return localStorage.getItem(UNBLUR_KEY) === '1'; } catch (_) { return false; }
+})();
+
+// True when a URL's host belongs to a blur-on site, ignoring the global switch.
+// Only the switch itself and `urlIsBlurred` should need this.
+function urlIsBlurredBySite(url?: string | null): boolean {
   if (!blurredHosts.length) return false;
   const host = hostOfUrl(url);
   if (!host) return false;
   return blurredHosts.some((suf) => host === suf || host.endsWith('.' + suf));
+}
+// True when a URL's thumbnail must be hidden right now. Shared by the history rows
+// and the prepare cards so the stage/clipboard grabber honours the same setting.
+function urlIsBlurred(url?: string | null): boolean {
+  return !globalUnblur && urlIsBlurredBySite(url);
 }
 function isItemBlurred(item: Item): boolean {
   return urlIsBlurred(item.webpage_url);
@@ -2625,7 +2757,34 @@ function applyBlurToRows(): void {
     const head = state.groups.get(key)?.li.querySelector('.group-head');
     if (first && head) head.classList.toggle('blurred', isItemBlurred(first));
   });
+  // Prepare/clipboard cards are built once and kept, so they need the same
+  // sweep. Their source URL rides a data attribute purely so this can recompute.
+  document.querySelectorAll<HTMLElement>('.prep-card[data-url]').forEach((card) => {
+    card.classList.toggle('blurred', urlIsBlurred(card.dataset.url));
+  });
 }
+
+// Paint the topbar switch to match `globalUnblur`. The label is the ACTION the
+// tap performs, not the state, which is how the rest of the topbar reads.
+function syncBlurToggle(): void {
+  els.blurToggle.classList.toggle('unblurred', globalUnblur);
+  els.blurToggle.setAttribute('aria-pressed', String(!globalUnblur));
+  // Retarget the i18n keys rather than only the resolved strings, so a later
+  // language switch (which re-reads these attributes) keeps the right label.
+  const key = globalUnblur ? 'aria.blurAll' : 'aria.unblurAll';
+  els.blurToggle.dataset.i18nAria = key;
+  els.blurToggle.dataset.i18nTitle = key;
+  els.blurToggle.setAttribute('aria-label', t(key));
+  els.blurToggle.title = t(key);
+}
+
+els.blurToggle.addEventListener('click', () => {
+  globalUnblur = !globalUnblur;
+  try { localStorage.setItem(UNBLUR_KEY, globalUnblur ? '1' : '0'); } catch (_) { /* private mode */ }
+  syncBlurToggle();
+  applyBlurToRows();
+});
+syncBlurToggle();
 // Client-side filter query (name / domains / key) and batch-select state, mirroring
 // the home list's search + multi-select so the two screens feel like one system.
 let siteQuery = '';
@@ -2781,7 +2940,18 @@ document.addEventListener('keydown', (e) => {
   closeMultiSelects();
 });
 
-function siteResSelectHtml(w: Website): string {
+/** The per-site download preferences, as carried by a Website row and by the
+ *  add/edit dialog's draft. Typing the control builders against this (rather
+ *  than the whole Website) lets the dialog reuse them verbatim. */
+interface SitePrefs {
+  max_heights: string | null;
+  stream_quality: string | null;
+  container: string | null;
+  subs: boolean | null;
+  blur: boolean;
+}
+
+function siteResSelectHtml(w: SitePrefs): string {
   return multiSelectHtml({
     act: 'res',
     heights: w.max_heights === null || w.max_heights === undefined
@@ -2808,7 +2978,7 @@ const STREAM_QUALITIES: Array<[string, string]> = [
   ['higher', 'stream.higher'], ['highest', 'stream.highest'],
 ];
 
-function siteStreamSelectHtml(w: Website): string {
+function siteStreamSelectHtml(w: SitePrefs): string {
   const active = w.stream_quality || '';
   const opt = (val: string, label: string): string =>
     `<option value="${val}"${active === val ? ' selected' : ''}>${esc(label)}</option>`;
@@ -2824,7 +2994,7 @@ const SITE_FORMATS: Array<[string, string]> = [
   ['mov', 'MOV'], ['avi', 'AVI'], ['flv', 'FLV'],
 ];
 
-function siteFormatSelectHtml(w: Website): string {
+function siteFormatSelectHtml(w: SitePrefs): string {
   // '' (empty) is the "follow global" sentinel the backend uses to clear the
   // per-site container.
   const active = w.container || '';
@@ -2835,7 +3005,7 @@ function siteFormatSelectHtml(w: Website): string {
   return `<select class="select site-res-select" data-act="fmt" aria-label="${esc(t('sites.format'))}">${opts.join('')}</select>`;
 }
 
-function siteSubsSelectHtml(w: Website): string {
+function siteSubsSelectHtml(w: SitePrefs): string {
   // Three states — follow global / force on / force off — so this is a <select>
   // rather than the two-state pill switch used elsewhere on the card.
   const active = w.subs === null || w.subs === undefined ? 'global' : (w.subs ? 'on' : 'off');
@@ -2849,11 +3019,15 @@ function siteSubsSelectHtml(w: Website): string {
   return `<select class="select site-res-select" data-act="subs" aria-label="${esc(t('sites.subs'))}">${opts.join('')}</select>`;
 }
 
+function siteBlurToggleHtml(p: SitePrefs): string {
+  return `<button type="button" class="site-blur-toggle ${p.blur ? 'on' : 'off'}" data-act="blur" role="switch" aria-checked="${p.blur}" title="${esc(t('sites.blur'))}"><span class="knob"></span></button>`;
+}
+
 // Cookie health as a single traffic-light dot (mature status-indicator pattern),
 // so the jar's state reads at a glance without ever exposing its contents:
 //   green  = present, enabled, healthy      (success)
 //   yellow = present, enabled, expiring ≤7d (suspected expiry)
-//   red    = present, enabled, past expiry  (failed / needs refresh)
+//   red    = present, enabled, past expiry, or carrying no login session cookie
 //   grey   = disabled jar, or no cookie at all
 // Greedy by design near expiry: we never block a download on this (some sites —
 // e.g. YouTube — keep serving past a cookie's nominal expiry), the dot only nudges.
@@ -2862,6 +3036,10 @@ function cookieDot(w: Website): { cls: CookieDotClass; label: string } {
   const c = w.cookie;
   if (!c || !c.present) return { cls: 'off', label: t('cookie.none') };
   if (!c.enabled) return { cls: 'off', label: t('cookie.disabled', { size: fmtBytes(c.bytes) }) };
+  // A jar without its login session cookie is worse than an expiring one: every
+  // gated download silently runs logged-out. Rank it above expiry so the dot
+  // never reads green on a jar that authenticates nothing.
+  if (c.has_login === false) return { cls: 'err', label: t('cookie.noLogin') };
   if (c.expires_at) {
     const now = Date.now() / 1000;
     if (c.expires_at <= now) return { cls: 'err', label: t('cookie.expired') };
@@ -2904,7 +3082,7 @@ function websiteCardHtml(w: Website): string {
       <button class="site-toggle ${w.enabled ? 'on' : 'off'}" data-act="enable" role="switch" aria-checked="${w.enabled}" title="${esc(w.enabled ? t('sites.disable') : t('sites.enable'))}"><span class="knob"></span></button>
       <div class="site-info">
         <div class="site-titlerow">
-          ${siteLogoImg(websiteIconSlug(w), w.name, ' site-logo')}
+          ${siteLogoImg(websiteIconSlug(w), w.name, ' site-logo', w.hosts?.[0] || '')}
           <span class="site-name">${esc(w.name)}</span>
         </div>
         <div class="site-domains-list">${esc(w.hosts.join(', ') || '—')}</div>
@@ -2933,15 +3111,14 @@ function websiteCardHtml(w: Website): string {
           <span class="ck-dot ck-dot-${dot.cls}" title="${esc(dot.label)}" aria-label="${esc(dot.label)}" role="img"></span>${esc(t('sites.cookie'))}
         </span>
         <div class="form-row-ctl">
-          ${present ? `<button class="site-cookie-btn" data-act="ck-import">${esc(t('cookie.replace'))}</button>` : ''}
+          ${present ? `<button class="site-cookie-btn" data-act="ck-delete">${esc(t('cookie.clear'))}</button>
+          <button class="site-cookie-btn" data-act="ck-import">${esc(t('cookie.replace'))}</button>` : ''}
           <button class="site-cookie-toggle ${cookieOn ? 'on' : 'off'}" data-act="ck-switch" role="switch" aria-checked="${cookieOn}" title="${esc(t('sites.cookie'))}"><span class="knob"></span></button>
         </div>
       </div>
       <div class="form-row">
         <span class="form-row-label">${esc(t('sites.blur'))}</span>
-        <div class="form-row-ctl">
-          <button class="site-blur-toggle ${w.blur ? 'on' : 'off'}" data-act="blur" role="switch" aria-checked="${w.blur}" title="${esc(t('sites.blur'))}"><span class="knob"></span></button>
-        </div>
+        <div class="form-row-ctl">${siteBlurToggleHtml(w)}</div>
       </div>
     </div>
     <textarea class="ck-paste hidden" placeholder="${esc(t('ph.cookiePaste'))}" rows="4"></textarea>
@@ -3300,6 +3477,24 @@ async function batchMergeSites(): Promise<void> {
 
 // Add/edit site dialog. `existing` null = add (key editable); else edit (key locked).
 let siteEditKey: string | null = null;
+// The dialog's download-preference draft. Unlike the card — where each control
+// PUTs the moment it changes — nothing here is sent until Save, so all six
+// properties (resolutions, share quality, format, subtitles, blur, plus the
+// domains above them) can be set in one pass and land in a single request. That
+// also makes them settable while CREATING a site, which previously had to be
+// made blank and then tuned control-by-control on its card.
+let siteEditDraft: SitePrefs = { max_heights: null, stream_quality: null, container: null, subs: null, blur: false };
+
+function sitePrefsHtml(p: SitePrefs): string {
+  const row = (label: string, ctl: string): string =>
+    `<div class="form-row"><span class="form-row-label">${esc(label)}</span><div class="form-row-ctl">${ctl}</div></div>`;
+  return row(t('sites.maxRes'), siteResSelectHtml(p))
+    + row(t('settings.streamQuality'), siteStreamSelectHtml(p))
+    + row(t('sites.format'), siteFormatSelectHtml(p))
+    + row(t('sites.subs'), siteSubsSelectHtml(p))
+    + row(t('sites.blur'), siteBlurToggleHtml(p));
+}
+
 function openSiteEdit(existing: Website | null): void {
   siteEditKey = existing ? existing.key : null;
   els.siteEditTitle.textContent = existing ? t('sites.editTitle') : t('sites.addTitle');
@@ -3307,6 +3502,16 @@ function openSiteEdit(existing: Website | null): void {
   els.siteEditKey.value = existing ? existing.key : '';
   els.siteEditKey.readOnly = !!existing;
   els.siteEditHosts.value = existing ? existing.hosts.join(', ') : '';
+  siteEditDraft = existing
+    ? {
+      max_heights: existing.max_heights ?? null,
+      stream_quality: existing.stream_quality ?? null,
+      container: existing.container ?? null,
+      subs: existing.subs ?? null,
+      blur: existing.blur,
+    }
+    : { max_heights: null, stream_quality: null, container: null, subs: null, blur: false };
+  els.siteEditPrefs.innerHTML = sitePrefsHtml(siteEditDraft);
   els.siteEditErr.classList.add('hidden');
   openModal(els.siteEdit);
   (existing ? els.siteEditHosts : els.siteEditName).focus();
@@ -3317,8 +3522,25 @@ async function saveSiteEdit(): Promise<void> {
   const key = (siteEditKey || els.siteEditKey.value.trim().toLowerCase()).replace(/[^a-z0-9_]/g, '');
   const hosts = els.siteEditHosts.value.trim();
   if (!key) { els.siteEditErr.textContent = t('sites.keyRequired'); els.siteEditErr.classList.remove('hidden'); return; }
-  const ok = await saveWebsite(key, { name: name || key, hosts });
-  if (ok) { closeModal(els.siteEdit); if (!siteEditKey) loadWebsites(); }
+  const d = siteEditDraft;
+  // "Follow global" is `null` in the draft, but a null field in JSON reads as
+  // "absent" to the API — so each of those clears via its own explicit flag,
+  // exactly as the card's controls do.
+  const patch: Record<string, unknown> = {
+    name: name || key,
+    hosts,
+    container: d.container ?? '',
+    blur: d.blur,
+    ...(d.max_heights === null ? { max_heights_global: true } : { max_heights: parseHeights(d.max_heights) }),
+    ...(d.stream_quality === null ? { stream_quality_global: true } : { stream_quality: d.stream_quality }),
+    ...(d.subs === null ? { subs_global: true } : { subs: d.subs }),
+  };
+  const ok = await saveWebsite(key, patch);
+  if (ok) {
+    closeModal(els.siteEdit);
+    applyBlurToRows(); // the dialog can flip privacy blur, same as the card's switch
+    if (!siteEditKey) loadWebsites();
+  }
 }
 
 // ---- Share dialog (Baidu-netdisk style) -----------------------------------
@@ -3698,6 +3920,29 @@ els.siteEdit.addEventListener('click', (e) => {
   if (e.target === els.siteEdit) closeModal(els.siteEdit);
 });
 els.siteEditSave.addEventListener('click', saveSiteEdit);
+// The dialog's preference controls only record into the draft — saveSiteEdit
+// sends the lot. The controls already paint themselves, so nothing re-renders
+// here (re-rendering would slam the resolution popover shut mid-pick).
+els.siteEditPrefs.addEventListener('change', (e) => {
+  const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
+  if (!sel) return;
+  const v = sel.value;
+  if (sel.dataset.act === 'stream') siteEditDraft.stream_quality = v || null;
+  else if (sel.dataset.act === 'fmt') siteEditDraft.container = v || null;
+  else if (sel.dataset.act === 'subs') siteEditDraft.subs = v === 'global' ? null : v === 'on';
+});
+els.siteEditPrefs.addEventListener('multiselect-change', (e) => {
+  const heights = (e as CustomEvent).detail.heights as number[] | null;
+  siteEditDraft.max_heights = heights === null ? null : heights.join(',');
+});
+els.siteEditPrefs.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest('[data-act="blur"]') as HTMLElement | null;
+  if (!btn) return;
+  siteEditDraft.blur = !siteEditDraft.blur;
+  btn.classList.toggle('on', siteEditDraft.blur);
+  btn.classList.toggle('off', !siteEditDraft.blur);
+  btn.setAttribute('aria-checked', String(siteEditDraft.blur));
+});
 
 // Commit the typed token, then re-pull everything that was gated behind it.
 // Called by the sheet's one Save (see saveSettings).
@@ -5244,7 +5489,9 @@ function prepCardEl(entry: PrepEntry, onRemove?: (entry: PrepEntry) => void): HT
   card.className = 'prep-card';
   card.classList.toggle('selected', entry.selected);
   // Honour the per-site privacy blur (goal 3): a card from a blur-on site hides
-  // its thumbnail until hover, exactly like the history rows.
+  // its thumbnail until hover, exactly like the history rows. The URL rides a
+  // data attribute so applyBlurToRows can re-decide when the global switch flips.
+  card.dataset.url = entry.url;
   card.classList.toggle('blurred', urlIsBlurred(entry.url));
 
   // The X drops this single entry from the batch (goal 3) — it sits where the old
@@ -5605,6 +5852,10 @@ els.history.addEventListener('click', (e) => {
       }
     }
   }
+  // The title is a link out to the original post now, so a tap on it belongs to
+  // the anchor — not to the fold's expand/collapse and not to the clamp toggle
+  // below. Checked before both so either kind of card behaves the same way.
+  if (target.closest('a.title-link')) return;
   if (head) {
     // Whole-list actions on the fold header take priority over expand/collapse.
     const act = target.closest('[data-act]') as HTMLElement | null;
@@ -5623,7 +5874,8 @@ els.history.addEventListener('click', (e) => {
   }
   // A title too long for its two lines expands in place on tap (and re-clamps on
   // a second tap) — the disclosure pattern YouTube/Reddit use. Height only grows
-  // for the one row the user asked about, never the resting list.
+  // for the one row the user asked about, never the resting list. Only titles
+  // with no source page to open reach here (linked ones returned above).
   const titleEl = target.closest('.title') as HTMLElement | null;
   if (titleEl) {
     const row = titleEl.closest('.item') as HTMLElement | null;
@@ -6491,20 +6743,14 @@ function thumbSrc(play: HTMLElement): string | undefined {
 let playQueue: Array<{ id: number; cloud: boolean; poster?: string }> = [];
 let playIndex = 0;
 let playerScrollY = 0;
-let imageCycleTimer: ReturnType<typeof setTimeout> | null = null;
 let playerNavTimer: ReturnType<typeof setTimeout> | null = null;
 let playerNavActive = true;
-const IMAGE_CYCLE_MS = 4500;
 // Chromium's native video chrome withdraws shortly after playback resumes or
 // pointer activity stops. It does not expose that visibility as an event, so
-// keep the fold navigation on the same interaction lifecycle instead of leaving
-// two custom buttons floating over an otherwise clean video.
+// keep the player's own chrome — the fold arrows AND the close button — on the
+// same interaction lifecycle instead of leaving custom buttons floating over an
+// otherwise clean video or photo.
 const PLAYER_NAV_HIDE_MS = 2500;
-
-function stopImageCycle(): void {
-  if (imageCycleTimer) clearTimeout(imageCycleTimer);
-  imageCycleTimer = null;
-}
 
 function stopPlayerNavTimer(): void {
   if (playerNavTimer) clearTimeout(playerNavTimer);
@@ -6512,8 +6758,9 @@ function stopPlayerNavTimer(): void {
 }
 
 // A list is a reel, not a one-shot queue: after its last child, return to the
-// first. Images have no `ended` event, so keep them on screen briefly before
-// taking the same next-item path videos use.
+// first. A still never advances on its own — a photo is looked at for as long as
+// the viewer wants — so only a video's `ended`, an arrow, a key or a swipe moves
+// the queue on.
 function advancePlayQueue(): void {
   if (!playQueue.length) return;
   playIndex = (playIndex + 1) % playQueue.length;
@@ -6542,11 +6789,15 @@ function syncMediaSessionActions(): void {
 
 function syncPlayerNav(): void {
   const available = playQueue.length > 1;
-  const idle = els.player.dataset.kind === 'video' && !playerNavActive;
+  const idle = !playerNavActive;
   els.playerPrev.classList.toggle('hidden', !available);
   els.playerNext.classList.toggle('hidden', !available);
   els.playerPrev.classList.toggle('player-nav-idle', idle);
   els.playerNext.classList.toggle('player-nav-idle', idle);
+  // The close button is chrome too, and a permanent black pill in the corner of
+  // a photo is exactly the "squatting on the screen" the arrows were faded to
+  // avoid. It leaves and returns with them (and with the video's own controls).
+  els.playerClose.classList.toggle('player-nav-idle', idle);
   syncMediaSessionActions();
 }
 
@@ -6554,11 +6805,11 @@ function showPlayerNav(): void {
   stopPlayerNavTimer();
   playerNavActive = true;
   syncPlayerNav();
-  if (
-    playQueue.length > 1
-    && els.player.dataset.kind === 'video'
-    && !els.playerVideo.paused
-  ) {
+  // Withdraw on idle for a still as well as a video: the chrome is temporary,
+  // and a tap anywhere brings it back. A *paused* video is the one exception —
+  // Chromium keeps its own control bar up there, so ours stays to match it.
+  const paused = els.player.dataset.kind === 'video' && els.playerVideo.paused;
+  if (!paused) {
     playerNavTimer = setTimeout(() => {
       playerNavTimer = null;
       playerNavActive = false;
@@ -6567,21 +6818,13 @@ function showPlayerNav(): void {
   }
 }
 
-function holdPlayerNav(): void {
+// Put the chrome away on request. The idle timer takes it away on its own, but
+// a viewer who wants the picture clear now should not have to wait it out —
+// which is exactly what a second tap does to the platform's own video controls.
+function hidePlayerNav(): void {
   stopPlayerNavTimer();
-  playerNavActive = true;
+  playerNavActive = false;
   syncPlayerNav();
-}
-
-function scheduleImageCycle(id: number): void {
-  stopImageCycle();
-  if (playQueue.length < 2 || playQueue[playIndex]?.id !== id) return;
-  imageCycleTimer = setTimeout(() => {
-    imageCycleTimer = null;
-    if (!els.player.classList.contains('hidden') && els.player.dataset.kind === 'image') {
-      advancePlayQueue();
-    }
-  }, IMAGE_CYCLE_MS);
 }
 
 function playCurrentInQueue(): void {
@@ -6641,7 +6884,13 @@ async function maybeOpenPendingPlay(): Promise<void> {
   // openPlayer resolves its media/thumbnail URLs through state.items, so an item
   // pulled in from outside the loaded page has to be registered there.
   state.items.set(target.id, target);
-  openPlayer(target.id, !target.local_available, thumbUrl(target));
+  // An X post is just as likely to be a photo as a video, and a still handed to
+  // the <video> element fails to load — which surfaced as "could not resolve
+  // stream" on an item whose file was sitting right there on disk. Route by media
+  // type exactly as a click in the history does (see playItemInGroup).
+  const cloud = !target.local_available;
+  if (isImage(target)) openImage(target.id, cloud);
+  else openPlayer(target.id, cloud, thumbUrl(target));
 }
 
 // One item by public slug, independent of history paging. Undefined when it is
@@ -6722,10 +6971,13 @@ function startPlayback(v: HTMLVideoElement): void {
 }
 
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
-  stopImageCycle();
+  resetSwipe();
+  resetZoom();
   const v = els.playerVideo;
   els.player.dataset.kind = 'video';
+  imageToken++;  // drop any still that is still decoding for the previous item
   els.playerImage.removeAttribute('src');
+  els.playerImage.alt = '';
   // Also runs when a fold advances to the next clip, so the previous item's
   // tracks never carry over.
   clearSubtitles();
@@ -6788,21 +7040,60 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
 // Android's WebView has no controlling service worker, so its native loopback
 // proxy supplies authenticated/decrypted bytes. The browser then decodes the
 // result as a normal image rather than navigating to an upstream post.
-function showNativeImage(img: HTMLImageElement, slug: string, kind: 'stream' | 'file'): void {
+function showNativeImage(slug: string, kind: 'stream' | 'file', alt: string, token: number): void {
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) { toast(t('toast.streamFail'), 'error'); return; }
   void (invoke('stream_url', { slug, kind, height: 0 }) as Promise<string>)
     .then((url) => {
       if (!url) throw new Error('no proxy url');
-      img.src = url;
+      setPlayerImage(url, alt, token);
     })
-    .catch(() => { toast(t('toast.streamFail'), 'error'); closePlayer(true); });
+    .catch(() => {
+      if (token !== imageToken) return;  // a later swipe already moved on
+      toast(t('toast.streamFail'), 'error');
+      closePlayer(true);
+    });
+}
+
+// Which image the player is currently loading. Every swipe/arrow bumps it, so a
+// slow load that lands after the viewer has moved on is dropped instead of
+// painting over whatever is on screen now.
+let imageToken = 0;
+
+// Swap the still only once the incoming one can be painted. Assigning src (or
+// clearing it) up front is what caused the flash: the element goes empty for as
+// long as the next image takes to arrive, showing black — and, because an <img>
+// with no usable source falls back to its alt text, the item's title printed
+// itself in the top-left corner on the way past. Decoding first means the
+// element never holds nothing: the old frame stays until the new one replaces
+// it in a single paint.
+function setPlayerImage(url: string, alt: string, token: number): void {
+  if (token !== imageToken) return;
+  const swap = (): void => {
+    if (token !== imageToken) return;
+    els.playerImage.alt = alt;
+    els.playerImage.src = url;
+  };
+  const pre = new Image();
+  pre.src = url;
+  // The bytes are in cache by the time we assign, so the swap costs no refetch.
+  // A failure swaps too: that is the path where the <img> error state (and the
+  // alt text with it) is the honest thing to show.
+  if (pre.decode) void pre.decode().then(swap, swap);
+  else { pre.onload = swap; pre.onerror = swap; }
 }
 
 function openImage(id: number, cloud: boolean): void {
   const item = state.items.get(id);
   if (!item?.slug) return;
+  resetSwipe();
+  resetZoom();  // a new picture opens at 1:1, never inheriting the last one's zoom
+  const token = ++imageToken;
   const opening = els.player.classList.contains('hidden');
+  // Only a still can be held over while the next one decodes. Coming from a
+  // video (a mixed fold) or from a cold open there is nothing valid to keep, so
+  // clear the element rather than flash the previous session's picture.
+  const holdOver = !opening && els.player.dataset.kind === 'image';
   if (opening) {
     playerScrollY = window.scrollY;
     document.body.style.top = `-${playerScrollY}px`;
@@ -6813,8 +7104,10 @@ function openImage(id: number, cloud: boolean): void {
   v.removeAttribute('src');
   v.load();
   els.player.dataset.kind = 'image';
-  els.playerImage.alt = item.title || 'Image';
-  els.playerImage.removeAttribute('src');
+  if (!holdOver) {
+    els.playerImage.removeAttribute('src');
+    els.playerImage.alt = '';
+  }
   els.player.classList.remove('hidden');
   showPlayerNav();
   els.player.setAttribute('aria-hidden', 'false');
@@ -6823,11 +7116,11 @@ function openImage(id: number, cloud: boolean): void {
 
   // Prefer a device copy; otherwise use the same authenticated file/stream path
   // as video. Neither branch opens the source-post URL.
+  const alt = item.title || 'Image';
   const local = localFileFor(item.slug);
-  if (local) els.playerImage.src = local.url;
-  else if (nativeMediaFallback()) showNativeImage(els.playerImage, item.slug, cloud ? 'stream' : 'file');
-  else els.playerImage.src = cloud ? streamUrl(item.slug) : fileUrl(item);
-  scheduleImageCycle(id);
+  if (local) setPlayerImage(local.url, alt, token);
+  else if (nativeMediaFallback()) showNativeImage(item.slug, cloud ? 'stream' : 'file', alt, token);
+  else setPlayerImage(cloud ? streamUrl(item.slug) : fileUrl(item), alt, token);
 }
 
 // ---- Local copies on this device (Android app) ----------------------------
@@ -7087,6 +7380,7 @@ function closePlayer(pop: boolean): void {
   v.pause();
   v.removeAttribute('src');
   v.removeAttribute('poster');
+  imageToken++;
   els.playerImage.removeAttribute('src');
   els.playerImage.alt = '';
   delete els.player.dataset.kind;
@@ -7105,7 +7399,8 @@ function closePlayer(pop: boolean): void {
   stopPlayerNavTimer();
   playerNavActive = true;
   syncPlayerNav();
-  stopImageCycle();
+  resetSwipe();
+  resetZoom();
   if (!isNativeApp && pop && history.state && history.state.player) history.back();
 }
 
@@ -7116,16 +7411,319 @@ els.playerVideo.addEventListener('ended', () => {
 els.playerVideo.addEventListener('playing', showPlayerNav);
 els.playerVideo.addEventListener('pause', showPlayerNav);
 els.player.addEventListener('pointermove', (e) => {
-  // A finger does not meaningfully "move" while watching; its pointerdown below
-  // is the native-controls gesture. Mouse/pen movement, however, reveals them.
+  // A finger does not meaningfully "move" while watching; its taps and drags are
+  // read below. Mouse/pen movement, however, reveals the chrome.
   if (e.pointerType !== 'touch') showPlayerNav();
 });
-els.player.addEventListener('pointerdown', holdPlayerNav);
-els.player.addEventListener('pointerup', showPlayerNav);
-els.player.addEventListener('pointercancel', showPlayerNav);
 els.player.addEventListener('keydown', showPlayerNav);
 els.playerPrev.addEventListener('click', previousPlayQueue);
 els.playerNext.addEventListener('click', advancePlayQueue);
+
+// Swipe left/right to walk a fold, the gesture every phone gallery uses. It is
+// the primary control once the arrows have faded (they are still there — a tap
+// brings them back).
+//
+// The shape is the one every mature gallery (PhotoSwipe, Swiper, the stock photo
+// apps) converged on, and each part of it earns its place:
+//
+//   * the media TRACKS THE FINGER while you drag, so the gesture is discoverable
+//     and reversible — you can see the next item coming and back out of it;
+//   * the axis is LOCKED on the first ~10px of travel. Until then it is nobody's
+//     gesture; once it commits to horizontal, a wobbly finger cannot break it;
+//   * release commits on DISTANCE **or** VELOCITY (a short fast flick counts —
+//     requiring a long drag is what makes home-made carousels feel dead);
+//   * a release under both thresholds SNAPS BACK, it never half-advances.
+//
+// A <video> walks its fold on the same gesture — a fold of clips is browsed the
+// same way a fold of photos is. It only reserves the bottom band, where the
+// browser's own control bar lives and a horizontal drag is a scrub, not a swipe.
+const SWIPE_MIN_PX = 56;          // shorter than this is a tap or a stray wobble
+const SWIPE_MIN_FRACTION = 0.18;  // ...or this much of the screen, whichever is more
+const SWIPE_FLICK_VELOCITY = 0.4; // px/ms: a fast flick commits at any distance
+const SWIPE_AXIS_LOCK_PX = 10;    // travel before the gesture picks an axis
+const SWIPE_OFF_AXIS = 0.6;       // vertical travel must stay well under horizontal
+// The bottom strip of a <video> is the browser's own control bar. A horizontal
+// drag there is a scrub, so a swipe that starts inside it is not ours to read.
+const SWIPE_CONTROLS_BAND = 88;
+
+// A still also PINCHES TO ZOOM, and once it is zoomed the same finger that used
+// to swipe pans around inside the picture instead — that swap of meaning at
+// scale > 1 is what every photo viewer does, and it is why a zoomed photo does
+// not accidentally skip to the next one. A double-tap is the shortcut: in at the
+// point you tapped, out again from anywhere.
+const ZOOM_MAX = 4;              // beyond this a phone photo is just pixels
+const ZOOM_DOUBLE_TAP = 2.5;     // where a double-tap lands
+const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_SLOP = 32;      // a second tap further away than this is a new tap
+const MEDIA_EASE = 'transform .2s cubic-bezier(.22,.61,.36,1)';
+
+type Drag = {
+  x: number; y: number; id: number;
+  lastX: number; lastT: number; vx: number;
+  axis: 'none' | 'x' | 'y';
+  mode: 'swipe' | 'pan';
+  media: HTMLElement;
+  tx: number; ty: number;        // zoom offset when the drag started (pan mode)
+};
+// Anchor data for a two-finger pinch: the gap and midpoint it started from, and
+// the zoom it started from, so scale and translation stay relative to the grab.
+type Pinch = { gap: number; scale: number; tx: number; ty: number; cx: number; cy: number; mx: number; my: number };
+
+let drag: Drag | null = null;
+let pinch: Pinch | null = null;
+const pointers = new Map<number, { x: number; y: number }>();
+let zoomScale = 1;
+let zoomX = 0;
+let zoomY = 0;
+// Whether the chrome was up when the finger landed, and whether it landed on a
+// button. Both are read at pointerup to tell a tap-to-toggle from a drag.
+let navWasActive = true;
+let onPlayerButton = false;
+let lastTapAt = 0;
+let lastTapX = 0;
+let lastTapY = 0;
+let tapChromeBefore = true;
+
+function playerMedia(): HTMLElement {
+  return els.player.dataset.kind === 'image' ? els.playerImage : els.playerVideo;
+}
+
+function isZoomed(): boolean { return zoomScale > 1.01; }
+
+// The still is object-fit:contain, so the painted picture is smaller than the
+// element it sits in. Panning has to stop at the picture's edge, not the
+// element's, or the photo drifts off into the black margin.
+function zoomBounds(scale: number): { x: number; y: number } {
+  const img = els.playerImage;
+  const cw = img.clientWidth || 1;
+  const ch = img.clientHeight || 1;
+  const nw = img.naturalWidth || cw;
+  const nh = img.naturalHeight || ch;
+  const fit = Math.min(cw / nw, ch / nh);
+  return {
+    x: Math.max(0, (nw * fit * scale - cw) / 2),
+    y: Math.max(0, (nh * fit * scale - ch) / 2),
+  };
+}
+
+function clampZoom(): void {
+  const b = zoomBounds(zoomScale);
+  zoomX = Math.min(b.x, Math.max(-b.x, zoomX));
+  zoomY = Math.min(b.y, Math.max(-b.y, zoomY));
+}
+
+// One place composes the still's transform: the zoom (scale + its offset) plus
+// whatever horizontal travel an in-flight swipe has added.
+function renderImage(dx = 0, animate = false): void {
+  const img = els.playerImage;
+  img.style.transition = animate ? MEDIA_EASE : '';
+  img.style.transform = zoomScale === 1 && !zoomX && !zoomY && !dx
+    ? ''
+    : `translate3d(${zoomX + dx}px,${zoomY}px,0) scale(${zoomScale})`;
+}
+
+function resetZoom(animate = false): void {
+  zoomScale = 1;
+  zoomX = 0;
+  zoomY = 0;
+  pinch = null;
+  renderImage(0, animate);
+}
+
+// Put the media back where it belongs — used on release, and by every path that
+// swaps or tears down the media so a half-dragged frame can never be inherited.
+// The zoom is deliberately kept: only a new item (openImage) throws it away.
+function resetSwipe(animate = false): void {
+  drag = null;
+  els.playerVideo.style.transition = animate ? MEDIA_EASE : '';
+  els.playerVideo.style.transform = '';
+  renderImage(0, animate);
+}
+
+// Zoom about the tapped point: the pixel under the finger must not move, which
+// is the difference between a zoom that feels aimed and one that feels random.
+function toggleZoomAt(clientX: number, clientY: number): void {
+  if (isZoomed()) { resetZoom(true); return; }
+  const r = els.playerImage.getBoundingClientRect();
+  const cx = clientX - (r.left + r.width / 2);
+  const cy = clientY - (r.top + r.height / 2);
+  zoomScale = ZOOM_DOUBLE_TAP;
+  zoomX = cx * (1 - ZOOM_DOUBLE_TAP);
+  zoomY = cy * (1 - ZOOM_DOUBLE_TAP);
+  clampZoom();
+  renderImage(0, true);
+}
+
+function startPinch(): void {
+  const [a, b] = [...pointers.values()];
+  if (!a || !b) return;
+  const r = els.playerImage.getBoundingClientRect();
+  const mx = (a.x + b.x) / 2;
+  const my = (a.y + b.y) / 2;
+  drag = null;
+  pinch = {
+    gap: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+    scale: zoomScale, tx: zoomX, ty: zoomY,
+    cx: mx - (r.left + r.width / 2), cy: my - (r.top + r.height / 2),
+    mx, my,
+  };
+}
+
+els.player.addEventListener('pointerdown', (e) => {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  resetSwipe();
+  // Remember the chrome's state *before* this touch: pointerup needs to know
+  // whether the tap should put it away or bring it back.
+  navWasActive = playerNavActive;
+  onPlayerButton = !!(e.target as HTMLElement).closest('.player-nav, .player-close');
+  stopPlayerNavTimer();  // never let it fade out from under a finger mid-gesture
+  if (onPlayerButton) return;
+  const image = els.player.dataset.kind === 'image';
+  // A second finger on a still is always a pinch, whatever the first was doing.
+  if (image && pointers.size === 2) { startPinch(); return; }
+  if (pointers.size > 1) return;
+  // Touch/pen only: a mouse drag over the video is a scrub or a selection, and
+  // a pointer device already has the arrows and the arrow keys.
+  if (e.pointerType === 'mouse') return;
+  const mode: Drag['mode'] = image && isZoomed() ? 'pan' : 'swipe';
+  if (mode === 'swipe' && playQueue.length < 2) return;
+  if (mode === 'swipe' && !image
+    && e.clientY > els.player.clientHeight - SWIPE_CONTROLS_BAND) return;
+  drag = {
+    x: e.clientX, y: e.clientY, id: e.pointerId,
+    lastX: e.clientX, lastT: e.timeStamp, vx: 0,
+    axis: 'none', mode, media: playerMedia(),
+    tx: zoomX, ty: zoomY,
+  };
+});
+
+els.player.addEventListener('pointermove', (e) => {
+  const p = pointers.get(e.pointerId);
+  if (p) { p.x = e.clientX; p.y = e.clientY; }
+
+  if (pinch && pointers.size >= 2) {
+    const [a, b] = [...pointers.values()];
+    if (!a || !b) return;
+    const gap = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+    const scale = Math.min(ZOOM_MAX, Math.max(0.5, pinch.scale * (gap / pinch.gap)));
+    const k = scale / pinch.scale;
+    // Keep the content under the initial midpoint pinned, then follow the
+    // midpoint itself so two fingers can move the photo as well as size it.
+    zoomScale = scale;
+    zoomX = pinch.cx * (1 - k) + pinch.tx * k + ((a.x + b.x) / 2 - pinch.mx);
+    zoomY = pinch.cy * (1 - k) + pinch.ty * k + ((a.y + b.y) / 2 - pinch.my);
+    clampZoom();
+    renderImage(0, false);
+    return;
+  }
+
+  const s = drag;
+  if (!s || e.pointerId !== s.id) return;
+  const dx = e.clientX - s.x;
+  const dy = e.clientY - s.y;
+
+  if (s.mode === 'pan') {
+    // Inside a zoomed photo there is no axis to lock and nothing to commit: the
+    // finger just carries the picture, stopped at its own edges.
+    if (s.axis === 'none') {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      s.axis = 'x';
+      try { s.media.setPointerCapture(s.id); } catch { /* capture is best-effort */ }
+    }
+    zoomX = s.tx + dx;
+    zoomY = s.ty + dy;
+    clampZoom();
+    renderImage(0, false);
+    return;
+  }
+
+  if (s.axis === 'none') {
+    if (Math.abs(dx) < SWIPE_AXIS_LOCK_PX && Math.abs(dy) < SWIPE_AXIS_LOCK_PX) return;
+    s.axis = Math.abs(dy) > Math.abs(dx) * SWIPE_OFF_AXIS ? 'y' : 'x';
+    if (s.axis === 'y') { drag = null; return; }
+    // Ours from here: hold the pointer so a finger that wanders off the media
+    // still delivers its moves, and let it move without a transition.
+    try { s.media.setPointerCapture(s.id); } catch { /* capture is best-effort */ }
+    s.media.style.transition = '';
+  }
+  // Sliding velocity estimate: the last leg of the drag, not the whole average,
+  // which is what makes a flick that starts slow and ends fast still count.
+  const dt = e.timeStamp - s.lastT;
+  if (dt > 0) s.vx = (e.clientX - s.lastX) / dt;
+  s.lastX = e.clientX;
+  s.lastT = e.timeStamp;
+  if (s.media === els.playerImage) renderImage(dx, false);
+  else s.media.style.transform = `translate3d(${dx}px,0,0)`;
+});
+
+function endPointer(e: PointerEvent): { pinched: boolean } {
+  pointers.delete(e.pointerId);
+  if (!pinch) return { pinched: false };
+  if (pointers.size >= 2) return { pinched: true };
+  pinch = null;
+  // A pinch that ended below 1:1 springs back — the picture belongs on screen,
+  // not shrunk into the middle of it.
+  if (zoomScale < 1.01) resetZoom(true);
+  else { clampZoom(); renderImage(0, true); }
+  return { pinched: true };
+}
+
+els.player.addEventListener('pointerup', (e) => {
+  const { pinched } = endPointer(e);
+  const s = drag && drag.id === e.pointerId ? drag : null;
+  const panned = s?.mode === 'pan' && s.axis !== 'none';
+  const dragged = s?.mode === 'swipe' && s.axis === 'x';
+  let dx = 0;
+  let commit = false;
+  if (dragged && s) {
+    dx = e.clientX - s.x;
+    const threshold = Math.max(SWIPE_MIN_PX, els.player.clientWidth * SWIPE_MIN_FRACTION);
+    const flick = Math.abs(s.vx) > SWIPE_FLICK_VELOCITY && Math.sign(s.vx) === Math.sign(dx);
+    commit = Math.abs(dx) > threshold || (flick && Math.abs(dx) > SWIPE_AXIS_LOCK_PX);
+  }
+  drag = null;
+  // A swipe eases back to centre rather than jumping: on a commit the next item
+  // swaps in underneath that settle (setPlayerImage), so the hand-off reads as
+  // one motion instead of a snap followed by a change. A pan is already where
+  // the finger left it and must not be reset.
+  if (dragged) resetSwipe(true);
+
+  const moved = pinched || panned || dragged;
+  // Chrome, on the same release. A drag is not a tap: after a swipe, a pan or a
+  // pinch the chrome comes back rather than flipping off. A tap on bare media is
+  // the platform's own toggle — up, tap it away; gone, tap it back. Taps on the
+  // buttons themselves are the button's business, not the toggle's.
+  if (!onPlayerButton && !moved) {
+    // A double-tap zooms instead, and puts the chrome back the way it was before
+    // the pair started — so aiming at a photo never flickers the buttons.
+    const near = Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < DOUBLE_TAP_SLOP;
+    if (els.player.dataset.kind === 'image' && e.timeStamp - lastTapAt < DOUBLE_TAP_MS && near) {
+      lastTapAt = 0;
+      toggleZoomAt(e.clientX, e.clientY);
+      if (tapChromeBefore) showPlayerNav(); else hidePlayerNav();
+      return;
+    }
+    lastTapAt = e.timeStamp;
+    lastTapX = e.clientX;
+    lastTapY = e.clientY;
+    tapChromeBefore = navWasActive;
+    if (navWasActive) hidePlayerNav(); else showPlayerNav();
+  } else if (!onPlayerButton) {
+    showPlayerNav();
+  }
+
+  if (!commit) return;
+  // Drag right = reach back for the previous item, matching every photo viewer.
+  if (dx > 0) previousPlayQueue(); else advancePlayQueue();
+});
+
+els.player.addEventListener('pointercancel', (e) => {
+  endPointer(e);
+  drag = null;
+  if (!isZoomed()) resetSwipe(true);
+  else renderImage(0, true);
+  showPlayerNav();
+});
 
 window.addEventListener('keydown', (e) => {
   if (els.player.classList.contains('hidden') || playQueue.length < 2) return;
@@ -7796,7 +8394,10 @@ async function startApp(): Promise<void> {
   // (see hydrateFromCache). Only a cold client rebuilds the list outright.
   if (hydrateFromCache()) void softRefresh(true); else void loadItems(true);
   loadStats();
-  if (getToken()) loadWebsites(); // per-site privacy-blur state for the home list
+  if (getToken()) {
+    loadWebsites();  // per-site privacy-blur state for the home list
+    loadSiteIcons(); // favicons harvested for sites we ship no bundled mark for
+  }
 }
 
 applyTheme();                // resolve theme before first paint work

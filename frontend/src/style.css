@@ -276,6 +276,15 @@ body {
    than hidden so the control stays where the user learned it was. */
 .icon-btn:disabled { opacity: .38; cursor: default; }
 
+/* Global blur switch: both eye glyphs ship in the markup and CSS picks the one
+   matching the current state, so a toggle never rebuilds an icon from a string. */
+#blur-toggle .ico-eye,
+#blur-toggle.unblurred .ico-eye-off { display: none; }
+#blur-toggle.unblurred .ico-eye { display: block; }
+/* Blur lifted is a deliberate, temporary state — colour it so it can't be left
+   on unnoticed. */
+#blur-toggle.unblurred { color: var(--accent); }
+
 /* ---- Topbar popover menu (language picker) ----
    A small dropdown anchored under its trigger, the standard header-menu pattern:
    tap to open, tap an item or click away to close. */
@@ -503,6 +512,16 @@ input:focus { outline: none; border-color: var(--accent); }
   margin-bottom: 6px;
 }
 .modal-card .row { margin-bottom: 4px; }
+
+/* Add/edit-website dialog. Its scalar fields are stacked block-level (label over
+   control), where `input { flex: 1 }` does nothing and the browser falls back to
+   its ~20ch default box — so Name and Key sat as short stubs beside the
+   full-width domains textarea. Pin every field to the sheet width. */
+#site-edit .input { width: 100%; }
+/* The per-site preference rows below them: the same hairline-separated settings
+   list the cards use, boxed off from the free-text fields above. */
+.site-edit-prefs { margin: 4px 0 8px; }
+.site-edit-prefs .form-row:first-child { border-top: 1px solid var(--border); }
 
 /* ---- Settings form row (shared) -------------------------------------------
    The iOS-Settings / GNOME-preferences list row: a label hard left, its control
@@ -1088,15 +1107,20 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 /* Live download speed of the currently-running child, shown after the summary
    text while the fold is downloading. */
 .group-speed { color: var(--run); font-weight: 600; margin-left: 6px; }
-/* Aggregate download progress bar (total across all children). Reuses the item
-   .progress look; capped so it doesn't run under the right-rail actions. */
-.group-progress { margin-top: 6px; max-width: 220px; }
+/* Aggregate download progress bar (total across all children). The list card is
+   a first-level card, so its bar is the SAME bar a video card draws — full body
+   width, .progress geometry untouched — with only the list aggregation layered
+   on top (updateGroupProgress). It used to be capped at 220px to dodge a right
+   rail that no longer exists (the chevron is overlaid at the top-right, well
+   above this row), which just made the fold's progress read as a stub. */
+.group-progress { margin-top: 6px; }
 /* Chevron is overlaid at the top-right rather than occupying a flex column.
    That lets the bottom action row reach the same right edge as a normal card. */
 .group-side { position: absolute; top: 10px; right: 10px; display: flex; align-items: flex-end; pointer-events: none; }
+/* Keep the text rows clear of the overlaid chevron. The progress bar sits below
+   it, so it takes the full width like a video card's. */
 .group-info > .title,
-.group-info > .group-sub,
-.group-info > .group-progress { margin-right: 24px; }
+.group-info > .group-sub { margin-right: 24px; }
 .group-info .group-actions { margin-top: auto; align-self: flex-end; padding-top: 0; max-width: 100%; }
 .group-chevron { flex: 0 0 auto; color: var(--muted); transition: transform .18s ease; }
 .group-card:not(.collapsed) .group-chevron { transform: rotate(180deg); }
@@ -1403,7 +1427,7 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
    a line boundary and appends its own "…", so the card height is fixed at two
    lines no matter how long the title is. Tapping expands it in place
    (.title-open) rather than growing every row — see the click handler. */
-.title > span {
+.title span {
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -1411,8 +1435,17 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   -webkit-box-orient: vertical;
   cursor: pointer;
 }
+/* The title links back to the original post. It stays visually a title — no
+   underline, no link colour — because every card would otherwise read as a wall
+   of blue; the whole row is already interactive. `min-width: 0` lets the clamped
+   span shrink inside the flex title row instead of pushing the logo out. */
+a.title-link {
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
 /* Tapped open: show the whole title. Only this row grows, and only on demand. */
-.item.title-open .title > span {
+.item.title-open .title span {
   -webkit-line-clamp: unset;
   overflow: visible;
 }
@@ -1800,6 +1833,10 @@ a.uploader-link:hover { color: var(--text); text-decoration: underline; }
   max-height: 100vh;
   object-fit: contain;
   background: #000;
+  /* Horizontal drags are the fold swipe, so deny the WebView its own sideways
+     pan — otherwise it claims the gesture and answers with pointercancel. Only
+     pan-y, not `none`: the native control bar keeps its own vertical gestures. */
+  touch-action: pan-y;
 }
 .player-image {
   width: 100%;
@@ -1810,6 +1847,11 @@ a.uploader-link:hover { color: var(--text); text-decoration: underline; }
   user-select: none;
   -webkit-user-drag: none;
   background: #000;
+  /* The still owns its touch gestures. Without this the WebView claims a
+     horizontal drag as a pan of its own and answers with pointercancel, which
+     is exactly how a swipe handler ends up never firing on Android. */
+  touch-action: none;
+  will-change: transform;
 }
 .player-overlay[data-kind="image"] .player-video { display: none; }
 .player-overlay[data-kind="image"] .player-image { display: block; }
@@ -1827,6 +1869,7 @@ a.uploader-link:hover { color: var(--text); text-decoration: underline; }
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
+  transition: opacity .18s ease;
 }
 .player-nav {
   position: absolute;
@@ -1845,7 +1888,9 @@ a.uploader-link:hover { color: var(--text); text-decoration: underline; }
   transform: translateY(-50%);
   transition: opacity .18s ease, background-color .18s ease;
 }
-.player-nav.player-nav-idle { opacity: 0; pointer-events: none; }
+/* Idle chrome: the arrows and the close button withdraw together, on the same
+   timer as the video's native controls, rather than sitting on top of the media. */
+.player-nav.player-nav-idle, .player-close.player-nav-idle { opacity: 0; pointer-events: none; }
 .player-nav svg { display: block; }
 .player-prev { left: max(12px, env(safe-area-inset-left)); }
 .player-next { right: max(12px, env(safe-area-inset-right)); }
@@ -2061,6 +2106,13 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .logs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .logs-actions { display: flex; gap: 6px; }
 .log-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; max-height: 260px; overflow-y: auto; }
+/* …but the moment a row is EXPANDED, the letterbox has to go. `.log-full` is
+   deliberately unclamped so a long yt-dlp tail can be read in full (see below) —
+   which achieved nothing while the list around it was still a 260px scroll box:
+   the bottom of every opened error was cut off, inside a scroll container
+   fighting the sheet's own. Browsing stays compact; reading gets the whole
+   height, and the settings sheet does the scrolling. */
+.log-list:has(> .log-entry[open]) { max-height: none; overflow: visible; }
 .log-entry { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); overflow: hidden; }
 /* Severity, as a left rule rather than a tinted row: the message still has to be
    readable, and a wash behind 12px text fails contrast in both themes. Amber =
@@ -2367,7 +2419,9 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .ck-dot-err { background: var(--err); box-shadow: 0 0 0 3px color-mix(in oklab, var(--err) 22%, transparent); }
 .ck-dot-off { background: var(--muted); opacity: .45; box-shadow: none; }
 
-/* Import/replace button, shown left of the cookie switch once a jar exists. */
+/* Clear / Replace buttons, shown left of the cookie switch once a jar exists
+   (with no jar there is nothing to clear or replace — the switch itself opens
+   the import field). */
 .site-cookie-btn {
   flex-shrink: 0; font-size: 13px; padding: 6px 12px; border-radius: var(--r-md);
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
