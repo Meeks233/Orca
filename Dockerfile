@@ -43,12 +43,21 @@ LABEL org.opencontainers.image.title="Orca" \
       org.opencontainers.image.ytdlp="${YTDLP_VERSION}"
 COPY YTDLP_SHA256 /tmp/YTDLP_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg python3 ca-certificates curl \
+        ffmpeg python3 python3-pip ca-certificates curl \
     && curl --fail --location --retry 3 --retry-all-errors \
         "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" \
         -o /usr/local/bin/yt-dlp \
     && printf '%s  %s\n' "$(cat /tmp/YTDLP_SHA256)" /usr/local/bin/yt-dlp | sha256sum -c - \
     && chmod +x /usr/local/bin/yt-dlp \
+    # yt-dlp's browser-IMPERSONATION backend. Several extractors now ask for it,
+    # and without a target installed the request goes out with a plain-Python TLS
+    # fingerprint that some sites reject outright — PornHub answers `HTTP Error
+    # 410: Gone` on every probe, which reads as a dead video rather than a missing
+    # dependency (yt-dlp only mentions it as a warning). Pinned like yt-dlp itself.
+    # pip is needed solely to place it and is dropped again right after; the
+    # package lands in dist-packages and survives the purge.
+    && pip3 install --break-system-packages --no-cache-dir "curl_cffi==0.15.0" \
+    && apt-get purge -y python3-pip && apt-get autoremove -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/YTDLP_SHA256
 COPY --from=builder /app/orca /usr/local/bin/orca
 RUN useradd -m -u 10001 orca && mkdir -p /data /downloads && chown orca /data /downloads
