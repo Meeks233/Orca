@@ -267,4 +267,3 @@ mod tests {
         assert_eq!(pt1, &slab[p as usize..2 * p as usize]);
     }
 }
-

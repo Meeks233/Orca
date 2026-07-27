@@ -26,7 +26,9 @@ pub struct DownloadOutcome {
 /// edge is the video-equivalent height. This keeps orientation from inflating a
 /// portrait 1080×1920 image into a misleading "2K" label.
 pub(crate) fn image_resolution(width: usize, height: usize) -> Option<i64> {
-    i64::try_from(width.min(height)).ok().filter(|edge| *edge > 0)
+    i64::try_from(width.min(height))
+        .ok()
+        .filter(|edge| *edge > 0)
 }
 
 /// Run a download for `item`. Progress ticks are sent on `progress` as they are
@@ -298,14 +300,19 @@ mod tests {
     fn header_probe_feeds_the_persisted_image_resolution() {
         use std::io::Write;
 
-        // A minimal 1920×1080 GIF header. `imagesize` reads the dimensions from
-        // the local file header, which is exactly the path download() uses after
-        // yt-dlp has atomically moved the completed image into place.
+        // A minimal 1920×1080 GIF: the 6-byte signature plus the WHOLE 7-byte
+        // logical screen descriptor. `imagesize` reads the dimensions from the
+        // local file header, which is exactly the path download() uses after
+        // yt-dlp has atomically moved the completed image into place — and it
+        // reads the descriptor in one go, so a short one is an UnexpectedEof
+        // rather than a parse of the two fields we care about.
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&[
-            b'G', b'I', b'F', b'8', b'9', b'a',
-            0x80, 0x07, // width: 1920, little endian
+            b'G', b'I', b'F', b'8', b'9', b'a', 0x80, 0x07, // width: 1920, little endian
             0x38, 0x04, // height: 1080, little endian
+            0x00, // packed fields: no global colour table
+            0x00, // background colour index
+            0x00, // pixel aspect ratio
         ])
         .unwrap();
         let size = imagesize::size(file.path()).unwrap();

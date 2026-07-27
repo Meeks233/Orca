@@ -3,8 +3,8 @@
 use super::{Db, ListPage, ListQuery, SortKey};
 use crate::seal_import::{ImportOutcome, SealRecord};
 use crate::types::{Client, Item, ItemResolution, ProbeResult, SiteCount, Source, Status, Website};
-use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::Row;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1765,11 +1765,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
-        assert!(
-            page.items
-                .iter()
-                .all(|i| i.playlist_key.as_deref() == Some("youtube:PL1"))
-        );
+        assert!(page
+            .items
+            .iter()
+            .all(|i| i.playlist_key.as_deref() == Some("youtube:PL1")));
 
         // An unfiltered list still sees everything.
         let all = db
@@ -2232,12 +2231,11 @@ mod tests {
         let priv_again = db.get(item.id).await.unwrap().unwrap();
         assert!(!priv_again.public);
         assert!(priv_again.public_slug.is_none());
-        assert!(
-            db.find_by_public_slug(&first_share)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(db
+            .find_by_public_slug(&first_share)
+            .await
+            .unwrap()
+            .is_none());
 
         // Re-sharing creates a different capability and records the expiry.
         let until = now_unix() + 7 * 86400;
@@ -2309,14 +2307,13 @@ mod tests {
         assert!(db.get(forever.id).await.unwrap().unwrap().public);
 
         // Expiry destroys the public capability.
-        assert!(
-            db.get(lapsed.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .public_slug
-                .is_none()
-        );
+        assert!(db
+            .get(lapsed.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .public_slug
+            .is_none());
         // Access tally zeroed on expiry — capsule drops once the share lapses.
         assert_eq!(db.get(lapsed.id).await.unwrap().unwrap().public_hits, 0);
     }

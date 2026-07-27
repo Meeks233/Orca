@@ -307,7 +307,10 @@ mod tests {
         // It still resolves against what the source has.
         assert_eq!(s.resolve(&[250, 480]), vec![250]);
         // 0 stays the HIGHEST sentinel; negatives are the only error.
-        assert_eq!(HeightSet::single_requested(0).unwrap().heights(), &[HIGHEST]);
+        assert_eq!(
+            HeightSet::single_requested(0).unwrap().heights(),
+            &[HIGHEST]
+        );
         assert!(HeightSet::single_requested(-1).is_err());
     }
 

@@ -3,10 +3,10 @@
 mod archive;
 pub mod auth;
 mod clients;
-mod emedia;
-mod handshake;
 mod cookies;
+mod emedia;
 mod events;
+mod handshake;
 mod items;
 mod media;
 mod subs;

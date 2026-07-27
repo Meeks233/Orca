@@ -13,12 +13,12 @@ use super::{emedia, AppState};
 use crate::error::AppError;
 use crate::types::{Item, Status};
 use axum::body::{Body, Bytes};
-use futures::StreamExt;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::header;
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
 use std::net::SocketAddr;
 use std::path::Path as FsPath;
 use tower::ServiceExt;
@@ -50,7 +50,8 @@ pub async fn file(
     let query = req.uri().query().unwrap_or("").to_string();
     let path = req.uri().path().to_string();
     let session_key =
-        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
+        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path)
+            .await?;
     let item = state
         .db
         .find_by_slug(&slug)
@@ -175,7 +176,8 @@ pub async fn stream(
     let query = req.uri().query().unwrap_or("").to_string();
     let path = req.uri().path().to_string();
     let session_key =
-        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
+        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path)
+            .await?;
     let item = state
         .db
         .find_by_slug(&slug)
@@ -266,7 +268,11 @@ async fn stream_encrypted(
     let read_start = i0 * p;
     // Fetch a full window from the chunk-aligned start; the upstream caps it at EOF.
     let window_bytes = super::emedia::WINDOW_MAX_BYTES;
-    let fetch_range = format!("bytes={}-{}", read_start, read_start + window_bytes as u64 - 1);
+    let fetch_range = format!(
+        "bytes={}-{}",
+        read_start,
+        read_start + window_bytes as u64 - 1
+    );
     let (slab, total) = fetch_upstream_window(
         upstream,
         referer,
@@ -287,7 +293,9 @@ async fn stream_encrypted(
     };
     let needed = (w.read_end - w.read_start) as usize;
     if slab.len() < needed {
-        return Err(AppError::Internal("upstream returned a short window".into()));
+        return Err(AppError::Internal(
+            "upstream returned a short window".into(),
+        ));
     }
     emedia::serve_window(session_key, &resource, plain_len, &w, &slab[..needed])
 }
@@ -466,8 +474,8 @@ fn pacing_for_bitrate(bitrate_bps: u64) -> (u64, u64) {
     // the buffer drains, while still shaving an abandoned watch. Tutorials and real
     // players land in the 1.3–2× band; 1.5 is the middle.
     let rate = (bitrate_bps / 8).saturating_mul(3) / 2; // bytes/sec
-    // ~4 seconds of head-start at full speed, floored at 2 MiB so a low-bitrate
-    // audio clip still starts instantly.
+                                                        // ~4 seconds of head-start at full speed, floored at 2 MiB so a low-bitrate
+                                                        // audio clip still starts instantly.
     let burst = rate.saturating_mul(4).max(2 * 1024 * 1024);
     (rate, burst)
 }
@@ -711,14 +719,7 @@ async fn fetch_upstream_window(
     allow_private_dns: bool,
     cap: usize,
 ) -> Result<(Vec<u8>, Option<u64>), AppError> {
-    let resp = guarded_get(
-        upstream,
-        referer,
-        cookies,
-        Some(range),
-        allow_private_dns,
-    )
-    .await?;
+    let resp = guarded_get(upstream, referer, cookies, Some(range), allow_private_dns).await?;
     if !resp.status().is_success() {
         return Err(AppError::BadRequest("upstream stream error".into()));
     }
@@ -759,7 +760,8 @@ pub async fn thumb(
     let query = req.uri().query().unwrap_or("").to_string();
     let path = req.uri().path().to_string();
     let session_key =
-        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
+        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path)
+            .await?;
     let item = state
         .db
         .find_by_slug(&slug)
@@ -778,8 +780,8 @@ pub async fn thumb(
     let bytes = match tokio::fs::read(&cache_path).await {
         Ok(b) if !b.is_empty() => b,
         _ => {
-            let fetched = fetch_thumbnail(&upstream, &item.webpage_url, state.cfg.allow_private_dns)
-                .await?;
+            let fetched =
+                fetch_thumbnail(&upstream, &item.webpage_url, state.cfg.allow_private_dns).await?;
             let _ = tokio::fs::create_dir_all(&dir).await;
             let _ = tokio::fs::write(&cache_path, &fetched).await;
             fetched
@@ -835,7 +837,9 @@ pub(super) async fn thumbnail_data_uri(
     if upstream.is_empty() {
         return None;
     }
-    let bytes = fetch_thumbnail(upstream, referer, allow_private_dns).await.ok()?;
+    let bytes = fetch_thumbnail(upstream, referer, allow_private_dns)
+        .await
+        .ok()?;
     if bytes.is_empty() {
         return None;
     }
@@ -860,14 +864,7 @@ pub(super) async fn fetch_upstream_bytes(
     allow_private_dns: bool,
     max_bytes: usize,
 ) -> Result<Vec<u8>, AppError> {
-    let resp = guarded_get(
-        upstream,
-        referer,
-        cookies,
-        None,
-        allow_private_dns,
-    )
-    .await?;
+    let resp = guarded_get(upstream, referer, cookies, None, allow_private_dns).await?;
     if !resp.status().is_success() {
         return Err(AppError::BadRequest("subtitle upstream error".into()));
     }
@@ -894,7 +891,13 @@ fn sniff_image_type(bytes: &[u8]) -> &'static str {
 /// are already random tokens, but this keeps a stray separator from escaping.
 fn sanitize_slug(slug: &str) -> String {
     slug.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -1114,8 +1117,14 @@ mod tests {
     #[test]
     fn bitrate_falls_back_to_resolution_ladder() {
         // No usable size/duration → height picks the tier.
-        assert_eq!(estimate_bitrate_bps(None, None, Some(1080)), Some(8_000_000));
-        assert_eq!(estimate_bitrate_bps(Some(0), Some(0), Some(720)), Some(5_000_000));
+        assert_eq!(
+            estimate_bitrate_bps(None, None, Some(1080)),
+            Some(8_000_000)
+        );
+        assert_eq!(
+            estimate_bitrate_bps(Some(0), Some(0), Some(720)),
+            Some(5_000_000)
+        );
         // Nothing to go on at all → unthrottled.
         assert_eq!(estimate_bitrate_bps(None, None, None), None);
     }
@@ -1224,7 +1233,10 @@ mod tests {
         let hop = |u: &str| cookie_header_for(Some(f.path()), u);
 
         // The hop we were asked to make: in scope, cookies ride.
-        assert_eq!(hop("https://video.x.com/media/1").as_deref(), Some("auth_token=SECRET"));
+        assert_eq!(
+            hop("https://video.x.com/media/1").as_deref(),
+            Some("auth_token=SECRET")
+        );
         // Redirected off-host — the session must not follow.
         assert!(hop("https://evil.test/media/1").is_none());
         // …not even to a host that merely *contains* the name.
@@ -1235,7 +1247,10 @@ mod tests {
         // Redirected out of the cookie's path scope on the same host.
         assert!(hop("https://video.x.com/other").is_none());
         // A hop back into scope legitimately gets them again.
-        assert_eq!(hop("https://video.x.com/media/2").as_deref(), Some("auth_token=SECRET"));
+        assert_eq!(
+            hop("https://video.x.com/media/2").as_deref(),
+            Some("auth_token=SECRET")
+        );
     }
 
     #[test]

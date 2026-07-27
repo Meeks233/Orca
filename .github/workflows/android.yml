@@ -57,7 +57,10 @@ jobs:
         uses: cargo-bins/cargo-binstall@802977a265b5f8825ebef2176db5f5f3edc82280 # main
 
       - name: Install cargo-tauri
-        run: cargo binstall -y 'tauri-cli@2.11.4'
+        # --force is load-bearing: rust-cache restores ~/.cargo/.crates.toml
+        # but not ~/.cargo/bin, so binstall sees "already installed", skips the
+        # download, and the build then dies on `no such command: tauri`.
+        run: cargo binstall -y --force 'tauri-cli@2.11.4'
 
       # Universal debug APK containing only arm64-v8a + armeabi-v7a (no x86 —
       # those ABIs are emulator-only and not published). The debug keystore

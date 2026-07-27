@@ -203,7 +203,9 @@ pub async fn get(
     match session_key {
         // Secure channel: seal the WebVTT; the Service Worker decrypts it to a
         // `text/vtt` blob for the `<track>` element.
-        Some(key) => super::emedia::serve_bytes(&key, &format!("subs:{slug}:{lang}"), body.as_bytes()),
+        Some(key) => {
+            super::emedia::serve_bytes(&key, &format!("subs:{slug}:{lang}"), body.as_bytes())
+        }
         // Loopback plaintext fallback.
         None => Ok((
             [
@@ -247,7 +249,10 @@ fn local_track(state: &AppState, video: &FsPath, lang: &str) -> Result<String, A
 /// stream uses.
 async fn remote_track(state: &AppState, item: &Item, lang: &str) -> Result<String, AppError> {
     let subs = resolve_remote(state, item).await?;
-    let sub = subs.iter().find(|s| s.lang == lang).ok_or(AppError::NotFound)?;
+    let sub = subs
+        .iter()
+        .find(|s| s.lang == lang)
+        .ok_or(AppError::NotFound)?;
     let cookie_file = crate::cookies::resolve(
         &state.cookies,
         state.cfg.cookies.as_deref(),

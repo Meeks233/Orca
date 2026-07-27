@@ -20,6 +20,10 @@ const ignoredDirectories = new Set([
   'data',
   'downloads',
   'scripts',
+  // esbuild's userscript output. Git-ignored, so CI's fresh checkout never sees
+  // it — but a developer who has run the userscript build has it on disk, and
+  // without this the check fails for them and nobody else.
+  'dist-userscript',
 ]);
 const violations: string[] = [];
 

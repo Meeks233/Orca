@@ -51,7 +51,9 @@ pub async fn start(allow_private_dns: bool) -> Option<&'static str> {
     let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!("DNS: could not start the yt-dlp proxy ({e}); yt-dlp will use its own resolver");
+            tracing::warn!(
+                "DNS: could not start the yt-dlp proxy ({e}); yt-dlp will use its own resolver"
+            );
             return None;
         }
     };
@@ -83,7 +85,10 @@ async fn serve_conn(mut client: TcpStream) -> std::io::Result<()> {
     let (head, rest) = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client))
         .await
         .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "client sent no request in time")
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "client sent no request in time",
+            )
         })??;
     let request_line = head.lines().next().unwrap_or_default().to_string();
     let mut parts = request_line.split_whitespace();
@@ -144,7 +149,10 @@ async fn dial(host: &str, port: u16) -> Result<TcpStream, &'static str> {
     let ips = net_guard::resolve_checked(host)
         .await
         .map_err(|_| "403 Forbidden")?;
-    let addrs: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+    let addrs: Vec<SocketAddr> = ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect();
     match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addrs[..])).await {
         Ok(Ok(s)) => Ok(s),
         Ok(Err(_)) => Err("502 Bad Gateway"),
@@ -154,7 +162,10 @@ async fn dial(host: &str, port: u16) -> Result<TcpStream, &'static str> {
 
 async fn reply(client: &mut TcpStream, status: &str) -> std::io::Result<()> {
     client
-        .write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .await
 }
 
@@ -220,7 +231,8 @@ fn rewrite_head(head: &str, method: &str, path: &str) -> String {
     out.push_str(&format!("{method} {path} {version}\r\n"));
     for line in lines {
         let name = line.split(':').next().unwrap_or("").trim();
-        if name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("connection") {
+        if name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("connection")
+        {
             continue;
         }
         out.push_str(line);

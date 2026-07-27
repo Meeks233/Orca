@@ -323,7 +323,9 @@ mod tests {
     fn bilibili_keeps_page_selector() {
         // ?p=N picks a part of a multi-video collection — content, not tracking.
         assert_eq!(
-            normalize("https://www.bilibili.com/video/BV1xx411c7mD?p=3&vd_source=abc&spm_id_from=333"),
+            normalize(
+                "https://www.bilibili.com/video/BV1xx411c7mD?p=3&vd_source=abc&spm_id_from=333"
+            ),
             "https://www.bilibili.com/video/BV1xx411c7mD?p=3"
         );
     }
@@ -378,7 +380,9 @@ mod tests {
     fn douyin_strips_query() {
         // Douyin share links are path + pure tracking, like TikTok.
         assert_eq!(
-            normalize("https://www.douyin.com/video/7300000000000000000?previous_page=app_code_link"),
+            normalize(
+                "https://www.douyin.com/video/7300000000000000000?previous_page=app_code_link"
+            ),
             "https://www.douyin.com/video/7300000000000000000"
         );
     }

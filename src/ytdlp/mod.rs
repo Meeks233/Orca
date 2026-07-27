@@ -209,7 +209,9 @@ fn parse_subtitles(json: &serde_json::Value) -> Vec<RemoteSub> {
             if seen.iter().any(|l| l == lang) {
                 continue;
             }
-            let Some(arr) = tracks.as_array() else { continue };
+            let Some(arr) = tracks.as_array() else {
+                continue;
+            };
             // Take the most-preferred servable format present for this language.
             let mut chosen: Option<RemoteSub> = None;
             let mut chosen_rank = usize::MAX;

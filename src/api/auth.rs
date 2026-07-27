@@ -134,8 +134,15 @@ async fn run_authenticated(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
-    let credential =
-        authenticate(state, request.headers(), peer, allow_client, &method, &target).await?;
+    let credential = authenticate(
+        state,
+        request.headers(),
+        peer,
+        allow_client,
+        &method,
+        &target,
+    )
+    .await?;
     let encrypted_body = request
         .headers()
         .contains_key(crate::e2ee::HEADER_ENCRYPTED_BODY);
@@ -203,7 +210,10 @@ pub async fn authenticate_media(
     peer: Option<std::net::IpAddr>,
     target: &str,
 ) -> Result<Option<[u8; 32]>, AppError> {
-    if let Some(sid) = headers.get(crate::e2ee::HEADER_SID).and_then(|v| v.to_str().ok()) {
+    if let Some(sid) = headers
+        .get(crate::e2ee::HEADER_SID)
+        .and_then(|v| v.to_str().ok())
+    {
         let authenticator = headers
             .get(crate::e2ee::HEADER_AUTH)
             .and_then(|v| v.to_str().ok())
@@ -364,16 +374,31 @@ mod tests {
     #[test]
     fn extract_token_prefers_the_header_then_falls_back_to_the_query() {
         let mut h = HeaderMap::new();
-        h.insert(axum::http::header::AUTHORIZATION, "Bearer hdr-tok".parse().unwrap());
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer hdr-tok".parse().unwrap(),
+        );
         // Header wins over a query token.
-        assert_eq!(extract_token(&h, "token=qs-tok").as_deref(), Some("hdr-tok"));
+        assert_eq!(
+            extract_token(&h, "token=qs-tok").as_deref(),
+            Some("hdr-tok")
+        );
         // No header → the `?token=` fallback, percent-decoded, position-independent.
         let empty = HeaderMap::new();
-        assert_eq!(extract_token(&empty, "a=1&token=qs%2Btok").as_deref(), Some("qs+tok"));
+        assert_eq!(
+            extract_token(&empty, "a=1&token=qs%2Btok").as_deref(),
+            Some("qs+tok")
+        );
         // A malformed or empty header falls through to the query rather than failing.
         let mut bad = HeaderMap::new();
-        bad.insert(axum::http::header::AUTHORIZATION, "Bearer ".parse().unwrap());
-        assert_eq!(extract_token(&bad, "token=qs-tok").as_deref(), Some("qs-tok"));
+        bad.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer ".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_token(&bad, "token=qs-tok").as_deref(),
+            Some("qs-tok")
+        );
         // Nothing anywhere.
         assert_eq!(extract_token(&empty, "a=1"), None);
         // A param merely *ending* in `token=` is not the token param.
@@ -383,7 +408,10 @@ mod tests {
     #[test]
     fn media_cookie_sid_extracts_only_the_session_cookie() {
         // Sole cookie.
-        assert_eq!(media_cookie_sid(&cookie_header("orca_sess=abc123")).as_deref(), Some("abc123"));
+        assert_eq!(
+            media_cookie_sid(&cookie_header("orca_sess=abc123")).as_deref(),
+            Some("abc123")
+        );
         // Among others, order-independent, tolerant of spaces.
         assert_eq!(
             media_cookie_sid(&cookie_header("theme=dark; orca_sess=xy_z ; k=v")).as_deref(),

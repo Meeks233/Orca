@@ -488,11 +488,9 @@ mod tests {
         let cfg = test_config();
         let mut item = test_item();
         // Standalone item → no --playlist-items.
-        assert!(
-            !download_args(&cfg, &item, None, None)
-                .iter()
-                .any(|a| a == "--playlist-items")
-        );
+        assert!(!download_args(&cfg, &item, None, None)
+            .iter()
+            .any(|a| a == "--playlist-items"));
         // Multi-video post entry → pinned to its position.
         item.playlist_index = Some(2);
         let args = download_args(&cfg, &item, None, None);

@@ -161,7 +161,7 @@ pub fn seal_into(
     let start = out.len();
     out.extend_from_slice(plaintext);
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &[], &mut out[start..])
+        .encrypt_in_place_detached(&Nonce::from(nonce), &[], &mut out[start..])
         .map_err(|_| AppError::Internal("media chunk encryption failed".into()))?;
     out.extend_from_slice(&tag);
     Ok(())
@@ -186,7 +186,7 @@ pub fn open_chunk(stream_key: &[u8; 32], index: u64, ciphertext: &[u8]) -> AppRe
     let mut nonce = [0u8; 12];
     nonce[4..].copy_from_slice(&index.to_be_bytes());
     cipher
-        .decrypt(Nonce::from_slice(&nonce), ciphertext)
+        .decrypt(&Nonce::from(nonce), ciphertext)
         .map_err(|_| AppError::BadRequest("media chunk authentication failed".into()))
 }
 
@@ -225,8 +225,11 @@ pub fn open(key: &[u8; 32], envelope: &[u8], aad: &[u8]) -> AppResult<Vec<u8>> {
     let ciphertext = STANDARD
         .decode(envelope.c)
         .map_err(|_| AppError::BadRequest("invalid encrypted payload".into()))?;
-    let nonce = Nonce::from_exact_iter(nonce)
-        .ok_or_else(|| AppError::BadRequest("invalid encrypted nonce".into()))?;
+    let nonce: [u8; 12] = nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| AppError::BadRequest("invalid encrypted nonce".into()))?;
+    let nonce = Nonce::from(nonce);
     Aes256Gcm::new_from_slice(key)
         .map_err(|_| AppError::Internal("E2EE cipher initialization failed".into()))?
         .decrypt(
@@ -367,7 +370,10 @@ mod tests {
         let psk = auth_hash("test-token");
         let base = session_key(&[7u8; 32], b"nc", b"ns", &psk);
         // Different token, ECDH point, or nonces all yield a different key.
-        assert_ne!(base, session_key(&[7u8; 32], b"nc", b"ns", &auth_hash("other")));
+        assert_ne!(
+            base,
+            session_key(&[7u8; 32], b"nc", b"ns", &auth_hash("other"))
+        );
         assert_ne!(base, session_key(&[9u8; 32], b"nc", b"ns", &psk));
         assert_ne!(base, session_key(&[7u8; 32], b"nX", b"ns", &psk));
         // Stable for identical inputs (both peers must land on the same key).
@@ -442,7 +448,12 @@ mod tests {
     #[test]
     fn authenticator_from_a_different_key_is_refused() {
         let owner = test_key();
-        let attacker = session_key(&[7u8; 32], b"nonce-c-16-bytes", b"nonce-s-16-bytes", &auth_hash("guessed-token"));
+        let attacker = session_key(
+            &[7u8; 32],
+            b"nonce-c-16-bytes",
+            b"nonce-s-16-bytes",
+            &auth_hash("guessed-token"),
+        );
         let now = 1_700_000_000;
         let forged = authenticator(&attacker, "DELETE", "/api/items/abc", now, "nonce-b");
         assert!(verify_authenticator(&owner, &forged, "DELETE", "/api/items/abc", now).is_err());

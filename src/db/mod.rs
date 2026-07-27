@@ -357,5 +357,4 @@ impl Db {
     pub async fn list_clients(&self) -> anyhow::Result<Vec<Client>> {
         queries::list_clients(self).await
     }
-
 }

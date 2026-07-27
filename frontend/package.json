@@ -15,6 +15,10 @@
     "lint": "eslint --config eslint.config.ts .",
     "check": "npm run check:javascript && npm run typecheck && npm run lint && npm run build"
   },
+  "//overrides": "eslint 9 still reaches brace-expansion 1.x through minimatch 3, and GHSA-mh99-v99m-4gvg is only fixed in 5.0.8 — there is no patched 1.x. Forcing 5.0.8 clears the advisory without an eslint 10 major bump; 5.x keeps the same expand() API and ships a CommonJS entry, so minimatch 3's require() still resolves. Drop this once eslint's chain lands on a fixed minimatch.",
+  "overrides": {
+    "brace-expansion": "^5.0.8"
+  },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/eslint-plugin-security": "^3.0.1",

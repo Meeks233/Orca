@@ -195,9 +195,9 @@ pub async fn init_mode() -> DnsMode {
              classifying its answers (set ORCA_DNS_MODE=doh to force DoH anyway)"
         ),
         DnsMode::Doh(p) => tracing::info!("DNS: resolving over DoH ({})", p.label()),
-        DnsMode::System => tracing::warn!(
-            "DNS: no DoH provider reachable — falling back to the system resolver"
-        ),
+        DnsMode::System => {
+            tracing::warn!("DNS: no DoH provider reachable — falling back to the system resolver")
+        }
     }
     mode
 }
@@ -313,7 +313,10 @@ pub async fn resolve_checked(host: &str) -> Result<Vec<IpAddr>, UrlRejection> {
                 // DoH went away after detection (egress blocked mid-run). Falling
                 // back keeps the downloader working; the check below still applies,
                 // we just lose DoH's integrity guarantee for this lookup.
-                tracing::warn!(host, "DoH resolution failed, falling back to system resolver");
+                tracing::warn!(
+                    host,
+                    "DoH resolution failed, falling back to system resolver"
+                );
             }
             let addrs = tokio::net::lookup_host((host, 0))
                 .await
@@ -403,7 +406,10 @@ async fn doh_query_provider(
         if answer["type"].as_u64() != Some(rtype as u64) {
             continue;
         }
-        if let Some(ip) = answer["data"].as_str().and_then(|d| d.parse::<IpAddr>().ok()) {
+        if let Some(ip) = answer["data"]
+            .as_str()
+            .and_then(|d| d.parse::<IpAddr>().ok())
+        {
             ips.push(ip);
             if let Some(secs) = answer["TTL"].as_u64() {
                 ttl = ttl.min(Duration::from_secs(secs));

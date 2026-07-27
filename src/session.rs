@@ -189,6 +189,8 @@ impl SessionStore {
 /// Drop expired pending and idle active sessions. Called on every access, so the
 /// map is bounded by the honest handshake rate × the TTLs.
 fn prune(inner: &mut Inner, now: i64) {
-    inner.pending.retain(|_, p| now - p.created <= PENDING_TTL_SECS);
+    inner
+        .pending
+        .retain(|_, p| now - p.created <= PENDING_TTL_SECS);
     inner.active.retain(|_, a| now - a.last <= IDLE_TTL_SECS);
 }
