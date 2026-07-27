@@ -43,6 +43,9 @@ function concatChunks(parts: Uint8Array[]): Uint8Array {
 // tagged correctly (the sealed transport carries no content type). Returns null
 // for anything we don't recognise, so a non-image never becomes a broken preview.
 function sniffImage(b: Uint8Array): string | null {
+  // ICO — favicons still ship as one more often than not.
+  if (b.length >= 4 && b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01 && b[3] === 0x00)
+    return 'image/x-icon';
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47)
     return 'image/png';
@@ -54,6 +57,13 @@ function sniffImage(b: Uint8Array): string | null {
   )
     return 'image/webp';
   return null;
+}
+
+// Raw image bytes as a `data:` URL an <img> (or the server's icon store) accepts,
+// or null when the bytes aren't a recognisable image.
+export function imageDataUrl(bytes: Uint8Array): string | null {
+  const mime = sniffImage(bytes);
+  return mime ? `data:${mime};base64,${b64encode(bytes)}` : null;
 }
 
 export class OrcaClient {
@@ -292,8 +302,13 @@ export class OrcaClient {
     } else {
       bytes = buf;
     }
-    const mime = sniffImage(bytes);
-    return mime ? `data:${mime};base64,${b64encode(bytes)}` : null;
+    return imageDataUrl(bytes);
+  }
+
+  // Record the site's own favicon for a registry site Orca ships no bundled mark
+  // for. The server keeps the first one offered and ignores the rest.
+  setWebsiteIcon(key: string, icon: string): Promise<unknown> {
+    return this.request('PUT', `/api/websites/${encodeURIComponent(key)}/icon`, { icon });
   }
 
   upsertWebsite(key: string, body: Record<string, unknown>): Promise<unknown> {

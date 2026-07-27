@@ -68,6 +68,9 @@ export interface Website {
   blur: boolean;
   blur_default: boolean;
   sort: number;
+  /** Whether the server holds a harvested favicon for this site. `false` is the
+   *  cue for the content script to scrape the page's own and report it. */
+  has_icon?: boolean;
   cookie?: CookieStatus | null;
 }
 
@@ -133,6 +136,9 @@ export type BgRequest =
   // The site registry — its host list is what licenses permissive video
   // recognition on a page (see content/sites.ts).
   | { type: 'listWebsites' }
+  // Hand the server the favicon scraped off this page, for a registry site it has
+  // no icon for. Fire-and-forget; the server keeps the first one it is offered.
+  | { type: 'reportSiteIcon'; key: string; icon: string }
   | { type: 'openWebItem'; slug: string };
 
 export type BgResponse<T = unknown> =

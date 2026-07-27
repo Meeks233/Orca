@@ -31,14 +31,17 @@ declare function GM_registerMenuCommand(caption: string, onClick: () => void): v
 // usable — so it is the difference between a working import and a useless one.
 // Feature-detected, never assumed: `@grant GM_cookie` is silently a no-op in a
 // manager that doesn't implement it.
-declare const GM_cookie:
-  | {
-      list(
-        details: { url?: string; domain?: string },
-        cb: (cookies: GMCookie[], error?: unknown) => void,
-      ): void;
-    }
-  | undefined;
+declare const GM_cookie: CookieApi | undefined;
+
+interface CookieQuery {
+  url?: string;
+  domain?: string;
+}
+interface CookieApi {
+  // Callback style (GM_cookie). The GM.cookie flavour returns a promise instead;
+  // `cookieApi()` normalises both onto this shape.
+  list(details: CookieQuery, cb: (cookies: GMCookie[], error?: unknown) => void): void;
+}
 
 interface GMCookie {
   name: string;
@@ -47,6 +50,7 @@ interface GMCookie {
   path: string;
   secure?: boolean;
   session?: boolean;
+  httpOnly?: boolean;
   expirationDate?: number;
 }
 // The content CSS, inlined by the build (esbuild `define`) — mirrors how the
@@ -56,7 +60,12 @@ declare const __ORCA_CSS__: string;
 interface GMXhrResponse {
   status: number;
   responseHeaders: string;
-  response: ArrayBuffer;
+  // Nominally an ArrayBuffer (we ask for `responseType: 'arraybuffer'`), but
+  // managers are not consistent: an empty body comes back as `null`, some
+  // versions/sandboxes hand back a Blob, a typed array, or fall back to the
+  // decoded string. `bodyBytes()` normalises all of them.
+  response: ArrayBuffer | ArrayBufferView | Blob | string | null;
+  responseText?: string;
 }
 interface GMXhrDetails {
   method: string;
@@ -122,16 +131,42 @@ function parseHeaders(raw: string): Map<string, string> {
   return m;
 }
 
+// Normalise whatever the manager put in `response` to bytes. Passing a `null`
+// (the shape an empty 204/304/error body takes) straight to `TextDecoder.decode`
+// throws "parameter 1 is not of type 'ArrayBuffer'" — which is how a perfectly
+// ordinary empty response surfaced as a random, unexplained download failure.
+async function bodyBytes(r: GMXhrResponse): Promise<Uint8Array> {
+  const body = r.response;
+  if (body == null) {
+    // Some managers only populate responseText when the arraybuffer transfer
+    // was dropped; an absent body is legitimately empty.
+    return new TextEncoder().encode(r.responseText ?? '');
+  }
+  if (typeof body === 'string') return new TextEncoder().encode(body);
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) {
+    const v = body as ArrayBufferView;
+    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  }
+  if (typeof Blob !== 'undefined' && body instanceof Blob) {
+    return new Uint8Array(await body.arrayBuffer());
+  }
+  return new TextEncoder().encode(r.responseText ?? '');
+}
+
 function makeResponse(r: GMXhrResponse): Response {
   const headers = parseHeaders(r.responseHeaders);
-  const buf = r.response;
+  const bytes = bodyBytes(r);
   const shim = {
     ok: r.status >= 200 && r.status < 300,
     status: r.status,
     headers: { get: (n: string) => headers.get(n.toLowerCase()) ?? null },
-    text: async () => new TextDecoder().decode(buf),
-    arrayBuffer: async () => buf,
-    json: async () => JSON.parse(new TextDecoder().decode(buf)),
+    text: async () => new TextDecoder().decode(await bytes),
+    arrayBuffer: async () => {
+      const b = await bytes;
+      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+    },
+    json: async () => JSON.parse(new TextDecoder().decode(await bytes)),
   };
   return shim as unknown as Response;
 }
@@ -195,6 +230,8 @@ async function handle(req: { type: string; [k: string]: unknown }): Promise<unkn
       // The site registry — the content script uses its host list to decide where
       // permissive video recognition is allowed (see content/sites.ts).
       return { websites: await getClient().listWebsites() };
+    case 'reportSiteIcon':
+      return getClient().setWebsiteIcon(req.key as string, req.icon as string);
     case 'setSiteAdapters': {
       saveCfg({ siteAdapters: (req.siteAdapters as UserSiteAdapter[]) ?? [] });
       return { siteAdapters: loadCfg().siteAdapters };
@@ -374,35 +411,108 @@ function cookieBelongsTo(cookieDomain: string, host: string): boolean {
   return host === d || host.endsWith('.' + d);
 }
 
-// Netscape cookies.txt — the format yt-dlp reads.
+// Netscape cookies.txt — the format yt-dlp reads. HttpOnly cookies carry the
+// `#HttpOnly_` domain prefix (the curl / Chrome-export convention yt-dlp parses),
+// so the jar records *which* cookies were the privileged ones instead of
+// flattening that away.
 function toNetscape(cookies: GMCookie[]): string {
   const lines = ['# Netscape HTTP Cookie File'];
   for (const c of cookies) {
     const includeSub = c.domain.startsWith('.') ? 'TRUE' : 'FALSE';
     const expiry = c.session || c.expirationDate == null ? 0 : Math.floor(c.expirationDate);
+    const domain = c.httpOnly ? `#HttpOnly_${c.domain}` : c.domain;
     lines.push(
-      [c.domain, includeSub, c.path || '/', c.secure ? 'TRUE' : 'FALSE', String(expiry), c.name, c.value]
+      [domain, includeSub, c.path || '/', c.secure ? 'TRUE' : 'FALSE', String(expiry), c.name, c.value]
         .join('\t'),
     );
   }
   return lines.join('\n') + '\n';
 }
 
-/** Read this page's cookies. `httpOnly` reports whether the privileged path was
- *  available — a `document.cookie` import is missing the session cookies. */
-function readPageCookies(): Promise<{ cookies: GMCookie[]; httpOnly: boolean }> {
-  const host = location.hostname.toLowerCase();
+// The manager's cookie API, normalised to one callback shape. Tampermonkey
+// exposes `GM_cookie`; the GM4-style `GM.cookie` returns promises. Neither is
+// guaranteed — Violentmonkey ships no cookie API at all.
+function cookieApi(): CookieApi | null {
+  if (typeof GM_cookie?.list === 'function') return GM_cookie;
+  const gm = (globalThis as { GM?: { cookie?: { list?: (d: CookieQuery) => unknown } } }).GM;
+  const list = gm?.cookie?.list;
+  if (typeof list !== 'function') return null;
+  return {
+    list(details, cb) {
+      try {
+        const r = list.call(gm!.cookie, details) as Promise<GMCookie[]> | GMCookie[];
+        if (r && typeof (r as Promise<GMCookie[]>).then === 'function') {
+          void (r as Promise<GMCookie[]>).then(
+            (l) => cb(l),
+            (e) => cb([], e),
+          );
+        } else {
+          cb((r as GMCookie[]) ?? []);
+        }
+      } catch (e) {
+        cb([], e);
+      }
+    },
+  };
+}
+
+// One query, never hanging: a manager that takes the call but never invokes the
+// callback (a permission prompt the user ignores) must not wedge the import.
+function queryCookies(api: CookieApi, details: CookieQuery): Promise<GMCookie[]> {
   return new Promise((resolve) => {
-    if (typeof GM_cookie?.list === 'function') {
-      GM_cookie.list({ url: location.href }, (list, error) => {
-        if (error || !Array.isArray(list)) return resolve({ cookies: fromDocument(), httpOnly: false });
-        const kept = list.filter((c) => cookieBelongsTo(c.domain, host));
-        resolve({ cookies: kept, httpOnly: true });
-      });
-      return;
+    let done = false;
+    const finish = (list: GMCookie[]): void => {
+      if (done) return;
+      done = true;
+      resolve(list);
+    };
+    setTimeout(() => finish([]), 5000);
+    try {
+      api.list(details, (list, error) => finish(error || !Array.isArray(list) ? [] : list));
+    } catch {
+      finish([]);
     }
-    resolve({ cookies: fromDocument(), httpOnly: false });
   });
+}
+
+/** Read this page's cookies. `httpOnly` reports whether the privileged path
+ *  really delivered — not merely that an API existed. Some managers answer the
+ *  call with what `document.cookie` would give, and treating that as privileged
+ *  is how a login-less jar gets imported as if it were a login. */
+async function readPageCookies(): Promise<{ cookies: GMCookie[]; httpOnly: boolean }> {
+  const host = location.hostname.toLowerCase();
+  const api = cookieApi();
+  if (!api) return { cookies: fromDocument(), httpOnly: false };
+
+  // Ask twice and merge: the URL query is the precise one, but cookies scoped to
+  // the registrable domain (`.x.com` while on `mobile.x.com`, say) are answered
+  // by the domain query in some managers and not the other. Both are filtered
+  // through `cookieBelongsTo`, so the merge can't widen what we upload.
+  const [byUrl, byDomain] = await Promise.all([
+    queryCookies(api, { url: location.href }),
+    queryCookies(api, { domain: registrableDomain(host) }),
+  ]);
+  const seen = new Set<string>();
+  const merged: GMCookie[] = [];
+  for (const c of [...byUrl, ...byDomain]) {
+    if (!c || !c.name || !c.domain || !cookieBelongsTo(c.domain, host)) continue;
+    const id = `${c.domain}|${c.path || '/'}|${c.name}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(c);
+  }
+  if (merged.length === 0) return { cookies: fromDocument(), httpOnly: false };
+
+  // Did we actually get something `document.cookie` can't see? That — not the
+  // presence of the API — is what makes this import worth more than a scrape.
+  const visible = new Set(
+    document.cookie
+      .split(';')
+      .map((p) => p.split('=')[0]!.trim())
+      .filter(Boolean),
+  );
+  const httpOnly = merged.some((c) => c.httpOnly === true || !visible.has(c.name));
+  return { cookies: merged, httpOnly };
 
   function fromDocument(): GMCookie[] {
     const out: GMCookie[] = [];
@@ -419,12 +529,49 @@ function readPageCookies(): Promise<{ cookies: GMCookie[]; httpOnly: boolean }> 
   }
 }
 
+// Does this set contain the cookie that IS the login, rather than the markers a
+// logged-in browser sets next to it? The session cookie is always HttpOnly (X's
+// `auth_token`, YouTube's `SAPISID`); `ct0`/`twid` are not, so a jar scraped from
+// `document.cookie` looks logged in while authenticating nothing — yt-dlp then
+// falls back to guest auth and every gated post fails. Mirrors
+// `is_session_cookie` in the backend's src/cookies.rs.
+function hasSessionCookie(cookies: GMCookie[]): boolean {
+  return cookies.some((c) => {
+    const n = c.name.trim().toLowerCase();
+    if (n === 'twid') return false; // login marker, not the session
+    if (['auth', 'session', 'sess', 'login', 'secure-', 'sapisid'].some((s) => n.includes(s)))
+      return true;
+    return ['sid', 'hsid', 'ssid', 'apisid', 'li_at'].includes(n);
+  });
+}
+
 async function importCookies(): Promise<string> {
   const c = getClient();
   const host = location.hostname.toLowerCase();
   const reg = registrableDomain(host);
   const { cookies, httpOnly } = await readPageCookies();
   if (cookies.length === 0) throw new Error('No cookies found for this page — are you logged in?');
+
+  // Stop here rather than uploading a jar with no login in it. Orca would store
+  // it, show it as a healthy cookie, and then fail every gated download with an
+  // error that blames the post — so the failure is reported where it happens,
+  // and the upload only proceeds if the user knowingly wants the non-login
+  // cookies (a consent/region cookie is occasionally useful on its own).
+  if (!hasSessionCookie(cookies)) {
+    const why = httpOnly
+      ? `Orca read ${cookies.length} cookie(s) for ${host} but none of them is a login ` +
+        'session cookie. Either this browser is not logged in here, or your userscript ' +
+        'manager withheld the HttpOnly cookies.'
+      : `Orca could not read this site's HttpOnly cookies — this userscript manager has ` +
+        'no working GM_cookie API, so only the non-login cookies are visible.';
+    const fix =
+      '\n\nThe login cookie (X\'s auth_token, YouTube\'s SAPISID …) is always HttpOnly. ' +
+      'Export a cookies.txt with a "Get cookies.txt" browser extension and import it ' +
+      'from the Orca web app instead.';
+    if (!window.confirm(`Orca: cookie capture failed.\n\n${why}${fix}\n\nUpload anyway?`)) {
+      throw new Error('cancelled — no login session cookie was captured');
+    }
+  }
 
   // File them under the website that already covers this domain; create an entry
   // only when none does, so repeat imports never spawn duplicate sites.
@@ -446,11 +593,12 @@ async function importCookies(): Promise<string> {
   await c.setCookies(key, toNetscape(cookies));
 
   const site = `${match?.name ?? reg}${created ? ' (new site)' : ''}`;
-  const caveat = httpOnly
+  // Reaching here without a session cookie means the user chose to upload anyway
+  // at the prompt above; repeat what that jar can and cannot do.
+  const caveat = hasSessionCookie(cookies)
     ? ''
-    : '\n\nNote: this userscript manager has no GM_cookie support, so only ' +
-      'non-HttpOnly cookies could be read. Logins that use an HttpOnly session ' +
-      'cookie will still fail — import those from the Orca web app instead.';
+    : '\n\nThese carry no login — gated downloads will still fail, and the site ' +
+      'shows a red cookie dot until you import a complete cookies.txt.';
   return `Orca: imported ${cookies.length} cookie(s) for ${site}.${caveat}`;
 }
 

@@ -231,12 +231,37 @@
   color: var(--orca-ok);
 }
 
-/* Failure */
+/* Failure — parked, not flashed. The error glyph (and the tooltip carrying the
+   server's message) stays until the user does something about it. Hovering is
+   that something: the X/retry glyph dims and the download cloud takes its place,
+   mirroring the in-flight ring's turn-into-Stop gesture, so one click re-runs it. */
 .orca-dl-btn[data-state='error'] {
   background: rgba(46, 20, 20, 0.82);
 }
-.orca-dl-btn[data-state='error'] .orca-glyph {
+.orca-dl-btn[data-state='error'] .orca-dl-glyph-wrap .orca-glyph {
   color: var(--orca-err);
+}
+.orca-dl-redo {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.orca-dl-redo .orca-glyph {
+  width: 15px;
+  height: 15px;
+  color: var(--orca-accent);
+}
+.orca-dl-btn[data-state='error']:hover .orca-dl-redo {
+  display: flex;
+}
+.orca-dl-btn[data-state='error']:hover .orca-dl-glyph-wrap .orca-glyph {
+  opacity: 0.25;
+}
+.orca-dl-btn[data-state='error']:hover {
+  background: rgba(22, 22, 30, 0.86);
 }
 
 /* Canceled — a parked retry affordance (accent-tinted), click to start over. */
@@ -273,7 +298,8 @@
   width: 17px;
   height: 17px;
 }
-.orca-dl-btn.orca-thumb-btn .orca-dl-cancel .orca-glyph {
+.orca-dl-btn.orca-thumb-btn .orca-dl-cancel .orca-glyph,
+.orca-dl-btn.orca-thumb-btn .orca-dl-redo .orca-glyph {
   width: 12px;
   height: 12px;
 }

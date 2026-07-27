@@ -3,6 +3,7 @@
 // cloud-check / X) off the background's progress pushes. All crypto/API lives in
 // the background; this script only touches the DOM and messages.
 
+import { imageDataUrl } from '../lib/api.js';
 import { glyphSvg, type GlyphName } from '../lib/glyphs.js';
 import { isPrivateHost } from '../lib/net.js';
 import { ringPercentForPhase } from '../lib/progress.js';
@@ -76,6 +77,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface OverlayReveal {
   rect: () => DOMRect;
   el: HTMLElement;
+  // The positioned wrapper and the player it hangs in, so the button can step
+  // clear of the player's own top bar every time it appears — see positionOverlay.
+  wrap: HTMLElement;
+  host: HTMLElement;
   inside: boolean;
   idleTimer: ReturnType<typeof setTimeout> | null;
   leaveTimer: ReturnType<typeof setTimeout> | null;
@@ -88,6 +93,9 @@ const CONTROLS_LEAVE_MS = 600; // pointer left the player: fade out with the con
 let hintShown = false;
 
 function revealShow(o: OverlayReveal): void {
+  // Re-measured on every reveal, not once at mount: the player chrome we have to
+  // clear is itself hover-revealed, so at mount time the corner looks empty.
+  positionOverlay(o.host, o.wrap);
   o.el.classList.add('orca-visible');
   if (o.leaveTimer) {
     clearTimeout(o.leaveTimer);
@@ -189,7 +197,6 @@ class DownloadState {
   // Tooltip for a submit/retry that failed outright (no item to retry).
   errorMsg: string | null = null;
   private views = new Set<OrcaButton>();
-  private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
   // The server has already been asked what it knows about this URL (see
   // checkExisting) — every later view attaching to the same video reuses the answer
@@ -342,10 +349,9 @@ class DownloadState {
   private disposeIfDone(): void {
     if (this.views.size) return;
     if (this.busy) return;
-    if (this.revertTimer) clearTimeout(this.revertTimer);
     if (this.stallTimer) clearTimeout(this.stallTimer);
     if (this.cancelTimer) clearTimeout(this.cancelTimer);
-    this.revertTimer = this.stallTimer = this.cancelTimer = null;
+    this.stallTimer = this.cancelTimer = null;
     if (track.get(this.url) === this) track.delete(this.url);
     if (this.itemId != null && byItem.get(this.itemId) === this) byItem.delete(this.itemId);
     for (const id of this.memberStatuses.keys()) {
@@ -360,10 +366,6 @@ class DownloadState {
   }
 
   private setState(s: State): void {
-    if (this.revertTimer) {
-      clearTimeout(this.revertTimer);
-      this.revertTimer = null;
-    }
     if (this.stallTimer) {
       clearTimeout(this.stallTimer);
       this.stallTimer = null;
@@ -373,14 +375,12 @@ class DownloadState {
     // sweep — only an at-the-cap progress frame re-arms it (see advanceFrac).
     if (s !== 'progress') this.finalizing = false;
     if (s !== 'error') this.errorMsg = null;
-    // Only the transient (no-item) submit failure clears itself back to idle; a
-    // tracked failed/canceled item stays parked on retry until the user acts.
-    if (s === 'error' && !this.slug) {
-      this.revertTimer = setTimeout(() => {
-        this.revertTimer = null;
-        if (this.state === 'error') this.setState('idle');
-      }, 2600);
-    }
+    // A failure is a REPORT and stays put until the user acts on it. The transient
+    // (no-item) submit failure used to clear itself back to idle after 2.6s, which
+    // took the message away before it could be read — and left no way to get it
+    // back. Both flavours of `error` now park exactly like `canceled`: hovering
+    // swaps the glyph for the download cloud (see .orca-dl-redo) and a click
+    // re-runs it.
     // While a download is live, poll the backend for its real progress. This is
     // the AUTHORITATIVE sync — the pushed SSE frames are only a fast path. If a
     // push is dropped, the SSE stream drops, the background page suspends, or the
@@ -739,6 +739,14 @@ function buildButtonShell(): { el: HTMLButtonElement; glyphWrap: HTMLElement } {
   cancelWrap.className = 'orca-dl-cancel';
   cancelWrap.appendChild(glyphSvg('x'));
   el.appendChild(cancelWrap);
+  // The same gesture for the other end of the lifecycle: a parked FAILURE keeps
+  // showing its error glyph (and its message in the tooltip) for as long as the
+  // user wants to read it, and hovering turns it back into the download control
+  // so the retry is one click away.
+  const redoWrap = document.createElement('span');
+  redoWrap.className = 'orca-dl-redo';
+  redoWrap.appendChild(glyphSvg('cloudDownload'));
+  el.appendChild(redoWrap);
   return { el, glyphWrap };
 }
 
@@ -846,7 +854,7 @@ class OrcaButton {
         : s === 'submitting' || s === 'progress'
         ? 'Cancel download'
         : s === 'error' && st.errorMsg
-          ? st.errorMsg
+          ? `${st.errorMsg} — click to retry`
           : s === 'canceled'
             ? 'Download canceled — click to retry'
             : s === 'error' && st.slug
@@ -917,6 +925,60 @@ function overlayHost(video: Element): HTMLElement | null {
   return Math.abs(a.left - b.left) <= 1 && Math.abs(a.top - b.top) <= 1 ? up : parent;
 }
 
+// Resting inset of the player overlay from its player's top-left corner.
+const OVERLAY_INSET = 8;
+
+// How far down the player its own chrome bar reaches, if it has one over our
+// corner. Every player draws controls across its top edge and most of them put
+// the video's TITLE in that bar — Pornhub's `.mgp_top-controls`, YouTube's
+// `.ytp-chrome-top` in theater/fullscreen — so a button parked at a fixed 8px
+// inset landed in the middle of the title's letters.
+//
+// Recognised by SHAPE, not by class, so it needs no per-site table: a box that
+// starts at the player's top edge, spans most of its width, and is short. The
+// video surface and full-page overlays are too tall to qualify; a corner badge
+// is too narrow. Deliberately GEOMETRIC rather than a hit-test — these bars are
+// routinely `pointer-events: none` at rest, so `elementsFromPoint` never sees
+// them. Bounded breadth-first (shallow, capped) because a player's subtree runs
+// to hundreds of nodes and this is re-run on every reveal.
+const BAR_MAX_DEPTH = 3;
+const BAR_MAX_NODES = 80;
+
+function playerTopBarBottom(host: HTMLElement): number {
+  const hostRect = host.getBoundingClientRect();
+  if (hostRect.width < 1 || hostRect.height < 1) return 0;
+  let bottom = 0;
+  let level: Element[] = Array.from(host.children);
+  let seen = 0;
+  for (let depth = 0; depth < BAR_MAX_DEPTH && level.length && seen < BAR_MAX_NODES; depth++) {
+    const next: Element[] = [];
+    for (const el of level) {
+      if (seen++ >= BAR_MAX_NODES) break;
+      if (el.classList.contains('orca-overlay-wrap')) continue; // ourselves
+      const r = el.getBoundingClientRect();
+      const isBar =
+        r.width >= hostRect.width * 0.6 && // spans the player, not a corner badge
+        r.height >= 8 &&
+        r.height <= hostRect.height * 0.3 && // a bar, not the video surface
+        r.top - hostRect.top <= OVERLAY_INSET; // sits ON the top edge
+      if (isBar) bottom = Math.max(bottom, r.bottom - hostRect.top);
+      next.push(...Array.from(el.children));
+    }
+    level = next;
+  }
+  return bottom;
+}
+
+// Park the overlay below whatever the player has put in its top-left corner.
+function positionOverlay(host: HTMLElement, wrap: HTMLElement): void {
+  const bottom = playerTopBarBottom(host);
+  const next = bottom > 0 ? Math.round(bottom + OVERLAY_INSET) : OVERLAY_INSET;
+  // Never so far down that the button leaves the player's top region — better to
+  // overlap a bar than to end up floating over the middle of the video.
+  const limit = host.getBoundingClientRect().height * 0.5;
+  wrap.style.top = `${next > OVERLAY_INSET && next < limit ? next : OVERLAY_INSET}px`;
+}
+
 function mountVideoOverlays(): void {
   const videos = Array.from(document.querySelectorAll('video'));
   for (const v of videos) {
@@ -935,8 +997,9 @@ function mountVideoOverlays(): void {
     // aligned with YouTube's own top-left overlay affordances (the "More from"
     // channel chip lives there) rather than fighting the top-right controls.
     const wrap = document.createElement('div');
+    wrap.className = 'orca-overlay-wrap';
     wrap.style.cssText =
-      'position:absolute;top:8px;left:8px;z-index:2147483000;pointer-events:auto';
+      `position:absolute;top:${OVERLAY_INSET}px;left:${OVERLAY_INSET}px;z-index:2147483000;pointer-events:auto`;
     const url = resolveVideoUrl(v);
     const btn = new OrcaButton(url, () => resolveVideoUrl(v));
     mounted.push({ btn, video: v, lastUrl: url });
@@ -959,6 +1022,8 @@ function mountVideoOverlays(): void {
       // hint. The host box is the player area the user actually points at.
       rect: () => host.getBoundingClientRect(),
       el: btn.el,
+      wrap,
+      host,
       inside: false,
       idleTimer: null,
       leaveTimer: null,
@@ -1116,6 +1181,26 @@ function isThumbSized(anchor: HTMLAnchorElement): boolean {
   return r.width >= MIN_THUMB_W && r.height >= MIN_THUMB_H;
 }
 
+// How far into an anchor to look for a CSS background image before giving up.
+const THUMB_BG_MAX_NODES = 16;
+
+// Size alone is not enough to call an anchor a video card. A long video title is
+// its own link to the same video, and once it wraps to two lines it renders wider
+// and taller than MIN_THUMB_* — which is how Pornhub's title text ended up with a
+// download control of its own. A thumbnail also has to SHOW something: an
+// <img>/<picture>/<canvas>/<video>, or a CSS background image (Reddit-style
+// custom-element cards and background-image tiles carry no <img> at all).
+function hasThumbMedia(anchor: HTMLAnchorElement): boolean {
+  if (anchor.querySelector('img, picture, canvas, video, svg image')) return true;
+  let seen = 0;
+  for (const el of [anchor, ...Array.from(anchor.querySelectorAll<HTMLElement>('*'))]) {
+    if (seen++ >= THUMB_BG_MAX_NODES) break;
+    const bg = getComputedStyle(el).backgroundImage;
+    if (bg && bg !== 'none' && bg.includes('url(')) return true;
+  }
+  return false;
+}
+
 function thumbAnchors(): HTMLAnchorElement[] {
   if (!adapter.thumbSelector) return [];
   try {
@@ -1123,7 +1208,7 @@ function thumbAnchors(): HTMLAnchorElement[] {
     for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>(adapter.thumbSelector))) {
       const url = anchorUrl(anchor);
       if (!url) continue;
-      if (adapter.requireThumbBox && !isThumbSized(anchor)) continue;
+      if (adapter.requireThumbBox && !(isThumbSized(anchor) && hasThumbMedia(anchor))) continue;
       // X (and several SPA social sites) places a photo link and its containing
       // post link over the very same image. Both normalize to one post URL, so
       // mounting both produces two SVG controls that truthfully share state but
@@ -1781,7 +1866,9 @@ function ensureSelectBar(): void {
     void downloadSelected();
   });
   selectDlBtn = dlBtn;
-  const doneBtn = mkBarBtn('Done', exitSelect);
+  // "Cancel", not "Done": this button LEAVES select mode without downloading
+  // anything. "Done" read as the commit — right next to the actual commit.
+  const doneBtn = mkBarBtn('Cancel', exitSelect);
   doneBtn.classList.add('orca-select-done');
   bar.append(selectCount, allBtn, selectAllListBtn, clearBtn, doneBtn, dlBtn);
   document.body.appendChild(bar);
@@ -1935,14 +2022,90 @@ let registryHosts: string[] = [];
 // that is already recognising videos.
 async function refreshRegistryHosts(): Promise<void> {
   try {
-    const { websites } = await send<{ websites: { hosts: string[]; enabled: boolean }[] }>({
+    const { websites } = await send<{ websites: RegistrySite[] }>({
       type: 'listWebsites',
     });
     if (!Array.isArray(websites)) return;
-    registryHosts = websites.filter((w) => w.enabled !== false).flatMap((w) => w.hosts ?? []);
+    const live = websites.filter((w) => w.enabled !== false);
+    registryHosts = live.flatMap((w) => w.hosts ?? []);
     applyAdapters(lastUserAdapters);
+    const here = live.find((w) => hostInRegistry(location.hostname, w.hosts ?? []));
+    if (here && here.has_icon === false) void harvestFavicon(here.key);
   } catch {
     /* offline / not configured — keep whatever we already know */
+  }
+}
+
+interface RegistrySite {
+  key: string;
+  hosts: string[];
+  enabled: boolean;
+  has_icon?: boolean;
+}
+
+// ---- favicon harvest ------------------------------------------------------
+//
+// Orca ships a bundled brand mark for the platforms it knows and a generic globe
+// for the rest, which is why a site like Rule34 shows up in the library as an
+// anonymous circle. The one place that site's real mark is trivially available is
+// right here, on the site itself — so when the server says it holds no icon for
+// this host, take the page's favicon and hand it over. Best effort throughout: a
+// CDN-hosted icon that CORS blocks, an unrecognised format, or a server that
+// already has one all just leave the globe in place.
+
+const ICON_MAX_BYTES = 32 * 1024; // the server's cap; don't ship what it will refuse
+
+// Once per page. The registry fetch retries until it lands, and every tab on the
+// site offers the same icon, so there is nothing to gain from a second attempt.
+let iconHarvested = false;
+
+// The site's own favicon: the largest declared `<link rel="icon">`, falling back
+// to the conventional /favicon.ico when a page declares none. `sizes` is the only
+// quality signal available without fetching, and it is usually absent — hence the
+// document-order tie-break that `>` (rather than `>=`) gives the first candidate.
+function faviconUrl(): string {
+  let best = '';
+  let bestSize = -1;
+  const links = document.querySelectorAll<HTMLLinkElement>(
+    'link[rel~="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]',
+  );
+  for (const link of Array.from(links)) {
+    const href = link.getAttribute('href');
+    if (!href) continue;
+    const size = Math.max(
+      0,
+      ...(link.getAttribute('sizes') || '').split(/\s+/).map((s) => parseInt(s, 10) || 0),
+    );
+    if (size > bestSize) {
+      bestSize = size;
+      best = href;
+    }
+  }
+  try {
+    return new URL(best || '/favicon.ico', location.href).href;
+  } catch {
+    return '';
+  }
+}
+
+async function harvestFavicon(key: string): Promise<void> {
+  if (iconHarvested || !key) return;
+  iconHarvested = true;
+  const url = faviconUrl();
+  if (!url) return;
+  try {
+    // `omit` because a favicon is public by definition and this must not carry the
+    // user's session anywhere; `force-cache` because the browser fetched it for
+    // the tab strip already.
+    const res = await fetch(url, { credentials: 'omit', cache: 'force-cache' });
+    if (!res.ok) return;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!bytes.length || bytes.length > ICON_MAX_BYTES) return;
+    const icon = imageDataUrl(bytes);
+    if (!icon) return; // an SVG or something that isn't an image at all
+    await send({ type: 'reportSiteIcon', key, icon });
+  } catch {
+    /* cross-origin icon host, offline, or the server declined it */
   }
 }
 
