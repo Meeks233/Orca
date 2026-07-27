@@ -5,8 +5,9 @@ name: Release
 # is gated behind the full test suite.
 #
 #   userscript → orca.user.js, the Tampermonkey client (auto-update asset)
-#   android    → signed universal APK + AAB
-#   publish    → one GitHub Release carrying both, plus SHA256SUMS
+#   signing    → reports whether an Android release keystore is configured
+#   android    → signed universal APK + AAB, when it is
+#   publish    → one GitHub Release carrying what got built, plus SHA256SUMS
 #   fdroid     → rehearses F-Droid's own from-source build of the tag
 #   play       → optional, manual: uploads the AAB to a Google Play track
 
@@ -77,8 +78,33 @@ jobs:
           path: dist/orca.user.js
           if-no-files-found: error
 
-  android:
+  # A job-level `if:` cannot read the secrets context, so the check lives in a
+  # step and is re-exported as an output. Without this the whole release is
+  # hostage to one optional secret: `android` fails, `publish` never runs, and a
+  # tag ships nothing at all — not even the userscript or the image, which need
+  # no credentials.
+  signing:
     needs: verify
+    runs-on: ubuntu-latest
+    environment: android-release
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Is the release keystore configured?
+        id: check
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ORCA_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ORCA_ANDROID_KEYSTORE_BASE64 is not set in the android-release environment — skipping the signed Android build. The release will carry the userscript only. See docs/RELEASING_ANDROID.md#signing."
+          fi
+
+  android:
+    needs: [verify, signing]
+    if: needs.signing.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: android-release
     env:
@@ -184,7 +210,11 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # always(), because `android` is skipped outright when no keystore is
+    # configured and a skipped dependency would otherwise skip this too. The
+    # userscript is the one artifact every release must carry, so that is what
+    # is actually required.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.userscript.result == 'success'
     needs: [android, userscript]
     runs-on: ubuntu-latest
     permissions:
@@ -193,12 +223,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download every release artifact
+      # Named downloads, not `pattern: orca-*` — that glob would also pick up
+      # orca-fdroid-unsigned, and an APK F-Droid has not signed is the last
+      # thing that should appear on a release page.
+      - name: Download the userscript
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: orca-*
-          merge-multiple: true
+          name: orca-userscript
           path: dist
+
+      - name: Download the signed Android build
+        if: needs.android.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: orca-android-release
+          path: dist
+
+      - name: Note a release without Android artifacts
+        if: needs.android.result != 'success'
+        run: |
+          echo "::warning::Publishing without the signed APK/AAB — the android job did not succeed."
+          echo "This release carries the userscript only; the Android build was skipped or failed." >> "$GITHUB_STEP_SUMMARY"
 
       # mapping.txt and whatsnew/ ride along in the Android artifact because the
       # Play job needs them, but they are not things a user downloads or
@@ -278,19 +323,39 @@ jobs:
         # download, and the build then dies on `no such command: tauri`.
         run: cargo binstall -y --force 'tauri-cli@2.11.4'
 
-      # `scandelete: web` in the recipe means F-Droid deletes the committed
-      # bundle before scanning, so the build MUST regenerate it. Delete it here
-      # too, otherwise a recipe that quietly depends on the committed copy would
-      # pass this rehearsal and still fail on F-Droid's builder.
-      - name: Delete the committed bundle, as fdroid scandelete does
-        run: rm -rf web
+      # F-Droid deletes every `scandelete` path before scanning, so the build
+      # MUST regenerate them. Read the list out of the recipe rather than
+      # repeating it: a recipe that quietly depends on a file it also deletes
+      # would otherwise pass this rehearsal and still fail on F-Droid's builder.
+      - name: Delete the recipe's scandelete paths, as fdroid does
+        run: |
+          python3 - <<'PY' > /tmp/scandelete.txt
+          import json, yaml
+          version = json.load(open("app/src-tauri/tauri.conf.json"))["version"]
+          recipe = yaml.safe_load(open("packaging/fdroid/com.meeks233.orca.yml"))
+          build = next(b for b in recipe["Builds"] if str(b["versionName"]) == version)
+          print("\n".join(build.get("scandelete", [])))
+          PY
+          test -s /tmp/scandelete.txt || { echo "::error::recipe declares no scandelete paths"; exit 1; }
+          while read -r path; do
+            echo "removing $path"
+            rm -rf -- "$path"
+          done < /tmp/scandelete.txt
 
       - name: Rehearse the F-Droid recipe
         run: bash app/scripts/build-fdroid.sh
 
+      - name: Confirm the build restored everything it deleted
+        run: |
+          missing=0
+          while read -r path; do
+            [ -e "$path" ] || { echo "::error::$path is in scandelete but the build did not regenerate it"; missing=1; }
+          done < /tmp/scandelete.txt
+          test "$missing" -eq 0
+
       - name: Confirm the recipe's declared output exists
         run: |
-          out="$(sed -n 's/^    output: *//p' packaging/fdroid/com.meeks233.orca.yml)"
+          out="$(sed -n 's/^    output: *//p' packaging/fdroid/com.meeks233.orca.yml | tail -n1)"
           test -f "$out" || { echo "::error::recipe output $out was not produced"; exit 1; }
           sha256sum "$out"
           {

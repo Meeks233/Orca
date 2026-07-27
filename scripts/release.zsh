@@ -207,7 +207,8 @@ cat <<EOF
   branch      : $RELEASE_BRANCH
   GitHub      : https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${VERSION}
   image       : ${IMAGE}:${BARE}  (also :${VERSION} and :sha-<commit>)
-  assets      : orca-${BARE}.apk, orca-${BARE}.aab, orca.user.js, SHA256SUMS
+  assets      : orca.user.js, SHA256SUMS, plus orca-${BARE}.apk/.aab when the
+                android-release keystore secrets are configured
   F-Droid     : recipe rehearsed in CI; submit ${FDROID_RECIPE} to fdroiddata by hand
   Google Play : not automatic — run the Release workflow with publish_play=true
 EOF

@@ -39,8 +39,17 @@ Builds:
     # web/ holds a committed esbuild bundle (minified JS), which `fdroid scan`
     # rejects as a prebuilt binary. Deleting it before the scan is safe: the
     # build regenerates it from frontend/ sources — see build-fdroid.sh.
+    #
+    # List the four generated files, NOT `web` itself. The rest of web/ (70
+    # icons, index.html, the manifest, third-party-notices.txt) is committed
+    # source that build.ts does not emit — and it reads web/icons/sites to
+    # derive site logo tones, so deleting the directory doesn't just ship a
+    # broken app, it fails the build outright.
     scandelete:
-      - web
+      - web/app.js
+      - web/theme.js
+      - web/sw.js
+      - web/style.css
     ndk: r27c
     output: app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
 

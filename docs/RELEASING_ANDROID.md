@@ -56,6 +56,13 @@ Configure the same values as secrets in the protected GitHub environment
 `ORCA_ANDROID_KEYSTORE_BASE64`. Never commit a keystore, password, Play service
 account JSON, or generated `dist/` content.
 
+Until `ORCA_ANDROID_KEYSTORE_BASE64` is set, the release workflow's `signing`
+job reports the keystore as absent and the `android` job is skipped rather than
+failed. The release still publishes — with the userscript, the checksums, and
+the container image — and says so in the run summary. Nothing else is held
+hostage to one optional secret. F-Droid is unaffected either way: it signs with
+its own key and never sees ours.
+
 ## Google Play
 
 Current official requirements and setup:
