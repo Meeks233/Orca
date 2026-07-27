@@ -84,6 +84,8 @@ mod tests {
             blur: false,
             blur_default: false,
             sort: 0,
+            icon: None,
+            has_icon: false,
             cookie: None,
         }
     }

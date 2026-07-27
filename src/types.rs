@@ -275,6 +275,17 @@ pub struct Website {
     pub blur_default: bool,
     #[serde(default)]
     pub sort: i64,
+    /// Favicon harvested from the live site by the userscript, as a data URL
+    /// (migration 0027). Deliberately never serialized: a registry listing is
+    /// fetched on every page a client visits, and inlining ~60 base64 blobs into
+    /// it would dwarf the rest. Clients read `has_icon` here and pull the bytes
+    /// themselves from `GET /api/websites/icons`.
+    #[serde(default, skip_serializing)]
+    pub icon: Option<String>,
+    /// Whether `icon` is set — what a client checks to decide between the
+    /// bundled mark, a harvested favicon, and offering to harvest one.
+    #[serde(default, skip_deserializing)]
+    pub has_icon: bool,
     /// Computed (not stored): cookie presence/state for this site, merged in by
     /// the API from the on-disk cookie jar. `None` in DB-only contexts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,6 +303,11 @@ pub struct CookieStatus {
     /// all session cookies. The UI reminds the user near/after this time.
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// Whether the jar holds a real login session cookie. `false` means the
+    /// export lost its HttpOnly cookies — downloads run logged-out, so the UI
+    /// must not paint this jar as healthy.
+    #[serde(default)]
+    pub has_login: bool,
 }
 
 /// One downloaded resolution variant of an item (see `item_resolutions`).

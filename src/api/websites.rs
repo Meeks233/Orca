@@ -22,6 +22,90 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Response> {
     Ok(Json(json!({ "websites": sites })).into_response())
 }
 
+/// GET /api/websites/icons — every harvested favicon, keyed by host.
+///
+/// Split out of the registry listing on purpose: that listing is fetched by every
+/// client on every page, and inlining base64 blobs for dozens of sites into it
+/// would make the common case pay for the rare one. Here the payload is only the
+/// icons that actually exist, and a client can cache it for the session.
+pub async fn icons(State(state): State<AppState>) -> AppResult<Response> {
+    let pairs = state.db.list_website_icons().await.map_err(internal)?;
+    let map: serde_json::Map<String, serde_json::Value> = pairs
+        .into_iter()
+        .map(|(host, icon)| (host, serde_json::Value::String(icon)))
+        .collect();
+    Ok(Json(json!({ "icons": map })).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IconBody {
+    /// `data:image/<type>;base64,<payload>` scraped off the live site.
+    pub icon: String,
+}
+
+/// A harvested favicon has to stay small enough that shipping the whole set in
+/// one response is never a problem. Real favicons are 1–10 KB; this is roomy.
+const MAX_ICON_BYTES: usize = 32 * 1024;
+
+/// Image types a site may legitimately serve as its favicon. SVG is deliberately
+/// absent: the icon is rendered by the web UI as an `<img>` from a data URL, and
+/// an SVG there carries a scripting surface the raster formats don't.
+const ICON_MIME: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+];
+
+/// PUT /api/websites/:key/icon — record the site's own favicon, harvested from a
+/// live page by the userscript, for a site Orca ships no bundled mark for.
+///
+/// Only ever fills a hole: a site that already has an icon answers `stored: false`
+/// and keeps what it has, so the tabs racing to report the same favicon settle
+/// after the first one.
+pub async fn set_icon(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(body): Json<IconBody>,
+) -> AppResult<Response> {
+    let key = safe_key(&key)?;
+    let icon = body.icon.trim();
+    // Parse rather than trust: this string is written straight into an `<img src>`
+    // by every client that renders the registry, so anything that is not an inline
+    // raster image of a plausible size has no business being stored.
+    let (mime, payload) = icon
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .ok_or_else(|| {
+            AppError::BadRequest("icon must be a data:<mime>;base64,<payload> URL".into())
+        })?;
+    if !ICON_MIME.contains(&mime.to_ascii_lowercase().as_str()) {
+        return Err(AppError::BadRequest(format!(
+            "icon type '{mime}' is not an accepted image format"
+        )));
+    }
+    // 4 base64 chars per 3 bytes — check before decoding so an oversized payload
+    // is rejected without allocating it.
+    if payload.len() / 4 * 3 > MAX_ICON_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "icon is larger than {} KB",
+            MAX_ICON_BYTES / 1024
+        )));
+    }
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| AppError::BadRequest("icon payload is not valid base64".into()))?;
+    let stored = state
+        .db
+        .set_website_icon(&key, icon)
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({ "stored": stored })).into_response())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WebsiteBody {
     pub name: Option<String>,
@@ -72,6 +156,8 @@ pub async fn upsert(
         blur: false,
         blur_default: false,
         sort: 999,
+        icon: None,
+        has_icon: false,
         cookie: None,
     });
     let hosts = match body.hosts {
@@ -143,6 +229,10 @@ pub async fn upsert(
         // Immutable seed baseline — carried through so a user edit never rewrites it.
         blur_default: base.blur_default,
         sort: body.sort.unwrap_or(base.sort),
+        // A harvested favicon is not an editable field: `upsert_website` leaves the
+        // column alone entirely, so this only keeps the echoed response honest.
+        has_icon: base.has_icon,
+        icon: base.icon,
         cookie: None,
     };
     state.db.upsert_website(&w).await.map_err(internal)?;
@@ -305,7 +395,7 @@ pub async fn validate(
             Ok(Json(json!({ "ok": false, "error": "no media found at that URL" })).into_response())
         }
         Err(e) => {
-            let msg = crate::ytdlp::explain_error(&url, &e.to_string());
+            let msg = crate::ytdlp::explain_error(&url, &e.to_string(), cookie.as_deref());
             Ok(Json(json!({ "ok": false, "error": msg })).into_response())
         }
     }
@@ -336,6 +426,7 @@ fn cookie_status(state: &AppState, key: &str) -> CookieStatus {
         bytes: st.bytes,
         updated_at: st.updated_at,
         expires_at: st.expires_at,
+        has_login: st.has_login,
     }
 }
 

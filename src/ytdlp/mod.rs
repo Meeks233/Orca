@@ -252,15 +252,35 @@ fn parse_subtitles(json: &serde_json::Value) -> Vec<RemoteSub> {
 /// error matches a known "needs login" shape we append a short hint naming the
 /// platform and pointing at the per-platform cookie setting — the actual fix.
 /// Non-auth errors are returned unchanged.
-pub fn explain_error(url: &str, raw: &str) -> String {
+///
+/// `cookies` is the jar this attempt actually sent, which decides *which* advice
+/// is true. Telling a user who IS logged in to "add your cookies" is wrong and
+/// reads as a bug in Orca. Three distinct states:
+///   • no jar          → add cookies.
+///   • jar, no session → the jar was exported without its HttpOnly session
+///                       cookie, so the request went out logged-out. This is the
+///                       silent failure: `ct0`/`twid` survive a `document.cookie`
+///                       scrape, `auth_token` doesn't.
+///   • full jar        → the site refused a real login: expired / wrong account.
+pub fn explain_error(url: &str, raw: &str, cookies: Option<&Path>) -> String {
     if !looks_like_auth_required(raw) {
         return raw.to_string();
     }
     let site = crate::platform::from_url(url)
         .map(|p| p.name)
         .unwrap_or("this site");
+    let Some(jar) = cookies else {
+        return format!(
+            "{raw} — {site} likely requires login for this content. Add your {site} account cookies in Settings → Cookies, then retry."
+        );
+    };
+    if !crate::cookies::jar_has_login(jar) {
+        return format!(
+            "{raw} — your saved {site} cookies carry no login session cookie (the HttpOnly one, e.g. X's `auth_token`), so this request went out logged-out. Re-export them with a \"Get cookies.txt\" browser extension — a copy of `document.cookie` cannot include it — and re-import in Settings → Cookies."
+        );
+    }
     format!(
-        "{raw} — {site} likely requires login for this content. Add your {site} account cookies in Settings → Cookies, then retry."
+        "{raw} — Orca sent your saved {site} cookies and {site} still refused. They are likely expired or from another account — re-import them in Settings → Cookies, then retry."
     )
 }
 
@@ -381,7 +401,7 @@ mod explain_tests {
     #[test]
     fn x_gated_video_gets_cookie_hint() {
         let raw = "ERROR: [twitter] 2076991813915656399: No video could be found in this tweet";
-        let msg = explain_error("https://x.com/i/status/2076991813915656399", raw);
+        let msg = explain_error("https://x.com/i/status/2076991813915656399", raw, None);
         assert!(msg.starts_with(raw));
         assert!(msg.contains("X / Twitter"));
         assert!(msg.contains("Cookies"));
@@ -390,14 +410,47 @@ mod explain_tests {
     #[test]
     fn ordinary_error_is_unchanged() {
         let raw = "ERROR: Unable to download webpage: HTTP Error 500";
-        assert_eq!(explain_error("https://x.com/i/status/9", raw), raw);
+        assert_eq!(explain_error("https://x.com/i/status/9", raw, None), raw);
     }
 
     #[test]
     fn unknown_host_falls_back_to_generic_site_label() {
         let raw = "ERROR: Sign in to confirm you're not a bot";
-        let msg = explain_error("https://example.com/v/1", raw);
+        let msg = explain_error("https://example.com/v/1", raw, None);
         assert!(msg.contains("this site"));
+    }
+
+    #[test]
+    fn jar_without_session_cookie_is_named_as_the_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("twitter.txt");
+        // What a `document.cookie` scrape of a logged-in X tab looks like: the
+        // login markers survive, the HttpOnly `auth_token` does not.
+        std::fs::write(
+            &jar,
+            "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tct0\tabc\n.x.com\tTRUE\t/\tTRUE\t0\ttwid\tu%3D1\n",
+        )
+        .unwrap();
+        let raw = "ERROR: [twitter] 123: No video could be found in this tweet";
+        let msg = explain_error("https://x.com/i/status/123", raw, Some(&jar));
+        assert!(msg.starts_with(raw));
+        assert!(msg.contains("no login session cookie"));
+    }
+
+    #[test]
+    fn full_jar_is_told_to_reimport_not_to_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("twitter.txt");
+        std::fs::write(
+            &jar,
+            "# Netscape HTTP Cookie File\n#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tdeadbeef\n",
+        )
+        .unwrap();
+        let raw = "ERROR: [twitter] 123: No video could be found in this tweet";
+        let msg = explain_error("https://x.com/i/status/123", raw, Some(&jar));
+        assert!(msg.contains("re-import"));
+        assert!(!msg.contains("likely requires login"));
+        assert!(!msg.contains("no login session cookie"));
     }
 }
 

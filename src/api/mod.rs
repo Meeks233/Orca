@@ -79,10 +79,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/websites", get(websites::list))
         .route("/api/websites/merge", post(websites::merge))
         .route("/api/websites/validate", post(websites::validate))
+        // Ahead of `/:key` so the literal path isn't swallowed as a site key.
+        .route("/api/websites/icons", get(websites::icons))
         .route(
             "/api/websites/:key",
             put(websites::upsert).delete(websites::delete),
         )
+        .route("/api/websites/:key/icon", put(websites::set_icon))
         .route(
             "/api/websites/:key/cookies",
             post(websites::set_cookies)

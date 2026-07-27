@@ -529,6 +529,7 @@ pub(super) async fn set_setting(db: &Db, key: &str, value: Option<&str>) -> anyh
 
 fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
     let hosts_csv: String = row.try_get("hosts")?;
+    let icon: Option<String> = row.try_get("icon")?;
     Ok(Website {
         key: row.try_get("key")?,
         name: row.try_get("name")?,
@@ -543,6 +544,8 @@ fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
         blur: row.try_get::<i64, _>("blur")? != 0,
         blur_default: row.try_get::<i64, _>("blur_default")? != 0,
         sort: row.try_get("sort")?,
+        has_icon: icon.is_some(),
+        icon,
         cookie: None,
     })
 }
@@ -550,7 +553,7 @@ fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
 /// All websites, in display order (then name).
 pub(super) async fn list_websites(db: &Db) -> anyhow::Result<Vec<Website>> {
     let rows = sqlx::query(
-        "SELECT key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, blur, blur_default, sort \
+        "SELECT key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, blur, blur_default, sort, icon \
          FROM websites ORDER BY sort, name",
     )
     .fetch_all(&db.pool)
@@ -598,10 +601,43 @@ pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Store a harvested favicon (data URL) for a site, but only where none is
+/// recorded yet. Returns whether this call is the one that set it. First writer
+/// wins deliberately: every browser tab on a site offers the same favicon, so a
+/// no-op for the rest keeps them from writing over each other all day. `icon` is
+/// left out of `upsert_website` entirely so an ordinary site edit can neither
+/// clear nor overwrite it.
+pub(super) async fn set_website_icon(db: &Db, key: &str, icon: &str) -> anyhow::Result<bool> {
+    let res = sqlx::query("UPDATE websites SET icon = ? WHERE key = ? AND icon IS NULL")
+        .bind(icon)
+        .bind(key)
+        .execute(&db.pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Every harvested favicon, as `(host, data URL)` — one entry per host a site
+/// claims, so a client can match on the host it already has without first
+/// resolving it to a site key.
+pub(super) async fn list_website_icons(db: &Db) -> anyhow::Result<Vec<(String, String)>> {
+    let rows = sqlx::query("SELECT hosts, icon FROM websites WHERE icon IS NOT NULL")
+        .fetch_all(&db.pool)
+        .await?;
+    let mut out = Vec::new();
+    for row in &rows {
+        let hosts_csv: String = row.try_get("hosts")?;
+        let icon: String = row.try_get("icon")?;
+        for host in crate::websites::parse_hosts(&hosts_csv) {
+            out.push((host, icon.clone()));
+        }
+    }
+    Ok(out)
+}
+
 /// Fetch one website by key.
 pub(super) async fn get_website(db: &Db, key: &str) -> anyhow::Result<Option<Website>> {
     let row = sqlx::query(
-        "SELECT key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, blur, blur_default, sort \
+        "SELECT key, name, hosts, login_url, enabled, max_heights, stream_quality, container, subs, blur, blur_default, sort, icon \
          FROM websites WHERE key = ?",
     )
     .bind(key)
@@ -1384,6 +1420,8 @@ mod tests {
             blur: false,
             blur_default: false,
             sort: 0,
+            icon: None,
+            has_icon: false,
             cookie: None,
         }
     }

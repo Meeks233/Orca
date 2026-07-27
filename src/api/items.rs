@@ -135,7 +135,7 @@ pub async fn submit(
             // Enrich the client-facing message so a login-gated link (e.g. X video
             // with no cookies) tells the user to add cookies instead of showing a
             // cryptic yt-dlp error.
-            let msg = crate::ytdlp::explain_error(&url, &raw);
+            let msg = crate::ytdlp::explain_error(&url, &raw, cookie.as_deref());
             // Mirror into the UI-visible error log (bounded, newest-first).
             state.errlog.push("probe", &url, platform, &msg);
             return Err(AppError::ProbeFailed(msg));
@@ -216,7 +216,16 @@ pub async fn submit(
                 }
                 None => item,
             };
-            if force {
+            // A row that STOPPED is not a duplicate. Dedup means "you already have
+            // this", which is untrue of a failed or cancelled item: reporting one as
+            // a duplicate changed nothing on the server, so the click appeared to do
+            // nothing — most visibly right after importing cookies for a login-gated
+            // site, where the whole point of the second attempt is that the
+            // conditions have changed (the cookie jar is resolved fresh at download
+            // time, so the re-run is the fix). Only a live or completed row is a
+            // genuine duplicate; a stopped one is re-run exactly as `force` would.
+            let stopped = matches!(item.status, Status::Failed | Status::Canceled);
+            if force || stopped {
                 // Carry the prepare card's resolution choice onto the reused row so
                 // the re-enqueued primary honours it, same as a fresh submit.
                 if let Some(h) = requested_height {
@@ -355,7 +364,7 @@ pub async fn preview(
         Ok(p) => p,
         Err(e) => {
             let raw = e.to_string();
-            let msg = crate::ytdlp::explain_error(&url, &raw);
+            let msg = crate::ytdlp::explain_error(&url, &raw, cookie.as_deref());
             return Err(AppError::ProbeFailed(msg));
         }
     };

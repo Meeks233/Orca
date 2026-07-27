@@ -715,7 +715,7 @@ async fn run_job(
             // Enrich the stored/displayed message: a login-gated download (e.g. an
             // X video that probed OK but needs cookies to fetch) gets an actionable
             // "add your cookies" hint instead of a cryptic yt-dlp tail.
-            let msg = crate::ytdlp::explain_error(&item.webpage_url, &raw);
+            let msg = crate::ytdlp::explain_error(&item.webpage_url, &raw, cookie.as_deref());
             // Structured error event: one greppable record per failure carrying
             // the fields you need to debug it (job id, source, url, extractor,
             // the raw yt-dlp error tail) — filter with `level=error target=orca::queue`

@@ -244,6 +244,17 @@ impl Db {
         queries::upsert_website(self, w).await
     }
 
+    /// Record a harvested favicon for a site that has none. `false` when one was
+    /// already stored (or the key is unknown).
+    pub async fn set_website_icon(&self, key: &str, icon: &str) -> anyhow::Result<bool> {
+        queries::set_website_icon(self, key, icon).await
+    }
+
+    /// Every harvested favicon as `(host, data URL)` pairs.
+    pub async fn list_website_icons(&self) -> anyhow::Result<Vec<(String, String)>> {
+        queries::list_website_icons(self).await
+    }
+
     /// Delete a website by key.
     pub async fn delete_website(&self, key: &str) -> anyhow::Result<bool> {
         queries::delete_website(self, key).await

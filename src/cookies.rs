@@ -29,6 +29,11 @@ pub struct StoredCookie {
     /// Netscape expiry column. `None` when every cookie is a session cookie or
     /// no expiry is present. Drives the UI's "expiring/expired" reminder.
     pub expires_at: Option<i64>,
+    /// Whether the jar carries an actual login session cookie (see
+    /// `has_login_cookie`). A jar exported without HttpOnly cookies keeps the
+    /// login *markers* and loses the login itself, so without this the UI shows a
+    /// healthy green jar that authenticates nothing.
+    pub has_login: bool,
 }
 
 impl CookieStore {
@@ -126,18 +131,18 @@ impl CookieStore {
             .map(|m| (m.len(), mtime_secs(&m)))
             .unwrap_or((0, 0));
         // Cookie jars are small (a few KB); reading to compute the earliest
-        // expiry on each status call is cheap and keeps expiry always current.
-        let expires_at = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .as_deref()
-            .and_then(earliest_expiry);
+        // expiry and the login check on each status call is cheap and keeps both
+        // always current.
+        let contents = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let expires_at = contents.as_deref().and_then(earliest_expiry);
+        let has_login = contents.as_deref().map(has_login_cookie).unwrap_or(false);
         StoredCookie {
             present: path.is_some(),
             enabled,
             bytes,
             updated_at,
             expires_at,
+            has_login,
         }
     }
 }
@@ -174,6 +179,17 @@ pub fn resolve_keyed(
     global.map(|p| p.to_path_buf())
 }
 
+/// Is this a Netscape cookie *data* line (7 tab-separated fields)? The
+/// `#HttpOnly_` domain prefix is part of the format — the convention curl,
+/// Chrome exports and yt-dlp all use to carry an HttpOnly flag — not a comment,
+/// so a jar whose lines are all HttpOnly (exactly the login-bearing ones) must
+/// still be recognised as Netscape rather than mis-parsed as a header string.
+fn is_cookie_line(line: &str) -> bool {
+    let l = line.trim();
+    let l = l.strip_prefix("#HttpOnly_").unwrap_or(l);
+    !l.is_empty() && !l.starts_with('#') && l.split('\t').count() >= 7
+}
+
 /// Boolean → Netscape `TRUE`/`FALSE` flag column.
 fn bool_flag(b: bool) -> &'static str {
     if b {
@@ -198,6 +214,50 @@ fn is_auth_cookie(name: &str) -> bool {
     // …plus exact names that carry none of the above substrings (Google/X/LinkedIn).
     const EXACT: [&str; 6] = ["sid", "hsid", "ssid", "apisid", "twid", "li_at"];
     EXACT.contains(&n.as_str())
+}
+
+/// Does this jar actually carry a **login session**, or only the companion
+/// cookies a logged-in browser sets alongside one?
+///
+/// The distinction matters because the session cookie is invariably HttpOnly
+/// (X's `auth_token`, YouTube's `SAPISID`), while its companions are not: a jar
+/// scraped from `document.cookie` — or exported by a tool that can't read
+/// HttpOnly cookies — keeps `ct0`/`twid` and silently loses the only cookie that
+/// authenticates anything. yt-dlp then falls back to guest auth and gated posts
+/// fail with a cryptic "no video could be found", which reads as an Orca bug.
+///
+/// Stricter than `is_auth_cookie` on purpose: `twid` (X's user-id cookie) is a
+/// login *marker* that survives a document.cookie scrape, so counting it here
+/// would call exactly the broken jar we're trying to catch "logged in".
+pub fn has_login_cookie(contents: &str) -> bool {
+    contents.lines().any(|l| {
+        let l = l.trim();
+        // `#HttpOnly_` is a data-line prefix in Netscape jars, not a comment.
+        let l = l.strip_prefix("#HttpOnly_").unwrap_or(l);
+        if l.is_empty() || l.starts_with('#') {
+            return false;
+        }
+        let fields: Vec<&str> = l.split('\t').collect();
+        fields.len() >= 7 && is_session_cookie(fields[5])
+    })
+}
+
+/// Same as `has_login_cookie` for a jar on disk. An unreadable jar reports
+/// `true`: never accuse a user's cookies of being incomplete on a file error.
+pub fn jar_has_login(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| has_login_cookie(&s))
+        .unwrap_or(true)
+}
+
+/// Names that *are* the session (see `has_login_cookie`) — `is_auth_cookie`
+/// minus the non-HttpOnly login markers.
+fn is_session_cookie(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    if n == "twid" {
+        return false;
+    }
+    is_auth_cookie(&n)
 }
 
 /// Cookie-jar expiry (unix seconds) that drives the UI's "expiring/expired"
@@ -252,10 +312,7 @@ fn normalize_cookies(raw: &str, default_domain: Option<&str>) -> Result<String, 
         return json_to_netscape(trimmed);
     }
     // Netscape: at least one data line with the 7 tab-separated fields.
-    let looks_netscape = trimmed.lines().any(|l| {
-        let l = l.trim();
-        !l.is_empty() && !l.starts_with('#') && l.split('\t').count() >= 7
-    });
+    let looks_netscape = trimmed.lines().any(is_cookie_line);
     if looks_netscape {
         return normalize_netscape(trimmed);
     }
@@ -313,6 +370,14 @@ fn json_to_netscape(raw: &str) -> Result<String, String> {
             format!(".{domain}")
         } else {
             domain.to_string()
+        };
+        // Preserve the HttpOnly flag via the `#HttpOnly_` prefix: those are the
+        // session cookies, and dropping the flag would make a complete export
+        // read as a login-less jar.
+        let flag_domain = if c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false) {
+            format!("#HttpOnly_{flag_domain}")
+        } else {
+            flag_domain
         };
         lines.push(format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -387,10 +452,7 @@ fn normalize_netscape(raw: &str) -> Result<String, String> {
     }
     // A real cookie line has 7 tab-separated fields. Reject space-only pastes,
     // which yt-dlp would silently ignore, leaving the user confused.
-    let looks_valid = trimmed.lines().any(|l| {
-        let l = l.trim();
-        !l.is_empty() && !l.starts_with('#') && l.split('\t').count() >= 7
-    });
+    let looks_valid = trimmed.lines().any(is_cookie_line);
     if !looks_valid {
         return Err(
             "does not look like a Netscape cookies.txt (need tab-separated fields — \
@@ -459,6 +521,28 @@ mod tests {
         let with = format!("# Netscape HTTP Cookie File\n{SAMPLE}");
         let out = normalize_netscape(&with).unwrap();
         assert_eq!(out.matches("# Netscape HTTP Cookie File").count(), 1);
+    }
+
+    #[test]
+    fn login_cookie_detection_ignores_document_cookie_leftovers() {
+        // A document.cookie scrape of a logged-in X tab: markers, no session.
+        let scraped = ".x.com\tTRUE\t/\tTRUE\t0\tct0\tabc\n.x.com\tTRUE\t/\tTRUE\t0\ttwid\tu%3D1\n";
+        assert!(!has_login_cookie(scraped));
+        // A real export keeps auth_token, flagged HttpOnly by the `#HttpOnly_` prefix.
+        let full = format!("{scraped}#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tdead\n");
+        assert!(has_login_cookie(&full));
+        // YouTube's session cookie counts too.
+        assert!(has_login_cookie(SAMPLE));
+    }
+
+    #[test]
+    fn all_httponly_export_is_still_netscape() {
+        // Every line HttpOnly-prefixed: the `#` must not read as a comment, or the
+        // paste falls through to the header parser and the jar is mangled.
+        let raw = "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tdead";
+        let out = normalize_cookies(raw, Some("x.com")).unwrap();
+        assert!(out.contains("#HttpOnly_.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tdead"));
+        assert!(has_login_cookie(&out));
     }
 
     #[test]

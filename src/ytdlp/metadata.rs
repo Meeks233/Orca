@@ -143,6 +143,21 @@ fn stderr_tail(stderr: &str) -> String {
     trimmed[start..].to_string()
 }
 
+/// First non-empty string among `keys`, in order. A key whose value is a list
+/// (yt-dlp moved `creator`/`artist` to the plural `creators`/`artists` arrays)
+/// contributes its first string element, so both spellings read the same.
+fn first_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| v.get(k))
+        .filter_map(|x| match x {
+            serde_json::Value::Array(items) => items.first().and_then(|i| i.as_str()),
+            _ => x.as_str(),
+        })
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 /// Parse one `--dump-json` line into a `ProbeResult`. Isolated for unit testing
 /// without invoking yt-dlp. Returns `None` if the line is not a usable JSON object.
 pub(crate) fn parse_dump_json_line(line: &str) -> Option<ProbeResult> {
@@ -153,23 +168,36 @@ pub(crate) fn parse_dump_json_line(line: &str) -> Option<ProbeResult> {
     let title = v.get("title")?.as_str()?.to_string();
     let webpage_url = v.get("webpage_url")?.as_str()?.to_string();
 
-    // uploader, else channel.
-    let uploader = v
-        .get("uploader")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("channel").and_then(|x| x.as_str()))
-        .map(|s| s.to_string());
+    // Who made it. X and YouTube fill `uploader`/`channel`, but plenty of sites
+    // name the author under some other key entirely — a music site calls them the
+    // artist, an art site the creator, a tube site only ever emits the profile
+    // slug as `uploader_id`. Every one of these is already in the SAME
+    // `--dump-json` output, so widening the chain costs no extra request; it just
+    // stops the card from saying nothing about who posted it. Ordered most to
+    // least human: a display name beats a slug.
+    let uploader = first_str(
+        &v,
+        &[
+            "uploader",
+            "channel",
+            "creator",
+            "creators",
+            "artist",
+            "artists",
+            "album_artist",
+            "uploader_id",
+            "playlist_uploader",
+        ],
+    );
 
     // The uploader's own page, so the UI can link the name back to who posted it.
     // `uploader_url` names the person; `channel_url` is the fallback for sites that
-    // only surface the channel. Only keep an http(s) address — a stray scheme has
-    // no business becoming a link.
-    let uploader_url = v
-        .get("uploader_url")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("channel_url").and_then(|x| x.as_str()))
-        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
-        .map(|s| s.to_string());
+    // only surface the channel, and `playlist_uploader_id` the one for a page that
+    // only identified whose collection this came from. Only keep an http(s)
+    // address — a stray scheme has no business becoming a link, and these last
+    // fields hold a bare id as often as a URL.
+    let uploader_url = first_str(&v, &["uploader_url", "channel_url", "playlist_uploader_id"])
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"));
 
     let thumbnail_url = v
         .get("thumbnail")
@@ -299,6 +327,34 @@ mod tests {
 
         let r = parse_dump_json_line(line).expect("should parse");
         assert_eq!(r.uploader.as_deref(), Some("Only Channel"));
+    }
+
+    #[test]
+    fn uploader_falls_back_to_the_other_author_fields() {
+        // A music/art site names the author `artist`/`creator` instead — and newer
+        // yt-dlp emits those as arrays.
+        let artist = r#"{"extractor":"bandcamp","id":"1","title":"Song","artists":["Boards of Canada"],"webpage_url":"https://example.com/1"}"#;
+        assert_eq!(
+            parse_dump_json_line(artist).unwrap().uploader.as_deref(),
+            Some("Boards of Canada")
+        );
+        let creator = r#"{"extractor":"e621","id":"1","title":"Pic","creator":"Someone","webpage_url":"https://example.com/1"}"#;
+        assert_eq!(
+            parse_dump_json_line(creator).unwrap().uploader.as_deref(),
+            Some("Someone")
+        );
+
+        // A tube site that only ever reports the profile slug: a slug names the
+        // author better than a blank card does.
+        let slug = r#"{"extractor":"XVideos","id":"1","title":"Clip","uploader":"","uploader_id":"ullaitv0275","webpage_url":"https://example.com/1"}"#;
+        assert_eq!(
+            parse_dump_json_line(slug).unwrap().uploader.as_deref(),
+            Some("ullaitv0275")
+        );
+
+        // Nothing author-shaped at all → still None, not an empty name.
+        let none = r#"{"extractor":"generic","id":"1","title":"Clip","uploader":"  ","webpage_url":"https://example.com/1"}"#;
+        assert_eq!(parse_dump_json_line(none).unwrap().uploader, None);
     }
 
     #[test]
