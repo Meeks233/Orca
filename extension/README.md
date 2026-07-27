@@ -68,9 +68,15 @@ typecheck). The output is git-ignored.
 
 ## Install
 
-Drag `dist-userscript/orca.user.js` into Tampermonkey / Violentmonkey, or open it
-as a `file://` URL — the manager intercepts `*.user.js`. Re-import after a
-rebuild to pick up changes.
+**Released build** — open
+<https://github.com/Meeks233/Orca/releases/latest/download/orca.user.js>; the
+manager intercepts `*.user.js` and offers to install it. The banner's
+`@updateURL` points at that same `latest` URL, so installed copies pick up
+future releases on their own.
+
+**Local build** — drag `dist-userscript/orca.user.js` into Tampermonkey /
+Violentmonkey, or open it as a `file://` URL. Re-import after a rebuild to pick
+up changes.
 
 ## Architecture
 

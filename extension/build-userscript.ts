@@ -42,14 +42,26 @@ const iconDataUri = `data:image/png;base64,${iconPng.toString('base64')}`;
 // that prompt for the loopback case. Tampermonkey has no CIDR/IP-wildcard, so a
 // server on a LAN IP can't be pre-authorised here; for those `@connect *` still
 // surfaces the dialog's one-click "Always allow all domains" button.
+//
+// @downloadURL/@updateURL point at the `latest` release asset rather than a
+// pinned tag, which is what lets a manager auto-update an installed copy.
+// `.github/workflows/release.yml` publishes the file under exactly this name.
+const repo = 'https://github.com/Meeks233/Orca';
+const assetUrl = `${repo}/releases/latest/download/orca.user.js`;
+
 const banner = `// ==UserScript==
 // @name         Orca Downloader
 // @name:zh-CN   Orca 下载器
-// @namespace    https://orca.app/
+// @namespace    ${repo}
 // @version      ${pkg.version}
-// @description  Submit videos to your self-hosted Orca over its E2EE channel and download them straight from any video page. Headless twin of the Orca extension.
+// @description  Submit videos to your self-hosted Orca over its E2EE channel and download them straight from any video page.
 // @description:zh-CN 在视频页注入下载/状态按钮；X/Twitter 帖子详情页会识别同作者讨论串并按顺序保存其中的图片和视频。自动从 Orca 网页端读取并反向注入 token，通过 E2EE 通道提交到自建 Orca。
-// @author       Orca
+// @author       Meeks233 and Orca contributors
+// @license      GPL-3.0-or-later
+// @homepageURL  ${repo}
+// @supportURL   ${repo}/issues
+// @downloadURL  ${assetUrl}
+// @updateURL    ${assetUrl}
 // @icon         ${iconDataUri}
 // @icon64       ${iconDataUri}
 // @match        *://*/*

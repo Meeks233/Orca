@@ -46,8 +46,23 @@ The checked-in Compose file binds `127.0.0.1:8080` by default. Open
 change the port binding explicitly. For internet access, keep Orca on loopback
 and put an HTTPS reverse proxy in front of it.
 
-The image defaults to `ghcr.io/meeks233/orca:latest`. Set `ORCA_IMAGE` to a
-version or immutable `sha-<full-commit>` tag for controlled deployments.
+The image defaults to `ghcr.io/meeks233/orca:latest`, which tracks `main`. Set
+`ORCA_IMAGE` to a released version (`ghcr.io/meeks233/orca:0.1.0`) or an
+immutable `sha-<full-commit>` tag for controlled deployments.
+
+## Clients
+
+The server ships its own web UI/PWA; these are the optional extras, all built
+from the same tag and published together on the
+[latest release](https://github.com/Meeks233/Orca/releases/latest).
+
+- **Android** — install `orca-<version>.apk` from the release, or build from
+  source with the [F-Droid recipe](packaging/fdroid/com.meeks233.orca.yml).
+  Verify downloads against the release's `SHA256SUMS`.
+- **Userscript** — open
+  [orca.user.js](https://github.com/Meeks233/Orca/releases/latest/download/orca.user.js)
+  with Tampermonkey or Violentmonkey to get download buttons on video pages; it
+  auto-updates from that URL. See [extension/README.md](extension/README.md).
 
 ## Security Model
 
@@ -84,11 +99,15 @@ with `ORCA_DNS_MODE`.
 - [Database](docs/DATABASE.md)
 - [Download pipeline](docs/DOWNLOAD_PIPELINE.md)
 - [Android app](docs/ANDROID.md)
+- [Userscript](extension/README.md)
 - [Seal import](docs/SEAL_IMPORT.md)
 - [Development and release](docs/DEVELOPMENT.md)
 - [Android store release](docs/RELEASING_ANDROID.md)
+- [Security design](docs/SECURITY.md) and
+  [reporting a vulnerability](SECURITY.md)
 - [Privacy policy](docs/PRIVACY.md)
 - [Attribution](docs/ATTRIBUTION.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

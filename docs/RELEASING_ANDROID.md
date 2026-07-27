@@ -13,16 +13,24 @@ Play release. Confirm ownership of this ID before creating the Play listing.
 
 ## Version and source release
 
-1. Update `version` in `app/src-tauri/tauri.conf.json` and
-   `app/src-tauri/Cargo.toml`.
-2. Ensure Android `versionCode` increases. Tauri currently maps `0.1.0` to
-   `1000`; verify `app/src-tauri/gen/android/app/tauri.properties` after build.
-3. Update Fastlane changelogs and `packaging/fdroid/com.meeks233.orca.yml`.
-4. Run the full CI suite, tag the exact commit as `vX.Y.Z`, and push the tag.
+Releases are cut with `orl` / `scripts/release.zsh`; see
+[DEVELOPMENT.md](DEVELOPMENT.md#release-process) for the full flow. The
+Android-specific parts of it:
 
-The tag starts `.github/workflows/android-release.yml`, which builds arm64-v8a
-and armeabi-v7a APK/AAB artifacts, signs them with the protected upload key,
-publishes checksums, and creates a GitHub Release.
+- `versionCode` is `major*1000000 + minor*1000 + patch` of
+  `app/src-tauri/tauri.conf.json`'s version — `0.1.0` maps to `1000`. That is
+  tauri-cli's own mapping, so it always increases with the version; verify
+  `app/src-tauri/gen/android/app/tauri.properties` after a build if in doubt.
+- The store changelog `fastlane/metadata/android/<locale>/changelogs/<versionCode>.txt`
+  must be written by hand before tagging. The release script refuses to proceed
+  without it.
+- `packaging/fdroid/com.meeks233.orca.yml` gains a Builds entry for the new
+  version automatically; review it in the bump commit.
+
+The tag starts `.github/workflows/release.yml`, whose `android` job builds
+arm64-v8a and armeabi-v7a APK/AAB artifacts and signs them with the protected
+upload key. The `publish` job then checksums them alongside the userscript and
+creates a single GitHub Release.
 
 ## Signing
 
@@ -113,12 +121,18 @@ Official references:
 
 ## F-Droid
 
-F-Droid builds and signs its own APK from a public, tagged source revision. Make
-the GitHub repository public, publish `vX.Y.Z`, test
-`app/scripts/build-fdroid.sh` in a clean environment, then submit a merge request
-to `fdroid/fdroiddata` using `packaging/fdroid/com.meeks233.orca.yml` as the starting
-metadata. Replace its tag reference with the exact release commit if requested
-by review.
+F-Droid builds and signs its own APK from a public, tagged source revision — it
+never accepts our binaries. Make the GitHub repository public, publish `vX.Y.Z`,
+then submit a merge request to `fdroid/fdroiddata` using
+`packaging/fdroid/com.meeks233.orca.yml` as the starting metadata. Replace its tag
+reference with the exact release commit if requested by review.
+
+The `fdroid` job in `.github/workflows/release.yml` rehearses that build on every
+tag: it deletes `web/` the way the recipe's `scandelete` does, runs
+`app/scripts/build-fdroid.sh`, and fails if the recipe's declared `output` path
+is not produced. Check that job before opening the merge request. It is
+deliberately not a dependency of `publish`, so a recipe problem is a packaging
+follow-up rather than a withheld release.
 
 The app contains no proprietary SDK, analytics, advertising, or Google Play
 Services dependency. Its required server is also GPL source and is

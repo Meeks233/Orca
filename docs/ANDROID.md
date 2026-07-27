@@ -34,7 +34,7 @@ cargo tauri android build --debug --apk --target aarch64 armv7
 The debug APK is for development and CI artifacts only. It is debug-signed and is
 never attached to a GitHub Release. Signed local builds use
 `app/scripts/release-android.sh`; tagged CI releases use the protected keystore
-configuration in `.github/workflows/android-release.yml`. F-Droid builds run
+configuration in `.github/workflows/release.yml`. F-Droid builds run
 unsigned from source through `app/scripts/build-fdroid.sh`.
 
 See [Android Store Release](RELEASING_ANDROID.md) for signing secrets, Play and

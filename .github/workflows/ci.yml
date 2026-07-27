@@ -14,6 +14,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Orca's version is declared in nine manifests and derived into the Android
+  # versionCode and the fastlane changelog filename. Check they agree on every
+  # push — on a tag, also that they agree with the tag being released. Cheap,
+  # and it turns a confusing late failure in release.yml into an early explicit
+  # one.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # RELEASE_TAG goes through env, never inline ${{ }}: a branch name is
+      # attacker-controlled text and would otherwise be pasted into the shell.
+      - name: Check version consistency
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: scripts/check-versions.sh ${RELEASE_TAG:+"$RELEASE_TAG"}
+
   # Rust: format, lint (warnings are errors), build, test.
   rust:
     runs-on: ubuntu-latest
@@ -115,10 +132,51 @@ jobs:
             exit 1
           fi
 
+  # The userscript is a shipped client (published as a release asset), so it is
+  # gated exactly like the web UI. Its bundle is NOT committed — extension/
+  # .gitignore excludes dist-userscript — so there is no staleness check here;
+  # the release workflow builds the artifact it publishes from these sources.
+  userscript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit, strict)
+        run: npm run typecheck
+
+      - name: Build userscript
+        run: npm run build
+
+      # The banner is what Tampermonkey reads. If it stops parsing, the script
+      # installs as an inert plain .js file and nobody notices until users do.
+      - name: Verify userscript metadata block
+        run: |
+          head -n1 dist-userscript/orca.user.js | grep -qx '// ==UserScript==' \
+            || { echo "::error::orca.user.js does not start with a userscript metadata block"; exit 1; }
+          grep -q "^// @version      $(node -p "require('./package.json').version")\$" dist-userscript/orca.user.js \
+            || { echo "::error::@version in the banner does not match extension/package.json"; exit 1; }
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
   image:
     name: Publish verified image
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: [rust, cargo-audit, web]
+    needs: [versions, rust, cargo-audit, web, userscript]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -138,7 +196,9 @@ jobs:
             tags+=$'\n'"$image:latest"
           else
             version="${GITHUB_REF#refs/tags/}"
-            tags+=$'\n'"$image:$version"
+            # Both spellings: `v0.1.0` matches the git tag, `0.1.0` matches what
+            # people actually type after the colon. Same digest either way.
+            tags+=$'\n'"$image:$version"$'\n'"$image:${version#v}"
           fi
           {
             echo "tags<<EOF"
