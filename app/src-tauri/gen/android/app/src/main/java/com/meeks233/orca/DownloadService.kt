@@ -122,7 +122,6 @@ class DownloadService : Service() {
         Log.w(TAG, "no creds — stopping")
         break
       }
-      val credential = OrcaApi.credential(creds.token)
       for (slug in tracked.keys.toList()) {
         val n = (tries[slug] ?: 0) + 1
         tries[slug] = n
@@ -131,7 +130,7 @@ class DownloadService : Service() {
           untrack(slug)
           continue
         }
-        pollOnce(creds.base, credential, slug)
+        pollOnce(creds, slug)
       }
       updateSummary()
       try {
@@ -144,9 +143,9 @@ class DownloadService : Service() {
   }
 
   /** One status read for `slug`; posts/updates its notification accordingly. */
-  private fun pollOnce(base: String, credential: OrcaApi.Credential, slug: String) {
+  private fun pollOnce(creds: OrcaApi.Creds, slug: String) {
     val (code, body) = try {
-      OrcaApi.get(base, credential, "/api/items/$slug")
+      OrcaApi.get(creds, "/api/items/$slug")
     } catch (e: Exception) {
       return // transient network hiccup — retry on the next tick
     }
@@ -228,13 +227,12 @@ class DownloadService : Service() {
   private fun submitAndTrack(url: String) {
     try {
       val creds = OrcaApi.readCreds(applicationContext) ?: return
-      val credential = OrcaApi.credential(creds.token)
       var slug = ""
       var ok = false
       var duplicate = false
       val body = try {
         val payload = JSONObject().put("url", url).put("options", JSONObject()).toString()
-        val (code, respText) = OrcaApi.post(creds.base, credential, "/api/items", payload)
+        val (code, respText) = OrcaApi.post(creds, "/api/items", payload)
         Log.i(TAG, "POST /api/items code=$code body=${respText.take(300)}")
         val resp = try { JSONObject(respText) } catch (e: Exception) { JSONObject() }
         when {
