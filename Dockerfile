@@ -4,7 +4,7 @@
 #  `# syntax=docker/dockerfile:1` as line 1 when network is available.)
 # ---- builder ----
 # Pinned by digest for reproducible builds (rust:1.97-bookworm as of 2026-07).
-FROM rust:1.97-bookworm@sha256:a49aec4d4647c73d66a9684df1bd8a73a1eb4c0734b32b94df3f86361dd54ce7 AS builder
+FROM rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
