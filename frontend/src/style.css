@@ -284,6 +284,12 @@ body {
 /* Blur lifted is a deliberate, temporary state — colour it so it can't be left
    on unnoticed. */
 #blur-toggle.unblurred { color: var(--accent); }
+/* Optical sizing, not geometric: an eye is a wide, flat glyph whose ink fills
+   only ~20×14 of lucide's 24 box, where the compass and gear beside it fill a
+   full 20×20 circle — so at an identical size the eye read a size smaller than
+   its neighbours. Two extra pixels equalise the perceived mass; the negative
+   margin keeps the button's own box (and the topbar's height) unchanged. */
+#blur-toggle svg { width: 24px; height: 24px; margin: -1px; }
 
 /* ---- Topbar popover menu (language picker) ----
    A small dropdown anchored under its trigger, the standard header-menu pattern:
@@ -761,7 +767,12 @@ html.app-native .permission-item[data-permission="autoplay"] { display: none; }
 .permission-prompt-card { max-width: 430px; }
 .permission-prompt-actions { margin-top: 14px; }
 
-.topbar-actions { display: flex; gap: 2px; }
+/* Tighter than a generic .icon-btn: these three sit above the storage readout in
+   a bar that is mostly information, so they're sized to be reachable without
+   claiming the corner. Glyph a step down from 24, padding trimmed with it. */
+.topbar-actions { display: flex; gap: 0; }
+.topbar-actions .icon-btn { padding: 4px 6px; }
+.topbar-actions .icon-btn svg { width: 22px; height: 22px; }
 /* The last action's own right padding insets its glyph from the bar edge, so the
    settings gear sat a step left of the Download button below it. Drop that trailing
    pad so the icon group's right edge lines up with the Download button. */
@@ -1435,15 +1446,6 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   -webkit-box-orient: vertical;
   cursor: pointer;
 }
-/* The title links back to the original post. It stays visually a title — no
-   underline, no link colour — because every card would otherwise read as a wall
-   of blue; the whole row is already interactive. `min-width: 0` lets the clamped
-   span shrink inside the flex title row instead of pushing the logo out. */
-a.title-link {
-  min-width: 0;
-  color: inherit;
-  text-decoration: none;
-}
 /* Tapped open: show the whole title. Only this row grows, and only on demand. */
 .item.title-open .title span {
   -webkit-line-clamp: unset;
@@ -1457,7 +1459,11 @@ a.title-link {
    as the site's mark.
    Bare only works because each icon is classified by its own colour at build
    time (see siteIconTones() in build.ts) and the few marks that would disappear
-   are handled below — nothing here is a per-brand hand-tuning. */
+   are handled below — nothing here is a per-brand hand-tuning.
+
+   Every mark fills the same share of this box because its viewBox was windowed
+   around its own ink (scripts/normalize-site-icons.py); nothing here scales a
+   brand, so a plate can't shrink one either. */
 .src-logo {
   flex: 0 0 auto;
   width: 20px;
@@ -1481,31 +1487,48 @@ a.title-link {
    the hue away, so those — and only those — keep a plate. */
 .src-logo[data-tone='mono'] { filter: invert(1); }
 .src-logo[data-tone='deep'] {
-  padding: 2px;
   border-radius: var(--r-xs);
   background: #fff;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) .src-logo[data-tone='mono'] { filter: none; }
-  :root:not([data-theme='dark']) .src-logo[data-tone='deep'] { padding: 0; background: none; }
+  :root:not([data-theme='dark']) .src-logo[data-tone='deep'] { background: none; }
   :root:not([data-theme='dark']) .src-logo[data-tone='neon'] {
-    padding: 2px;
     border-radius: var(--r-xs);
     background: #16161a;
   }
 }
 :root[data-theme='light'] .src-logo[data-tone='mono'] { filter: none; }
-:root[data-theme='light'] .src-logo[data-tone='deep'] { padding: 0; background: none; }
+:root[data-theme='light'] .src-logo[data-tone='deep'] { background: none; }
 :root[data-theme='light'] .src-logo[data-tone='neon'] {
-  padding: 2px;
   border-radius: var(--r-xs);
   background: #16161a;
 }
-.uploader { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+/* A harvested favicon is a full-bleed raster, so at the same box it would out-
+   measure every bundled mark. Inset it to the size a square bundled mark lands
+   at once normalized (~14px of the 20px box) so a scraped site sits at brand
+   size rather than a size of its own. */
+.src-logo.src-logo-harvested { padding: 3px; }
+/* Indented to clear the source logo the title line carries, so the creator's name
+   starts on the same left edge as the title's first line instead of a step left
+   of it. A MARGIN, not padding: when the name is a link, padding would enlarge its
+   hit target by the inset. The offset is the logo's own box plus .title's gap —
+   change one and the other has to follow.
+   `align-self` matters for the same reason: .body is a flex column, so a stretched
+   uploader link would be a click target the full width of the card. Shrink it to
+   the name itself. */
+.uploader {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 2px;
+  margin-left: 26px;
+  align-self: flex-start;
+  max-width: calc(100% - 26px); /* the inset is outside the box, so 100% would overhang */
+}
 /* When the uploader name is a link to their page, it stays as quiet as the plain
-   text until hovered — a jump-off point, not a call to action. inline-block so it
-   only spans the name (the whole row isn't a click target) and keeps the nudge. */
-a.uploader-link { display: inline-block; text-decoration: none; cursor: pointer; }
+   text until hovered — a jump-off point, not a call to action. */
+a.uploader-link { text-decoration: none; cursor: pointer; }
 a.uploader-link:hover { color: var(--text); text-decoration: underline; }
 
 .statusline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); }
@@ -1601,6 +1624,23 @@ a.uploader-link:hover { color: var(--text); text-decoration: underline; }
    Wins over .act-local (both can apply) because a tap here re-saves the taller
    copy rather than reporting "already have it". */
 .act-save.act-upgrade { color: var(--accent); }
+
+/* ---- Card overflow menu ----
+   The website card's kebab popover (.site-menu-pop / .site-menu-item), re-used
+   verbatim and only re-anchored: the action row sits at the BOTTOM of a card, so
+   its menu opens upward — dropped downward it would spill over the next card. */
+.act-menu-wrap { position: relative; display: inline-flex; }
+.act-menu.site-menu-pop {
+  top: auto;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  min-width: 150px;
+}
+/* The site menu scopes its icon+label row layout to its own wrapper, so the same
+   layout is claimed here — at the action row's smaller glyph size, since these
+   rows reuse the 18px .act icons rather than a second set drawn at menu size. */
+.act-menu .site-menu-item { display: flex; align-items: center; gap: 9px; }
+.act-menu .site-menu-item svg { flex-shrink: 0; opacity: .85; width: 15px; height: 15px; }
 
 /* ---- Chips: one capsule for every fact and choice on a card ----------------
    The size readout, the external-access counter and the resolution picker are

@@ -443,6 +443,29 @@
         </div>
       </section>
 
+      <!-- Privacy. How long a lifted blur (the topbar's eye) survives once the app
+           is in the background. Client-side, applied on the spot like the two
+           above. Default 30s: a trip out to the source page and back keeps the
+           reveal; walking away puts it back. -->
+      <section class="set-group">
+        <label data-i18n="settings.privacy">Privacy</label>
+        <div class="form-box">
+          <div class="form-row">
+            <label class="form-row-label" for="reblur-select" data-i18n="settings.reblur">Re-blur after</label>
+            <div class="form-row-ctl">
+              <select id="reblur-select" class="select">
+                <option value="0" data-i18n="reblur.immediately">Immediately</option>
+                <option value="30" data-i18n="reblur.s30">30 seconds</option>
+                <option value="120" data-i18n="reblur.m2">2 minutes</option>
+                <option value="300" data-i18n="reblur.m5">5 minutes</option>
+                <option value="never" data-i18n="reblur.never">Never</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <p class="hint-muted" data-i18n="settings.reblurHint">Lifting the blur is temporary: it switches itself back on once the app has been in the background this long.</p>
+      </section>
+
       <!-- Sharing behaviour. A client-side preference (like Theme / Language
            above), applied on the spot with no Save: when you tap Share, do you
            want the ORIGINAL de-tracked source link, this downloader's own link, or

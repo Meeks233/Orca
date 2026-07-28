@@ -170,11 +170,20 @@ document.addEventListener('click', (e) => {
 const BASE_KEY = 'orca_api_base';
 migrateLegacyStorage(BASE_KEY, 'api_base');
 function apiBase(): string { return (localStorage.getItem(BASE_KEY) || '').replace(/\/+$/, ''); }
-function setApiBase(b: string): void {
+// Bumped every time the configured server actually changes. Requests already in
+// flight against the old server carry the generation they started under, so they
+// can drop their answer instead of painting another server's rows into the list.
+let baseGeneration = 0;
+// Returns whether the base actually changed, so the caller can skip re-requesting
+// everything when the same URL was re-saved.
+function setApiBase(b: string): boolean {
   b = (b || '').trim().replace(/\/+$/, '');
+  const changed = b !== apiBase();
   if (b) localStorage.setItem(BASE_KEY, b);
   else localStorage.removeItem(BASE_KEY);
+  if (changed) baseGeneration++;
   mirrorShareCreds();
+  return changed;
 }
 // Prefix an app-relative path (starting with `/`) with the configured base.
 function apiUrl(path: string): string { return apiBase() + path; }
@@ -424,6 +433,7 @@ const els = {
   shareChoiceUpstream: byId<HTMLButtonElement>('share-choice-upstream'),
   shareChoiceLocal: byId<HTMLButtonElement>('share-choice-local'),
   langSelect: byId<HTMLSelectElement>('lang-select'),
+  reblurSelect: byId<HTMLSelectElement>('reblur-select'),
   subLang: byId<HTMLSelectElement>('sub-lang'),
   streamMaxRes: byId<HTMLSelectElement>('stream-max-res'),
   themeColorMeta: byId<HTMLMetaElement>('theme-color-meta'),
@@ -629,6 +639,10 @@ const RETRY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18
 // NOT a second pause-like glyph; an X is what every browser's download shelf uses
 // for the irreversible half of the stop pair.
 const CANCEL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
+// Vertical ellipsis (⋮) for the card action row's overflow menu — lucide's
+// stroked variant, so it sits at the same weight as the other glyphs in the row
+// (the site card's MORE_SVG below is the older filled one).
+const ELLIPSIS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>`;
 // Vertical kebab (⋮) for the website-card overflow menu.
 const MORE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`;
 // Leading glyphs (lucide, 15px) for the per-site overflow menu. An icon per row
@@ -1025,9 +1039,14 @@ const DOWNLOAD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height=
 // the high-res one (see the save-click intercept and localUpgradeAvailable).
 const UPGRADE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a10 10 0 0 1 7.38 16.75"/><path d="m16 12-4-4-4 4"/><path d="M12 16V8"/><path d="M2.5 8.875a10 10 0 0 0-.5 3"/><path d="M2.83 16a10 10 0 0 0 2.43 3.4"/><path d="M4.636 5.235a10 10 0 0 1 .891-.857"/><path d="M8.644 21.42a10 10 0 0 0 7.631-.38"/></svg>`;
 
-// Share glyph (Lucide "link"). A live public link turns it green so its state
-// remains visible at a glance.
-const SHARE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-link-icon lucide-link"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+// Source-page glyph (Lucide "link"): the way back to the original post. The title
+// used to carry that jump; it now lives in this one deliberate control instead, so
+// reading a card (tapping the title to unclamp it) never navigates away.
+const LINK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-link-icon lucide-link"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
+// Share glyph (Lucide "share-2"), immediately right of the link icon. A live
+// public link turns it green so its state remains visible at a glance.
+const SHARE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-share2-icon lucide-share-2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>`;
 
 // Trash glyph (Lucide "trash-2"): borderless inline icon matching Save/Share,
 // tinted red on hover. Every card carries one (leftmost action) so any item can
@@ -1165,65 +1184,124 @@ function resJobLive(item: Item): boolean {
   return !!p && (p.status === 'running' || p.status === 'queued');
 }
 
+// ---- Card overflow menu ---------------------------------------------------
+// The action row used to lay every verb out as a bare glyph — four of them on a
+// finished card (delete / save / source / share) — which made the busiest corner
+// of the UI a row of unlabelled icons with no hierarchy. It now follows the
+// overflow pattern every media app converged on (YouTube, Drive, Photos): ONE
+// primary action stays on the card — the single thing that state is asking for —
+// and the rest collapse behind a horizontal ellipsis into a menu whose rows are
+// icon + NAME, so an action is read rather than guessed.
+//
+// The menu itself is the website card's kebab menu, reused wholesale (same
+// `.site-menu-item` rows, same popover shell, same divider-less two-group order:
+// safe actions first, destructive last and red) rather than a second menu
+// primitive that would drift from it.
+interface ActMenuRow {
+  icon: string;
+  label: string;
+  /// Button rows carry an action name; a row that is really a link carries `href`
+  /// instead (the source page opens in a new tab / the system browser).
+  act?: string;
+  href?: string;
+  danger?: boolean;
+  /// Extra classes for a row that also reports a state (a live share is green,
+  /// via the same `.act-share.act-on` rule the old tinted glyph used).
+  cls?: string;
+}
+
+function actMenuRowHtml(r: ActMenuRow, id: number | null): string {
+  const cls = `site-menu-item${r.danger ? ' danger' : ''}${r.cls ? ' ' + r.cls : ''}`;
+  const label = esc(r.label);
+  // Keeps the `act-link` class the click handler uses to hand a tap straight to
+  // the browser (see the outbound-link handler) instead of the card's own logic.
+  if (r.href)
+    return `<a class="${cls} act-link" role="menuitem" href="${esc(r.href)}" target="_blank" rel="noopener">${r.icon}<span>${label}</span></a>`;
+  return `<button class="${cls}" role="menuitem" data-act="${r.act}"${id === null ? '' : ` data-id="${id}"`}>${r.icon}<span>${label}</span></button>`;
+}
+
+function actMenuHtml(rows: ActMenuRow[], id: number | null): string {
+  if (!rows.length) return '';
+  const label = esc(t('aria.more'));
+  return `<div class="act-menu-wrap">
+      <button class="act act-more" data-act="more" aria-haspopup="menu" aria-expanded="false" aria-label="${label}" title="${label}">${ELLIPSIS_SVG}</button>
+      <div class="act-menu site-menu-pop hidden" role="menu">${rows.map((r) => actMenuRowHtml(r, id)).join('')}</div>
+    </div>`;
+}
+
+// The jump back to the source post. Every state offers it — a failed or queued
+// card is exactly when you want to go look at the original — and it is absent
+// when the item has no http(s) source page, so the menu never lists a dead row.
+function sourceMenuRow(item: Item): ActMenuRow | null {
+  const href = httpHref(item.webpage_url);
+  return href ? { icon: LINK_SVG, label: t('aria.openSource'), href } : null;
+}
+
+// Delete is global: every card can be removed whatever its state, so this row is
+// last in every menu — destructive, red, and always behind the confirm dialog.
+function deleteMenuRow(): ActMenuRow {
+  return { icon: TRASH_SVG, label: t('aria.delete'), act: 'delete', danger: true };
+}
+
 function actionsHtml(item: Item): string {
-  // Delete is global: every card gets a trash icon (leftmost button, i.e. left
-  // of the Save button — but right of the size chip + resolution button) so any
-  // item — queued, running, failed or completed — can be removed. It always
-  // routes through the confirm dialog (openDeleteConfirm).
-  const del = `<button class="act act-del" data-act="delete" data-id="${item.id}" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>`;
-  // A download in flight gets the whole row to itself: the live chip, then the
-  // three ways to stop it, in escalating order of how much they throw away —
-  // delete (record and all), cancel (the transfer and its partial), pause (only
-  // the waiting). They occupy the same three slots a finished card gives to
-  // delete / save / share, so the button under your thumb doesn't move as an item
-  // completes. Save and share are absent for the reason they'd be useless: there
-  // is no file to hand over yet.
+  const source = sourceMenuRow(item);
+  const rest = (...rows: (ActMenuRow | null)[]): ActMenuRow[] =>
+    rows.filter((r): r is ActMenuRow => !!r);
+  // A download in flight: pause is the primary — the one reversible answer to
+  // "this is running" — and the two ways of throwing work away (cancel, delete)
+  // move into the menu, where they are named rather than guessed at.
   // A resolution-upgrade job against an already-completed item never flips the
   // stored status to running, so its live signal is resJobLive (the SSE tick),
   // not `status`. Treat it exactly like a first-time download: the whole row
-  // converts to download mode — animated chip plus the three stop buttons — so
-  // the capsule AND the right-side buttons switch together, not just the capsule.
+  // converts to download mode — animated chip plus the stop actions — so the
+  // capsule AND the right-side controls switch together, not just the capsule.
   const upgrade = resJobLive(item);
   if (item.status === 'queued' || item.status === 'running' || upgrade) {
-    const cancel = `<button class="act act-cancel" data-act="cancel" data-id="${item.id}" aria-label="${esc(t('item.cancel'))}" title="${esc(t('item.cancel'))}">${CANCEL_SVG}</button>`;
     const pause = `<button class="act" data-act="pause" data-id="${item.id}" aria-label="${esc(t('item.pause'))}" title="${esc(t('item.pause'))}">${PAUSE_SVG}</button>`;
+    const menu = actMenuHtml(rest(
+      { icon: CANCEL_SVG, label: t('item.cancel'), act: 'cancel', danger: true },
+      source,
+      deleteMenuRow(),
+    ), item.id);
     // An upgrade keeps the completed item's existing file on disk, so its size
     // chip stays beside the live chip; a first download has no file yet.
     const size = upgrade ? metaChipsHtml(item) : '';
-    return `<div class="actions">${size}${dlChipHtml(item)}${del}${cancel}${pause}</div>`;
+    return `<div class="actions">${size}${dlChipHtml(item)}${pause}${menu}</div>`;
   }
-  // Pause / resume, only while there's a transfer to hold or release. A paused
-  // item keeps its partial file, so resuming continues rather than restarts.
-  let hold = '';
+  // At rest, the primary is whatever answers the state the badge is reporting:
+  // resume a held transfer, retry a failed or canceled one, save a finished file.
+  // A completed item whose local file is gone (backed away or never fetched) has
+  // nothing to hand over, so its primary is the way back to a download instead —
+  // the same retry a canceled item gets, for the same reason (no partial to
+  // resume, no file to keep).
+  let primary = '';
+  const extra: (ActMenuRow | null)[] = [];
   if (item.status === 'paused') {
-    hold = `<button class="act act-resume" data-act="resume" data-id="${item.id}" aria-label="${esc(t('item.resume'))}" title="${esc(t('item.resume'))}">${RESUME_SVG}</button>`;
+    primary = `<button class="act act-resume" data-act="resume" data-id="${item.id}" aria-label="${esc(t('item.resume'))}" title="${esc(t('item.resume'))}">${RESUME_SVG}</button>`;
   } else if (item.status === 'failed' || item.status === 'canceled') {
-    // A failure is usually transient (a dropped connection, a site hiccup) or has
-    // just been fixed by the user (cookies added), so the fix is one tap from the
-    // card that reported it rather than a re-paste of the URL. A canceled item
-    // offers the same button for a different reason: cancelling threw the partial
-    // away, so starting over is the only route back — there is nothing to resume.
-    hold = `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.retry'))}" title="${esc(t('item.retry'))}">${RETRY_SVG}</button>`;
-  }
-  // Save / share only make sense for a completed item with a file. Local file
-  // present: Save (download icon) + Share icon. Local file gone (backed away or
-  // never fetched): there is nothing to hand over, so the slot offers the way
-  // back to a download instead — the same retry a canceled item gets, for the
-  // same reason (no partial to resume, no file to keep). It replaces the old
-  // "Cloud only" pill, which stated the situation but gave no way out of it.
-  let mediaActions = '';
-  if (item.status === 'completed') {
+    primary = `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.retry'))}" title="${esc(t('item.retry'))}">${RETRY_SVG}</button>`;
+  } else if (item.status === 'completed') {
     const local = !!item.local_available;
     const pub = !!item.public;
-    mediaActions = local
-      ? `<a class="act act-save" href="${fileUrl(item, true)}" data-id="${item.id}" aria-label="${esc(saveActionLabel(item))}" title="${esc(saveActionLabel(item))}">${DOWNLOAD_SVG}</a>
-      <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
+    primary = local
+      ? `<a class="act act-save" href="${fileUrl(item, true)}" data-id="${item.id}" aria-label="${esc(saveActionLabel(item))}" title="${esc(saveActionLabel(item))}">${DOWNLOAD_SVG}</a>`
       : `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.download'))}" title="${esc(t('item.download'))}">${RETRY_SVG}</button>`;
+    // Sharing needs a file to hand over, so it is offered only alongside Save —
+    // and it reports state as well as acting (a live share reads "Shared"), which
+    // is exactly the kind of thing a named row says better than a tinted glyph.
+    if (local)
+      extra.push({
+        icon: SHARE_SVG,
+        label: t(pub ? 'aria.shareOn' : 'aria.share'),
+        act: 'share',
+        cls: pub ? 'act-share act-on' : '',
+      });
   }
-  // Order: size+resolution capsule · pause/resume · delete · save/share. A live
-  // resolution-upgrade job is handled above (the whole row converts to download
-  // mode), so by here the item is genuinely at rest and shows the merged capsule.
-  return `<div class="actions">${sizeResHtml(item)}${hold}${del}${mediaActions}</div>`;
+  // Order: size+resolution capsule · primary · ellipsis. A live resolution-upgrade
+  // job is handled above (the whole row converts to download mode), so by here the
+  // item is genuinely at rest and shows the merged capsule.
+  const menu = actMenuHtml(rest(...extra, source, deleteMenuRow()), item.id);
+  return `<div class="actions">${sizeResHtml(item)}${primary}${menu}</div>`;
 }
 
 // Play affordance shown on a finished thumbnail (bottom-right). Tapping the
@@ -1439,7 +1517,10 @@ async function loadSiteIcons(): Promise<void> {
 function applySiteIconsToRows(): void {
   for (const img of Array.from(document.querySelectorAll<HTMLImageElement>('img.src-logo[data-host]'))) {
     const icon = harvestedIcon(img.dataset.host || '');
-    if (icon) img.src = icon;
+    if (icon) {
+      img.src = icon;
+      img.classList.add('src-logo-harvested');
+    }
   }
 }
 
@@ -1456,21 +1537,18 @@ function siteLogoImg(slug: string, name: string, extra = '', host = ''): string 
   const fallback = slug === 'generic' && host ? harvestedIcon(host) : '';
   const src = fallback || `/icons/sites/${slug}.svg`;
   const marker = slug === 'generic' && host ? ` data-host="${esc(host)}"` : '';
-  return `<img class="src-logo${extra}" src="${esc(src)}"${toned}${marker} alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
+  // A raster favicon is full-bleed where a bundled mark carries its own margin,
+  // so it needs the inset to measure the same (see .src-logo-harvested).
+  const harvested = fallback ? ' src-logo-harvested' : '';
+  return `<img class="src-logo${extra}${harvested}" src="${esc(src)}"${toned}${marker} alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
 }
 
-// The title is the way back to where the media came from: tapping it opens the
-// original post (new tab in the browser, system browser in the app — see the
-// outbound-link handler). It keeps the plain `<span>` inside the anchor so the
-// two-line clamp and the privacy blur, which both key off `.title span`, are
-// untouched; and it stays a bare span when the source page isn't an http(s)
-// address, so nothing ever renders as a dead link.
-function titleLinkHtml(webpageUrl: unknown, title: unknown): string {
-  const href = httpHref(webpageUrl);
-  const text = `<span>${esc(title)}</span>`;
-  return href
-    ? `<a class="title-link" href="${esc(href)}" target="_blank" rel="noopener">${text}</a>`
-    : text;
+// The title is text, not a link: tapping it unclamps a title too long for its two
+// lines and nothing else. The jump back to the original post lives in the action
+// row's overflow menu (see sourceMenuRow), so reading a long title can't fling you
+// out to the source page by accident.
+function titleTextHtml(title: unknown): string {
+  return `<span>${esc(title)}</span>`;
 }
 
 function sourceLogoHtml(item: Item): string {
@@ -1542,7 +1620,7 @@ function rowHtml(item: Item): string {
   return `
     ${thumbHtml(item, thumb, dur)}
     <div class="body">
-      <div class="title">${logo}${titleLinkHtml(item.webpage_url, item.title)}</div>
+      <div class="title">${logo}${titleTextHtml(item.title)}</div>
       ${uploader}
       <div class="statusline">
         <span class="badge badge-${esc(item.status)}${badgeFlashClass(item.id, item.status)}">${esc(statusLabel(item.status))}</span>
@@ -1727,14 +1805,14 @@ function updateGroupHeader(gkey: string): void {
   const uploader = first.uploader ? first.uploader + ' · ' : '';
   // Sequential-play button appears once any child is playable; whole-list
   // download / share once any child still has a local file. Delete-all is always
-  // available (the leftmost list action), so the actions row is never empty.
+  // available (the last row of the overflow menu), so the menu is never empty.
   const play = items.some(isPlayable)
     ? `<button class="play-badge group-play" data-act="play-list" aria-label="${esc(t('group.playAll'))}" title="${esc(t('group.playAll'))}">${PLAY_ICON}</button>`
     : '';
-  const dlShare = items.some((it) => it.status === 'completed' && it.local_available)
-    ? `<button class="act" data-act="dl-list" aria-label="${esc(t('group.downloadAll'))}" title="${esc(t('group.downloadAll'))}">${DOWNLOAD_SVG}</button>
-        <button class="act" data-act="share-list" aria-label="${esc(t('group.shareAll'))}" title="${esc(t('group.shareAll'))}">${SHARE_SVG}</button>`
-    : '';
+  const anyLocal = items.some((it) => it.status === 'completed' && it.local_available);
+  // The fold's title used to link to the post the clips came from; that jump now
+  // lives in the same overflow menu the individual cards carry it in.
+  const source = sourceMenuRow(first);
   // Aggregate size of the whole post, shown left of the list actions (mirrors
   // the per-video size chip). Dropped when no child has a known size yet.
   const totalBytes = items.reduce((sum, it) => sum + (it.total_filesize || it.filesize || 0), 0);
@@ -1744,15 +1822,29 @@ function updateGroupHeader(gkey: string): void {
   // hand (or delete the records outright, which throws away what already
   // finished). Offered whenever anything in the fold is still queued or running,
   // and it only touches those — completed children are left alone.
-  const liveIds = items.filter(isCancelable).map((it) => it.id);
-  const cancelAll = liveIds.length
-    ? `<button class="act act-cancel" data-act="cancel-list" aria-label="${esc(t('group.cancelAll'))}" title="${esc(t('group.cancelAll'))}">${CANCEL_SVG}</button>`
-    : '';
+  const live = items.some(isCancelable);
+  // The fold gets the same treatment as a card (see actionsHtml): one primary
+  // action on the header — download the whole post if there is anything to save,
+  // otherwise stop it if it is still running — and the rest named in the menu.
+  const primary = anyLocal
+    ? `<button class="act" data-act="dl-list" aria-label="${esc(t('group.downloadAll'))}" title="${esc(t('group.downloadAll'))}">${DOWNLOAD_SVG}</button>`
+    : live
+      ? `<button class="act act-cancel" data-act="cancel-list" aria-label="${esc(t('group.cancelAll'))}" title="${esc(t('group.cancelAll'))}">${CANCEL_SVG}</button>`
+      : '';
+  const rows: (ActMenuRow | null)[] = [
+    anyLocal ? { icon: SHARE_SVG, label: t('group.shareAll'), act: 'share-list' } : null,
+    source,
+    // Only when it isn't already the primary — a fold can be half-finished and
+    // still running, and the same action must not appear twice.
+    live && anyLocal
+      ? { icon: CANCEL_SVG, label: t('group.cancelAll'), act: 'cancel-list', danger: true }
+      : null,
+    { icon: TRASH_SVG, label: t('aria.delete'), act: 'del-list', danger: true },
+  ];
   const listActions = `<div class="actions group-actions">
         ${sizeChip}
-        <button class="act act-del" data-act="del-list" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>
-        ${cancelAll}
-        ${dlShare}
+        ${primary}
+        ${actMenuHtml(rows.filter((r): r is ActMenuRow => !!r), null)}
       </div>`;
   // The stacked-card edge behind the cover thumbnail is the next two videos'
   // OWN thumbnails, not a pair of blank offset rectangles. Each is forced into
@@ -1775,7 +1867,7 @@ function updateGroupHeader(gkey: string): void {
       ${MEDIA_LOADER}
     </div>
     <div class="group-info">
-      <div class="title">${sourceLogoHtml(first)}${titleLinkHtml(first.webpage_url, base)}</div>
+      <div class="title">${sourceLogoHtml(first)}${titleTextHtml(base)}</div>
       <div class="group-sub"><span class="group-status"></span><span class="group-speed"></span></div>
       <div class="progress group-progress hidden"><div class="progress-fill" style="width:0%"></div></div>
       ${listActions}
@@ -2304,8 +2396,12 @@ async function loadItems(reset?: boolean): Promise<void> {
   applySortParams(params);
   params.set('limit', String(PAGE_SIZE));
   if (!reset && state.cursor != null) params.set('before_id', String(state.cursor));
+  const gen = baseGeneration;
   try {
     const res = await apiFetch('/api/items?' + params.toString());
+    // The server was re-pointed while this was in flight — this is the previous
+    // server's history, and the reload that superseded it is already running.
+    if (gen !== baseGeneration) return;
     if (!res.ok) { toast(t('toast.loadHistoryFail'), 'error'); return; }
     const data = await res.json();
     if (reset) {
@@ -2336,11 +2432,15 @@ async function loadItems(reset?: boolean): Promise<void> {
       pageRetryBlockedUntil = Date.now() + PAGE_RETRY_COOLDOWN_MS;
     }
   } finally {
-    state.loading = false;
-    // If the loader is still within reach (content shorter than the viewport,
-    // so no fresh intersection event will fire), keep filling until it scrolls
-    // off-screen or the pages run out.
-    requestAnimationFrame(topUpIfNeeded);
+    // A superseded load must not clear the flag out from under the reload that
+    // replaced it, nor ask it for another page.
+    if (gen === baseGeneration) {
+      state.loading = false;
+      // If the loader is still within reach (content shorter than the viewport,
+      // so no fresh intersection event will fire), keep filling until it scrolls
+      // off-screen or the pages run out.
+      requestAnimationFrame(topUpIfNeeded);
+    }
   }
 }
 
@@ -2719,14 +2819,32 @@ function hostOfUrl(url?: string | null): string {
   return s.startsWith('www.') ? s.slice(4) : s;
 }
 // Global override for the per-site privacy blur, driven by the topbar's eye
-// button. Blur on (the eye crossed out) is the default and what a fresh install
-// gets; lifting it reveals every row until it is switched back. Persisted so the
-// state the user left the app in is the one they come back to, and read
-// synchronously at module load for the same first-paint reason blurredHosts is.
-const UNBLUR_KEY = 'orca_unblur';
-let globalUnblur = (() => {
-  try { return localStorage.getItem(UNBLUR_KEY) === '1'; } catch (_) { return false; }
-})();
+// button. Blur on (the eye crossed out) is the default and what every launch
+// gets; lifting it reveals every row until it is switched back.
+//
+// Deliberately NOT persisted, and dropped again once the app has been away long
+// enough (see the visibilitychange handler under the toggle), so an unblur left
+// on by accident can't be what greets whoever picks the phone up next. Same
+// "the reveal is momentary" contract the per-card tap-to-peek gesture keeps, one
+// level up.
+let globalUnblur = false;
+
+// How long the app may be in the background before a lifted blur re-arms itself
+// (Settings ▸ Privacy). Seconds; 0 re-arms the moment you leave, `never` keeps
+// the reveal until it's switched back by hand. The default is 30s on purpose: a
+// trip out to the source page or the share sheet and straight back is part of
+// using the app and must not fight you, while walking away is not.
+const REBLUR_KEY = 'orca.reblurAfter';
+const REBLUR_DEFAULT = 30;
+function reblurAfter(): number {
+  const v = localStorage.getItem(REBLUR_KEY);
+  if (v === 'never') return Infinity;
+  const n = Number(v);
+  return v !== null && v !== '' && Number.isFinite(n) && n >= 0 ? n : REBLUR_DEFAULT;
+}
+function setReblurAfter(v: string): void {
+  try { localStorage.setItem(REBLUR_KEY, v); } catch (_) { /* quota */ }
+}
 
 // True when a URL's host belongs to a blur-on site, ignoring the global switch.
 // Only the switch itself and `urlIsBlurred` should need this.
@@ -2780,11 +2898,23 @@ function syncBlurToggle(): void {
 
 els.blurToggle.addEventListener('click', () => {
   globalUnblur = !globalUnblur;
-  try { localStorage.setItem(UNBLUR_KEY, globalUnblur ? '1' : '0'); } catch (_) { /* private mode */ }
   syncBlurToggle();
   applyBlurToRows();
 });
 syncBlurToggle();
+// Re-arm the blur on the way back in. Stamped on the way OUT and measured on
+// return rather than run off a timer, because a backgrounded WebView is frozen —
+// a timer set before leaving may not fire until long after you're back.
+let hiddenSince = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenSince = Date.now(); return; }
+  const away = hiddenSince ? (Date.now() - hiddenSince) / 1000 : 0;
+  hiddenSince = 0;
+  if (!globalUnblur || away < reblurAfter()) return;
+  globalUnblur = false;
+  syncBlurToggle();
+  applyBlurToRows();
+});
 // Client-side filter query (name / domains / key) and batch-select state, mirroring
 // the home list's search + multi-select so the two screens feel like one system.
 let siteQuery = '';
@@ -3903,6 +4033,7 @@ els.websiteList.addEventListener('multiselect-change', (e) => {
 // Click outside any open kebab menu closes it.
 document.addEventListener('click', (e) => {
   if (!(e.target as HTMLElement).closest('.site-menu-wrap')) closeSiteMenus();
+  if (!(e.target as HTMLElement).closest('.act-menu-wrap')) closeActMenus();
 });
 els.sitesAdd.addEventListener('click', () => openSiteEdit(null));
 els.siteSearch.addEventListener('input', debounce(() => { siteQuery = els.siteSearch.value; renderWebsites(); }, 150));
@@ -3944,22 +4075,17 @@ els.siteEditPrefs.addEventListener('click', (e) => {
   btn.setAttribute('aria-checked', String(siteEditDraft.blur));
 });
 
-// Commit the typed token, then re-pull everything that was gated behind it.
+// Commit the typed token. Re-pulling what was gated behind it is repointClient's
+// job, so a save that changes the server too reloads ONCE — against the new base
+// and the new token together, rather than once against each half.
 // Called by the sheet's one Save (see saveSettings).
 async function applyToken(): Promise<boolean> {
   setToken(els.token.value.trim());
   els.tokenHint.classList.add('hidden');
-  connectEvents();
-  loadItems(true);
-  loadStats();
-  if (getToken()) {
-    loadWebsites();
-    loadArchive();
-  }
   return true;
 }
 
-// Server URL (app only): persist, then reconnect the SSE + reload against it.
+// Server URL (app only): validate and persist. The reload is repointClient's.
 async function applyServerUrl(): Promise<boolean> {
   // Refuse a plain-http public-IP server: it would ship the token + cookies in
   // the clear over the internet. Use https, or a private/LAN address.
@@ -3968,10 +4094,37 @@ async function applyServerUrl(): Promise<boolean> {
     return false;
   }
   setApiBase(els.server.value);
-  loadServerConfig();
-  connectEvents();
-  loadItems(true);
   return true;
+}
+
+// Re-aim the whole client at whatever server + token is now configured, without
+// restarting it. Everything the boot path fetches is fetched again here, so a
+// changed URL takes effect immediately instead of only after the app is fully
+// quit and relaunched.
+//
+// Nothing tears down the page: the shell, the scroll position and the existing
+// cards all stay put, and loadItems only swaps the list once the NEW server's
+// first page has actually arrived (see loadItems) — so there is no flash and no
+// blank intermediate state. Saving the same URL again never reaches here at all
+// (setApiBase reports no change), so re-saving costs zero requests.
+async function repointClient(): Promise<void> {
+  // Abandon whatever was still in flight against the old server; the generation
+  // bump in setApiBase already makes those answers get dropped on arrival.
+  state.loading = false;
+  // The media profile (E2EE vs. cookie plaintext) and public URL are per-server,
+  // and the list builds media URLs from them — so learn them before re-rendering.
+  await loadServerConfig();
+  connectEvents();
+  void loadItems(true);
+  loadStats();
+  if (getToken()) {
+    loadWebsites();  // per-site privacy-blur state for the home list
+    loadSiteIcons(); // favicons harvested for sites we ship no bundled mark for
+    // The Settings sheet is open (this runs from its Save) and the rest of what
+    // it shows is server-side state, so refresh that from the new server too.
+    loadArchive();
+    loadSettings();
+  }
 }
 
 // `storage` is "may write shared storage" — on Android 11+ that is the "All
@@ -5076,6 +5229,8 @@ async function saveSettings(): Promise<void> {
     if (dirty.includes('token')) {
       if (!(await applyToken())) return;
     }
+    // Both are creds for the same connection, so one reload covers either.
+    if (dirty.includes('server') || dirty.includes('token')) await repointClient();
     if (dirty.includes('archive')) {
       if (!(await applyArchive())) return;
     }
@@ -5746,6 +5901,16 @@ loaderObserver.observe(els.loader);
 // control. A second tap (card now revealed) falls through to .thumb-play and plays.
 const CARD_CONTROLS = '[data-act], .play-badge, .act';
 
+// Shut every open card overflow menu (see actMenuHtml). The website cards have
+// their own equivalent for their own list — closeSiteMenus — and neither reaches
+// into the other's DOM.
+function closeActMenus(): void {
+  document.querySelectorAll('.act-menu:not(.hidden)').forEach((m) => {
+    m.classList.add('hidden');
+    m.parentElement?.querySelector('.act-more')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
 // Native "tap-to-peek" for privacy-blurred cards. Industry spoiler pattern:
 // a tap reveals briefly, but re-blurs the instant the user's attention moves on
 // (a tap anywhere outside the card, a scroll) — and after a short fallback timeout
@@ -5852,10 +6017,26 @@ els.history.addEventListener('click', (e) => {
       }
     }
   }
-  // The title is a link out to the original post now, so a tap on it belongs to
-  // the anchor — not to the fold's expand/collapse and not to the clamp toggle
-  // below. Checked before both so either kind of card behaves the same way.
-  if (target.closest('a.title-link')) return;
+  // The card's overflow menu, on the same open/dismiss contract as the website
+  // cards' kebab (see closeSiteMenus): the trigger toggles its own popover, and
+  // any other click in the list — including one on a row of the menu itself —
+  // dismisses whatever is open before doing its own work.
+  const more = target.closest('.act-more') as HTMLElement | null;
+  const pop = more?.parentElement?.querySelector('.act-menu') as HTMLElement | null;
+  const wasOpen = !!pop && !pop.classList.contains('hidden');
+  closeActMenus();
+  if (more) {
+    e.preventDefault();
+    if (!wasOpen && pop) {
+      pop.classList.remove('hidden');
+      more.setAttribute('aria-expanded', 'true');
+    }
+    return;
+  }
+  // The source link is a real anchor in the action row, so a tap on it belongs to
+  // the browser (or, in the app, to the outbound-link handler) — not to the fold's
+  // expand/collapse and not to the clamp toggle below.
+  if (target.closest('a.act-link')) return;
   if (head) {
     // Whole-list actions on the fold header take priority over expand/collapse.
     const act = target.closest('[data-act]') as HTMLElement | null;
@@ -5874,8 +6055,8 @@ els.history.addEventListener('click', (e) => {
   }
   // A title too long for its two lines expands in place on tap (and re-clamps on
   // a second tap) — the disclosure pattern YouTube/Reddit use. Height only grows
-  // for the one row the user asked about, never the resting list. Only titles
-  // with no source page to open reach here (linked ones returned above).
+  // for the one row the user asked about, never the resting list. Every title
+  // reaches here now: reading one never navigates (the link icon does that).
   const titleEl = target.closest('.title') as HTMLElement | null;
   if (titleEl) {
     const row = titleEl.closest('.item') as HTMLElement | null;
@@ -5896,13 +6077,21 @@ els.history.addEventListener('click', (e) => {
     e.preventDefault();
     const item = state.items.get(Number(save.dataset.id));
     if (!item) return;
-    // A green icon means the file is already in Downloads/Orca. Say so rather
-    // than silently re-downloading a copy the device already has — UNLESS the
-    // server now holds a taller version, in which case this is the Upgrade icon
-    // and the tap should replace the local copy with the better one.
+    // A save already in flight owns this slot. The registry only learns about a
+    // copy once the transfer lands, so without this a second tap would start a
+    // SECOND download of the same item — and the native saver never overwrites,
+    // it uniquifies ("name (2).mp4"), leaving a file on disk that the registry
+    // (one entry per slug) doesn't point at and "Delete from device" can't find.
+    if (savingSlugs.has(item.slug)) { toast(t('toast.saveInFlight'), 'info'); return; }
+    // A green icon means the file is already in Downloads/Orca, so there is
+    // nothing left to fetch — the one useful thing the button can do is give the
+    // space back. Ask first, behind the same confirm the batch action uses.
+    // UNLESS the server now holds a taller version: this is then the Upgrade
+    // icon, and the tap replaces the local copy with the better one (the native
+    // save deletes the superseded file once the new one has landed).
     if (localFileFor(item.slug)) {
       if (localUpgradeAvailable(item)) { saveItemsNative([item]); return; }
-      toast(t('toast.alreadySaved'), 'info');
+      void confirmDeleteLocal(item);
       return;
     }
     saveItemsNative([item]);
@@ -6278,6 +6467,12 @@ function saveLabel(item: Item): string {
   return item.filename || item.title || item.slug || 'Orca download';
 }
 
+// Slugs whose save has been handed to the native downloader and hasn't landed
+// yet. The local registry can't answer for these (it only records a copy once the
+// bytes are on disk), so this is what stops a second tap from queueing a second
+// download of the same item — see the Save intercept and watchForSaves.
+const savingSlugs = new Set<string>();
+
 /**
  * Hand `items` to the native saver, guiding the user through the storage grant
  * first if it's missing. Without that grant the write fails with an opaque
@@ -6304,6 +6499,7 @@ async function saveItemsNative(items: Item[]): Promise<void> {
         slug: it.slug, kind: 'file', height: 0,
       }) as string;
       if (!url) throw new Error('native media proxy unavailable');
+      savingSlugs.add(it.slug);
       await T.core.invoke('save_media', {
         url,
         name: saveLabel(it),
@@ -6315,6 +6511,7 @@ async function saveItemsNative(items: Item[]): Promise<void> {
     toast(t('toast.savingN', { n: items.length }), 'ok');
     watchForSaves(items.map((it) => it.slug));
   } catch (_) {
+    items.forEach((it) => savingSlugs.delete(it.slug));
     toast(t('toast.saveToDeviceFail'), 'error');
   }
 }
@@ -6331,8 +6528,15 @@ function watchForSaves(slugs: string[]): void {
   const waiting = new Set(slugs);
   const deadline = Date.now() + 5 * 60_000;
   const tick = window.setInterval(() => {
-    for (const slug of waiting) if (localIndex.get(slug)) waiting.delete(slug);
-    if (!waiting.size || Date.now() > deadline) { clearInterval(tick); return; }
+    for (const slug of waiting) if (localIndex.get(slug)) { waiting.delete(slug); savingSlugs.delete(slug); }
+    if (!waiting.size || Date.now() > deadline) {
+      // Whatever is still outstanding at the deadline is a save that failed
+      // silently; releasing it here keeps a stuck transfer from locking its Save
+      // button out for the rest of the session.
+      waiting.forEach((slug) => savingSlugs.delete(slug));
+      clearInterval(tick);
+      return;
+    }
     for (const slug of waiting) localFp.delete(slug);
     state.items.forEach((it) => { if (waiting.has(it.slug)) queueLocalScan(it); });
   }, 2000);
@@ -6636,38 +6840,69 @@ async function batchClean(): Promise<void> {
   }
 }
 
-// Delete the on-device copies of the selected items (Android only), freeing space
-// on the phone while the server records stay put — they still stream and can be
-// re-downloaded. This is the device-side counterpart of batchClean, which erases
-// the SERVER copy. The native side finds each file by slug/fingerprint, deletes
-// it and forgets it; here we optimistically drop them from the local index so the
-// green Save mark clears and the device filter (if on) hides the now-gone rows.
-async function batchDeleteLocal(): Promise<void> {
-  const items = selectedItems().filter((it) => localFileFor(it.slug));
-  if (!items.length) { toast(t('toast.noLocalFiles'), 'info'); return; }
-  const confirmed = await askConfirm({
+// Ask before removing on-device copies. One prompt for both callers — the
+// selection's "Delete from device" and a single card's Save button — so the two
+// can't drift into wording the same act differently.
+function confirmDeleteLocalPrompt(n: number): Promise<boolean> {
+  return askConfirm({
     title: t('deleteLocalConfirm.title'),
-    sub: t('deleteLocalConfirm.sub', { n: items.length }),
+    sub: t('deleteLocalConfirm.sub', { n }),
     confirm: t('sel.deleteLocal'),
     danger: true,
   });
+}
+
+/**
+ * Delete this device's saved copies of `items` and forget them, returning how
+ * many actually went. The native side finds each file by slug/fingerprint,
+ * deletes it and drops its registry entry; here we optimistically drop them from
+ * the local index too, so the green Save mark clears and the device filter (if
+ * on) hides the now-gone rows without waiting for the next foreground rescan.
+ * Clearing the fingerprint is what makes that rescan re-ask rather than trust the
+ * verdict we just invalidated.
+ */
+async function deleteLocalCopies(items: Item[]): Promise<number> {
+  const T = window.__TAURI__;
+  let deleted = 0;
+  if (T?.core?.invoke) {
+    deleted = await T.core.invoke('delete_local', {
+      items: items.map((it) => ({
+        slug: it.slug, name: it.filename || '', size: it.filesize || 0, height: it.height || 0,
+      })),
+    }) as number;
+  }
+  items.forEach((it) => {
+    localIndex.set(it.slug, null);
+    localFp.delete(it.slug);
+    paintLocalMark(it);
+  });
+  return deleted;
+}
+
+// A card's Save icon, tapped while the file is already on this device. There is
+// nothing left to fetch, so the tap offers the opposite: give the space back.
+async function confirmDeleteLocal(item: Item): Promise<void> {
+  if (!await confirmDeleteLocalPrompt(1)) return;
+  try {
+    const deleted = await deleteLocalCopies([item]);
+    toast(deleted ? t('sel.deletedLocalN', { n: deleted }) : t('toast.deleteFail'), deleted ? 'ok' : 'error');
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  }
+}
+
+// Delete the on-device copies of the selected items (Android only), freeing space
+// on the phone while the server records stay put — they still stream and can be
+// re-downloaded. This is the device-side counterpart of batchClean, which erases
+// the SERVER copy.
+async function batchDeleteLocal(): Promise<void> {
+  const items = selectedItems().filter((it) => localFileFor(it.slug));
+  if (!items.length) { toast(t('toast.noLocalFiles'), 'info'); return; }
+  const confirmed = await confirmDeleteLocalPrompt(items.length);
   if (!confirmed) return;
   els.selDeleteLocal.disabled = true;
   try {
-    const T = window.__TAURI__;
-    let deleted = 0;
-    if (T?.core?.invoke) {
-      deleted = await T.core.invoke('delete_local', {
-        items: items.map((it) => ({
-          slug: it.slug, name: it.filename || '', size: it.filesize || 0, height: it.height || 0,
-        })),
-      }) as number;
-    }
-    items.forEach((it) => {
-      localIndex.set(it.slug, null);
-      localFp.delete(it.slug);
-      paintLocalMark(it);
-    });
+    const deleted = await deleteLocalCopies(items);
     toast(deleted ? t('sel.deletedLocalN', { n: deleted }) : t('toast.deleteFail'), deleted ? 'ok' : 'error');
   } catch (e) {
     if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
@@ -8158,6 +8393,11 @@ document.querySelectorAll<HTMLInputElement>('input[name="share-behavior"]').forE
   });
 });
 
+// Re-blur grace period (Settings ▸ Privacy). Same pick-is-the-save contract as
+// the controls above — there is nothing to commit, the next trip out reads it.
+els.reblurSelect.value = reblurAfter() === Infinity ? 'never' : String(reblurAfter());
+els.reblurSelect.addEventListener('change', () => setReblurAfter(els.reblurSelect.value));
+
 // Re-resolve when the system theme flips while we're following it. Without this
 // the WebView repaints its own colours but our theme-color meta goes stale.
 if (window.matchMedia) {
@@ -8245,6 +8485,7 @@ async function runHeartbeat(): Promise<void> {
 async function softRefresh(establishPaging = false): Promise<void> {
   if (state.loading) return;
   state.loading = true;
+  const gen = baseGeneration;
   try {
     const params = new URLSearchParams();
     // The poll asks the same question the visible list was built from — without
@@ -8254,6 +8495,8 @@ async function softRefresh(establishPaging = false): Promise<void> {
     applySortParams(params);
     params.set('limit', String(PAGE_SIZE));
     const res = await apiFetch('/api/items?' + params.toString());
+    // Superseded by a server change — see loadItems.
+    if (gen !== baseGeneration) return;
     if (!res.ok) return;
     const data = await res.json();
     const items: Item[] = data.items || [];
@@ -8284,7 +8527,7 @@ async function softRefresh(establishPaging = false): Promise<void> {
   } catch (e) {
     if (!isUnauthorized(e)) { /* transient; the next tick or SSE will heal it */ }
   } finally {
-    state.loading = false;
+    if (gen === baseGeneration) state.loading = false;
   }
 }
 

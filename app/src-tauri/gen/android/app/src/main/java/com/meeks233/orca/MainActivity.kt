@@ -1,8 +1,10 @@
 package com.meeks233.orca
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.os.Bundle
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
@@ -16,13 +18,23 @@ class MainActivity : TauriActivity() {
     // Privacy: FLAG_SECURE blanks the app's thumbnail in the recent-apps switcher
     // (and blocks screenshots), so a shoulder-surfer flipping through recents can't
     // see downloaded titles/thumbnails. Set for the whole activity lifetime.
-    window.setFlags(
-      WindowManager.LayoutParams.FLAG_SECURE,
-      WindowManager.LayoutParams.FLAG_SECURE,
-    )
+    if (!screenshotsAllowed()) {
+      window.setFlags(
+        WindowManager.LayoutParams.FLAG_SECURE,
+        WindowManager.LayoutParams.FLAG_SECURE,
+      )
+    }
     consumeDeepLink(intent)
     applyImmersive(isLandscape(resources.configuration))
   }
+
+  // FLAG_SECURE also blanks `adb shell screencap`, so promo screenshots are
+  // impossible without lifting it. scripts/grab-shots.zsh flips this global
+  // setting for the length of a capture session; debuggable builds only, so a
+  // release APK can never be talked out of the flag.
+  private fun screenshotsAllowed(): Boolean =
+    (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 &&
+      Settings.Global.getInt(contentResolver, "orca_allow_screenshot", 0) == 1
 
   // launchMode is singleTask, so tapping a notification while the app is already
   // running re-uses this instance and arrives here rather than in onCreate().

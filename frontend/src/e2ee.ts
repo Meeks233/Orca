@@ -107,6 +107,11 @@ export async function authenticator(gcm: CryptoKey, method: string, path: string
 let cached: Session | null = null;
 let cachedToken: string | null = null;
 let pending: Promise<Session> | null = null;
+// Which (base, token) the in-flight handshake is for. Without this, a handshake
+// started against the OLD server was handed to every caller that asked right
+// after a Settings change — so the new server got authenticated with the old
+// server's session and answered 401 forever, until the app was restarted.
+let pendingKey: string | null = null;
 
 /// Run the ECDH handshake against `base`, deriving the forward-secret session key
 /// from the shared point and `SHA256(token)` as the pre-shared key.
@@ -143,12 +148,16 @@ async function handshake(base: string, token: string): Promise<Session> {
 /// which is why a new token only took effect after a full page reload.
 export async function ensureSession(base: string, token: string, force = false): Promise<Session> {
   if (!force && cached && cached.base === base && cachedToken === token) return cached;
-  if (pending) return pending;
+  const key = `${base}\n${token}`;
+  // Only share an in-flight handshake with callers that want the SAME creds.
+  if (!force && pending && pendingKey === key) return pending;
   cached = null;
-  pending = handshake(base, token)
+  const p = handshake(base, token)
     .then((s) => { cached = s; cachedToken = token; notifyWorker(s); return s; })
-    .finally(() => { pending = null; });
-  return pending;
+    .finally(() => { if (pending === p) { pending = null; pendingKey = null; } });
+  pending = p;
+  pendingKey = key;
+  return p;
 }
 
 /// Base URL for a full request URL that ends in `path` — `url` is `base + path`.
