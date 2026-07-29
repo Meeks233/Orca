@@ -104,6 +104,21 @@ export async function authenticator(gcm: CryptoKey, method: string, path: string
 
 // ---- Handshake + session cache ---------------------------------------------
 
+/// The request never reached a server (DNS, refused connection, dropped link,
+/// TLS failure) — as opposed to a server that answered and said no. The client
+/// draws its one offline verdict from this distinction: a 404 for a missing
+/// thumbnail is a healthy server, a rejected `fetch` is not. Every raw fetch in
+/// this module goes through `netFetch` so the difference survives to the caller.
+export class TransportError extends Error {}
+
+async function netFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (e) {
+    throw new TransportError(e instanceof Error ? e.message : 'network unreachable');
+  }
+}
+
 let cached: Session | null = null;
 let cachedToken: string | null = null;
 let pending: Promise<Session> | null = null;
@@ -120,7 +135,7 @@ async function handshake(base: string, token: string): Promise<Session> {
   const epkC = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
   const nC = crypto.getRandomValues(new Uint8Array(16));
 
-  const res = await fetch(`${base}/api/session`, {
+  const res = await netFetch(`${base}/api/session`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ epk: bytesToBase64(epkC), n: bytesToBase64(nC) }),
@@ -184,7 +199,7 @@ export async function encryptedFetch(url: string, path: string, token: string, o
       headers.set('X-Orca-Encrypted-Body', '1');
       headers.set('Content-Type', 'text/plain');
     }
-    const res = await fetch(url, { ...opts, headers, body });
+    const res = await netFetch(url, { ...opts, headers, body });
     if (res.headers.get('X-Orca-E2EE') !== '1') return res;
     const plaintext = await open(session.gcm, await res.text(), `${res.status}\n${path}`);
     const responseHeaders = new Headers(res.headers);
@@ -250,7 +265,7 @@ interface MediaWindow { plainLen: number; plaintext: Bytes; }
 
 async function fetchMediaWindow(s: Session, apiPath: string, resource: string, start: number): Promise<MediaWindow> {
   const auth = await authenticator(s.gcm, 'GET', apiPath);
-  const res = await fetch(`${s.base}${apiPath}`, {
+  const res = await netFetch(`${s.base}${apiPath}`, {
     headers: { 'X-Orca-Sid': s.sid, 'X-Orca-Auth': auth, 'X-Orca-Range': `${start}-` },
   });
   if (res.status === 401) throw new MediaAuthError('session expired');

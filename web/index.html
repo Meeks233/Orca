@@ -55,6 +55,18 @@
     </div>
   </header>
 
+  <!-- The one offline report for the whole client. Every component that fails to
+       reach the server routes here instead of raising its own "Network error"
+       toast (which, on a dropped link, stacked one per retrying loader). It is a
+       strip of chrome rather than a dialog: it states the condition, offers the
+       one action that resolves it, and disappears by itself the moment the link
+       is back. Shown/hidden purely from the global state in app.js. -->
+  <div id="offline-bar" class="offline-bar hidden" role="status" aria-live="polite">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 2 20 20"/><path d="M5.782 5.782A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.307-.193"/><path d="M21.532 16.5A4.5 4.5 0 0 0 17.5 10h-1.79A7.008 7.008 0 0 0 10 5.07"/></svg>
+    <span class="offline-text" data-i18n="offline.bar">Server unreachable — cloud actions are paused</span>
+    <button id="offline-retry" class="offline-retry" type="button" data-i18n="offline.retry">Retry</button>
+  </div>
+
   <section class="submit">
     <form id="submit-form" class="row">
       <!-- The URL box and its Paste affordance share ONE field shell (.field)
@@ -351,6 +363,16 @@
     <button id="player-next" class="player-nav player-next hidden" type="button" aria-label="Next item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
     <video id="player-video" class="player-video" crossorigin="anonymous" controls playsinline autoplay></video>
     <img id="player-image" class="player-image" alt="">
+    <!-- One failure surface for BOTH media types (see showMediaFailure): a video
+         that errored, a still that never decoded, or a server already known to be
+         unreachable. It reports inside the viewer and leaves it open — the old
+         behaviour toasted and closed the player for video, and said nothing at
+         all for an image. -->
+    <div id="player-error" class="player-error hidden" role="status" aria-live="polite">
+      <svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 2 20 20"/><path d="M5.782 5.782A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.307-.193"/><path d="M21.532 16.5A4.5 4.5 0 0 0 17.5 10h-1.79A7.008 7.008 0 0 0 10 5.07"/></svg>
+      <p id="player-error-text" class="player-error-text"></p>
+      <button id="player-error-retry" class="btn btn-ghost" type="button" data-i18n="offline.retry">Retry</button>
+    </div>
   </div>
 
   <!-- Share dialog (Baidu-netdisk style). Opened by the share icon on a

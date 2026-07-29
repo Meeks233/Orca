@@ -212,6 +212,50 @@ body {
   :root:not([data-theme="dark"]) .brand-logo { filter: none; }
 }
 :root[data-theme="light"] .brand-logo { filter: none; }
+/* ---- Offline bar (directly under the topbar) ----
+   The client's single offline report. It sticks with the topbar so the
+   explanation stays on screen wherever the list is scrolled to — the reason
+   actions are being refused must be visible at the moment one is attempted, not
+   only at the top of the page. Amber, not red: this is a condition to wait out,
+   not an error the user did something to cause. See renderOfflineBar() in app.ts. */
+.offline-bar {
+  position: sticky;
+  top: 0;
+  z-index: 19; /* under the topbar, which scrolls over it */
+  margin: 0 -12px 8px;
+  padding: 7px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 12%, var(--bg));
+  border-bottom: 1px solid color-mix(in oklab, var(--warn) 30%, transparent);
+}
+.offline-bar svg { flex: 0 0 auto; }
+.offline-text { flex: 1 1 auto; min-width: 0; }
+.offline-retry {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: color-mix(in oklab, var(--warn) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--warn) 40%, transparent);
+  border-radius: var(--r-full);
+  cursor: pointer;
+}
+/* A repeat failure while the bar is already up: re-flash the same bar instead of
+   raising a second notification, so a tap that couldn't be honoured is still
+   acknowledged. */
+.offline-bar.flash { animation: offline-flash .9s ease; }
+@keyframes offline-flash {
+  0%, 100% { background: color-mix(in oklab, var(--warn) 12%, var(--bg)); }
+  25%      { background: color-mix(in oklab, var(--warn) 34%, var(--bg)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .offline-bar.flash { animation: none; }
+}
 .server-status {
   flex: 0 0 auto;
   width: 9px;
@@ -1895,6 +1939,28 @@ a.uploader-link:hover { color: var(--text); text-decoration: underline; }
 }
 .player-overlay[data-kind="image"] .player-video { display: none; }
 .player-overlay[data-kind="image"] .player-image { display: block; }
+/* ---- Viewer failure surface ----
+   Shown in place of the media, inside the viewer that was opened, for every way
+   it can fail to paint (see showMediaFailure). The media element is hidden
+   rather than left showing a poster or a broken-image glyph behind the text —
+   the point is that ONE thing is on screen saying what happened. */
+.player-error {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  background: #000;
+}
+.player-error-text { margin: 0; max-width: 30ch; font-size: 14px; line-height: 1.5; color: var(--text); }
+.player-overlay.media-error .player-video,
+.player-overlay.media-error .player-image { display: none; }
 .player-close {
   position: absolute;
   top: calc(env(safe-area-inset-top) + 10px);

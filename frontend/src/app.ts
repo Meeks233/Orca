@@ -2,7 +2,7 @@
 // ../web/app.js by build.ts. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
-import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, fetchMediaBytes, pushSessionToWorker, refreshSessionForWorker } from './e2ee';
+import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, fetchMediaBytes, pushSessionToWorker, refreshSessionForWorker, TransportError } from './e2ee';
 import { getCachedThumb, putCachedThumb } from './thumbcache';
 
 type Params = Record<string, string | number>;
@@ -413,6 +413,9 @@ const els = {
   playerVideo: byId<HTMLVideoElement>('player-video'),
   playerImage: byId<HTMLImageElement>('player-image'),
   playerClose: byId<HTMLButtonElement>('player-close'),
+  playerError: byId('player-error'),
+  playerErrorText: byId('player-error-text'),
+  playerErrorRetry: byId<HTMLButtonElement>('player-error-retry'),
   playerPrev: byId<HTMLButtonElement>('player-prev'),
   playerNext: byId<HTMLButtonElement>('player-next'),
   shareOverlay: byId('share'),
@@ -438,6 +441,8 @@ const els = {
   streamMaxRes: byId<HTMLSelectElement>('stream-max-res'),
   themeColorMeta: byId<HTMLMetaElement>('theme-color-meta'),
   serverStatus: byId('server-status'),
+  offlineBar: byId('offline-bar'),
+  offlineRetry: byId<HTMLButtonElement>('offline-retry'),
   dlStats: byId('dl-stats'),
 };
 
@@ -526,20 +531,60 @@ function isUnauthorized(error: unknown): boolean {
   return error instanceof UnauthorizedError;
 }
 
+/// Refused before it left the client, because the link is already known to be
+/// down (see the write gate in apiFetch). Callers treat it like any other
+/// failure — the offline bar has already said why.
+class OfflineError extends Error {}
+
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
   opts = opts || {};
-  const res = await encryptedFetch(apiUrl(path), path, getToken(), opts);
+  // ONE state decides, and it decides here — not at each click. A write cannot
+  // land while the link is down, and firing it anyway bought nothing but a long
+  // timeout on the way to the answer the offline bar is already showing. Reads
+  // are never gated: they are precisely how the client is allowed to come back
+  // (heartbeat, a refresh, a tap that loads data), so gating them would make the
+  // offline state self-sustaining.
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && isOffline()) { reportOffline(); throw new OfflineError('offline'); }
+  let res: Response;
+  try {
+    res = await encryptedFetch(apiUrl(path), path, getToken(), opts);
+  } catch (e) {
+    // Nothing came back at all. That is the definition of offline, and it holds
+    // for the whole client rather than just the component that asked — which is
+    // what lets every other surface stop asking.
+    if (e instanceof TransportError) reportOffline();
+    throw e;
+  }
   if (res.status === 401) {
     showTokenField(true);
     throw new UnauthorizedError('Unauthorized');
   }
+  // A gateway status is the other shape of "the backend didn't answer": a proxy
+  // is up and talking, the server behind it is not. Same verdict.
+  if (res.status >= 502 && res.status <= 504) reportOffline();
   // A successful authenticated response confirms the server is reachable now —
   // flip the status light green immediately instead of waiting for the SSE stream to
   // finish its handshake and open (which lags the first data load by a noticeable
   // beat, especially right after the extension hands off a fresh token). The SSE
   // lifecycle still governs the light thereafter (red on drop, green on reconnect).
-  if (res.ok && !serverUp) setServerStatus(true);
+  else if (res.ok && serverUp !== true) setServerStatus(true);
   return res;
+}
+
+/// The one place a failed request is reported to the user. Three outcomes, and
+/// deliberately no toast for the common one: a bad token is already raising the
+/// welcome window, an unreachable server is already stated by the offline bar
+/// (repeat failures re-flash it rather than stacking N identical toasts), and a
+/// toast is kept for the genuinely surprising case — the server answered, but
+/// not with what we asked for.
+function reportRequestError(error: unknown): void {
+  if (isUnauthorized(error)) return;
+  if (error instanceof OfflineError || error instanceof TransportError || isOffline()) {
+    reportOffline();
+    return;
+  }
+  toast(t('toast.network'), 'error');
 }
 
 // A bad or missing token is exactly what the welcome window is for — a focused
@@ -566,24 +611,55 @@ function showTokenField(invalid: boolean): void {
   if (invalid) welcomeError('settings.tokenInvalid');
 }
 
-// ---- Server status light (SSE-driven) -------------------------------------
+// ---- One reachability state for the whole client --------------------------
 // A steady dot beside the brand: solid green while the server is reachable, red
 // when it drops or before a token is set (no breathing pulse — just a fixed glow).
 // Turns green the moment the first authenticated request succeeds (see apiFetch)
 // and on SSE open/events, and red when the SSE stream drops — so it tracks real
 // reachability without lagging the first data load behind the stream's handshake.
-let serverUp = false;
-function setServerStatus(up: boolean): void {
-  const recovered = up && !serverUp; // false/undefined → up: the link just came back
-  serverUp = up;
+//
+// This flag is the ONLY offline judgement in the client. Nothing checks the link
+// for itself, least of all at click time: any request that never came back marks
+// it down (apiFetch, plus the media planes that bypass it), and every surface —
+// preview, download, settings — reads the answer from here.
+//
+// Going back up is deliberately passive: the heartbeat, a live SSE event, or a
+// read the user themselves asked for (a refresh, a tap that loads data, a
+// restart). Nothing speculatively re-probes, so a client that really is off the
+// network stays quiet instead of hammering the link.
+//
+// `null` means "nobody has asked yet". A cold boot has proven nothing either
+// way, and treating that as offline would refuse the first Download tapped
+// before the opening request lands.
+let serverUp: boolean | null = null;
+function isOffline(): boolean { return serverUp === false; }
+
+/// Paint the light (and the offline bar) from the current state. Split out from
+/// setServerStatus so boot — and a signed-out client — can show the light in its
+/// "nothing has answered yet" state without claiming an outage nobody observed.
+function renderServerStatus(): void {
+  renderOfflineBar();
   const el = els.serverStatus;
-  if (el) {
-    el.classList.toggle('up', up);
-    el.classList.toggle('down', !up);
-    const label = up ? t('status.up') : t('status.down');
-    el.setAttribute('aria-label', label);
-    el.setAttribute('title', label);
-  }
+  if (!el) return;
+  const up = serverUp === true;
+  el.classList.toggle('up', up);
+  el.classList.toggle('down', !up);
+  const label = up ? t('status.up') : t('status.down');
+  el.setAttribute('aria-label', label);
+  el.setAttribute('title', label);
+}
+
+/// Back to "not asked yet" — used where a failure was never observed, only
+/// credentials are missing.
+function setServerUnknown(): void {
+  serverUp = null;
+  renderServerStatus();
+}
+
+function setServerStatus(up: boolean): void {
+  const recovered = up && serverUp !== true; // down/unknown → up: the link is back
+  serverUp = up;
+  renderServerStatus();
   // The storage readout beside the light (and the list) otherwise waited out the
   // 30s poll before catching up after a reconnect — a visible lag. Pull them now,
   // and let any pagination that was parked on a failed load pick back up.
@@ -592,7 +668,48 @@ function setServerStatus(up: boolean): void {
     void loadStats();
     void softRefresh();
     requestAnimationFrame(topUpIfNeeded);
+    retryPlayerAfterRecovery();
   }
+}
+
+// ---- The one offline report ------------------------------------------------
+// A slim bar under the topbar, stating the condition and offering the single
+// thing that resolves it. It replaces the old shape of this feedback — a
+// "Network error" toast per component, which on a dropped link meant a stack of
+// identical notifications covering the UI, each saying the same thing the status
+// light already said. This is non-intrusive by construction: it takes a strip of
+// chrome rather than the screen, dismisses itself when the link returns, and
+// cannot be tapped away by accident into a state where nothing explains why
+// actions are refused.
+//
+// A repeat failure re-flashes the same bar. That is the acknowledgement for a tap
+// that could not be honoured — feedback without another notification.
+let offlineFlashTimer: number | null = null;
+
+function renderOfflineBar(): void {
+  const bar = els.offlineBar;
+  document.body.classList.toggle('offline', isOffline());
+  if (!bar) return;
+  bar.classList.toggle('hidden', !isOffline());
+  if (!isOffline()) bar.classList.remove('flash');
+}
+
+/// Mark the client offline and report it once. Called from every path that fails
+/// to get a normal response — request, media element, native media proxy.
+function reportOffline(): void {
+  const known = isOffline();
+  if (!known) setServerStatus(false); // the bar appearing IS the report
+  else flashOfflineBar();             // already stated — acknowledge, don't restate
+}
+
+function flashOfflineBar(): void {
+  const bar = els.offlineBar;
+  if (!bar || bar.classList.contains('hidden')) return;
+  bar.classList.remove('flash');
+  void bar.offsetWidth; // reflow, so a rapid second failure restarts the animation
+  bar.classList.add('flash');
+  if (offlineFlashTimer != null) clearTimeout(offlineFlashTimer);
+  offlineFlashTimer = window.setTimeout(() => bar.classList.remove('flash'), 900);
 }
 
 // ---- Storage readout (beside the heartbeat) -------------------------------
@@ -709,7 +826,7 @@ async function loadStats(): Promise<void> {
   } catch (e) {
     // A network failure here means the server is unreachable; reflect it so the
     // light goes red and the heartbeat speeds up (see startHeartbeat).
-    if (!isUnauthorized(e)) setServerStatus(false);
+    if (!isUnauthorized(e)) reportOffline();
   }
 }
 
@@ -948,7 +1065,12 @@ async function fetchThumb(slug: string): Promise<string | null> {
     const url = URL.createObjectURL(new Blob([bytes]));
     thumbObjectUrls.set(slug, url);
     return url;
-  } catch {
+  } catch (e) {
+    // A thumbnail is a component like any other: if its bytes never left the
+    // server, the client is offline and every other surface should know without
+    // asking for itself. Only a transport failure counts — a 404 for a missing
+    // thumbnail is a perfectly healthy server.
+    if (e instanceof TransportError) reportOffline();
     return null;
   } finally {
     thumbFetches.delete(slug);
@@ -1006,7 +1128,7 @@ function hydrateThumbs(root: ParentNode): void {
 // `kind` is 'stream' (cloud) or 'file' (a file the server holds).
 function playNativeProxy(v: HTMLVideoElement, slug: string, kind: 'stream' | 'file', play: () => void): void {
   const invoke = window.__TAURI__?.core?.invoke;
-  if (!invoke) { toast(t('toast.streamFail'), 'error'); return; }
+  if (!invoke) { showMediaFailure(false); return; }
   // The resolution cap only applies to a cloud 'stream' (a 'file' is already at a
   // fixed resolution on the server). 0 means "no cap".
   const height = kind === 'stream' ? maxStreamHeight() : 0;
@@ -1017,7 +1139,9 @@ function playNativeProxy(v: HTMLVideoElement, slug: string, kind: 'stream' | 'fi
       v.load();
       play();
     })
-    .catch(() => { toast(t('toast.streamFail'), 'error'); });
+    // The proxy fetches over the same E2EE channel as every other request, so a
+    // failure here is the client failing to reach the backend.
+    .catch(() => { showMediaFailure(true); });
 }
 
 // Tokenless public link, keyed by the item's random slug (not its id, so it
@@ -2427,10 +2551,8 @@ async function loadItems(reset?: boolean): Promise<void> {
     pageRetryBlockedUntil = 0; // a good page clears any pagination backoff
     if (reset) void maybeOpenPendingPlay();
   } catch (e) {
-    if (!isUnauthorized(e)) {
-      toast(t('toast.network'), 'error');
-      pageRetryBlockedUntil = Date.now() + PAGE_RETRY_COOLDOWN_MS;
-    }
+    reportRequestError(e);
+    if (!isUnauthorized(e)) pageRetryBlockedUntil = Date.now() + PAGE_RETRY_COOLDOWN_MS;
   } finally {
     // A superseded load must not clear the flag out from under the reload that
     // replaced it, nor ask it for another page.
@@ -2577,7 +2699,10 @@ async function stageInput(): Promise<void> {
   } catch (e) {
     stageBusy = false;
     setSubmitBusy(false);
-    if (isUnauthorized(e)) { clearStage(); return; }
+    // Nothing can be staged for a server that isn't there, and the offline bar
+    // has already said so — leaving cards behind would only offer a second
+    // action that cannot be honoured either.
+    if (isUnauthorized(e) || e instanceof OfflineError) { clearStage(); return; }
     stageEntries = [];
   }
   stageBusy = false;
@@ -2643,7 +2768,7 @@ async function submitUrl(url: string, maxHeight?: number | null): Promise<void> 
     }
     els.url.value = '';
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     setSubmitBusy(false);
   }
@@ -2654,7 +2779,10 @@ let es: EventSource | null = null;
 let eventGeneration = 0;
 async function connectEvents(): Promise<void> {
   const token = getToken();
-  if (!token) { setServerStatus(false); return; }
+  // No credentials is not an outage: nothing was asked, so nothing failed. The
+  // light stays in its unknown state and the offline bar keeps quiet — the
+  // welcome window is the thing explaining this state.
+  if (!token) { setServerUnknown(); return; }
   if (es) { es.close(); es = null; }
   const generation = ++eventGeneration;
   const encrypted = await encryptedEventSourceUrl(apiUrl('/api/events'), '/api/events', token);
@@ -2687,7 +2815,7 @@ async function connectEvents(): Promise<void> {
   // recovers on its own. Schedule our own reconnect so the heartbeat (and live
   // updates) heal without a manual reload; the re-check skips it if it recovered.
   es.onerror = () => {
-    setServerStatus(false);
+    reportOffline();
     // Close the stream so the browser's own ~3s retry loop stops — otherwise a
     // persistently-unreachable server gets hit every 3s regardless of our timer.
     // Our backed-off scheduleReconnect becomes the sole driver of reconnection,
@@ -3269,7 +3397,7 @@ async function loadWebsites(): Promise<void> {
     applyBlurToRows();
     renderWebsites();
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   }
 }
 
@@ -3351,7 +3479,7 @@ async function saveWebsite(key: string, patch: Record<string, unknown>, render =
     }
     return true;
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
     return false;
   }
 }
@@ -3420,7 +3548,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
       try {
         const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
         if (res.ok) { siteSelected.delete(key); websitesLoaded = websitesLoaded.filter((x) => x.key !== key); renderWebsites(); }
-      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
+      } catch (e) { reportRequestError(e); }
       return;
     case 'ck-import':
       paste.classList.remove('hidden'); pasteActions.classList.remove('hidden'); paste.focus();
@@ -3440,7 +3568,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
         toast(t('toast.cookiesSaved'), 'ok');
         if (data.cookie) w.cookie = data.cookie;
         renderWebsites();
-      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
+      } catch (e) { reportRequestError(e); }
       return;
     }
     case 'ck-switch': {
@@ -3454,7 +3582,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
           });
           const data = await res.json().catch(() => ({}));
           if (res.ok && data.cookie) { w.cookie = data.cookie; renderWebsites(); }
-        } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
+        } catch (e) { reportRequestError(e); }
       } else {
         // The frontend thinks there's no jar — but our cached view can be stale
         // (app resume, a dropped refresh, an SSE re-render), and a jar the user
@@ -3483,7 +3611,7 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
         const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', { method: 'DELETE' });
         const data = await res.json().catch(() => ({}));
         if (res.ok) { w.cookie = data.cookie; toast(t('toast.cookiesRemoved'), 'info'); renderWebsites(); }
-      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
+      } catch (e) { reportRequestError(e); }
       return;
     }
   }
@@ -3574,7 +3702,7 @@ async function batchDeleteSites(): Promise<void> {
     try {
       const res = await apiFetch('/api/websites/' + encodeURIComponent(key), { method: 'DELETE' });
       if (res.ok) websitesLoaded = websitesLoaded.filter((x) => x.key !== key);
-    } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
+    } catch (e) { reportRequestError(e); }
   }
   setSiteSelectMode(false);
 }
@@ -3602,7 +3730,7 @@ async function batchMergeSites(): Promise<void> {
     toast(t('sites.merged', { n: sources.length }), 'ok');
     setSiteSelectMode(false);
     loadWebsites();
-  } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
+  } catch (e) { reportRequestError(e); }
 }
 
 // Add/edit site dialog. `existing` null = add (key editable); else edit (key locked).
@@ -3760,7 +3888,7 @@ async function applyShare(makePublic: boolean): Promise<void> {
     if (!makePublic) { toast(t('toast.sharingStopped'), 'info'); closeShare(); }
     else { if (share.id === id) { showCancelConfirm(false); renderShare(data); } toast(t('toast.linkReady'), 'ok'); }
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     els.shareConfirm.disabled = false;
     els.shareStop.disabled = false;
@@ -3953,6 +4081,13 @@ els.confirmBox.addEventListener('click', (e) => {
 });
 
 // ---- Wire up UI -----------------------------------------------------------
+// The offline bar's Retry: a read the user asked for, which is one of the four
+// sanctioned ways back online (that, the heartbeat, a live event, a restart).
+// /api/stats is the same probe the heartbeat uses, so success flips the whole
+// client back in one round trip and setServerStatus's recovery path repaints
+// everything that was stale.
+els.offlineRetry.addEventListener('click', () => { void loadStats(); });
+
 els.settingsToggle.addEventListener('click', () => {
   closeModal(els.websites);
   els.token.value = getToken();
@@ -4111,6 +4246,9 @@ async function repointClient(): Promise<void> {
   // Abandon whatever was still in flight against the old server; the generation
   // bump in setApiBase already makes those answers get dropped on arrival.
   state.loading = false;
+  // A verdict about the OLD server says nothing about this one, and carrying it
+  // over would refuse the first write against a server that is perfectly up.
+  setServerUnknown();
   // The media profile (E2EE vs. cookie plaintext) and public URL are per-server,
   // and the list builds media URLs from them — so learn them before re-rendering.
   await loadServerConfig();
@@ -4623,7 +4761,7 @@ async function commitGlobal(patch: Record<string, unknown>): Promise<void> {
     globalSettings = parseGlobalSettings(data);
     toast(t('toast.settingsSaved'), 'ok');
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
     if (globalSettings) renderGlobalDefaults(globalSettings);
   }
 }
@@ -4894,7 +5032,7 @@ async function saveResolutions(): Promise<void> {
       })
       .catch(() => { /* SSE / next load will catch up */ });
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     els.resolutionSave.disabled = false;
   }
@@ -5272,7 +5410,7 @@ async function applyMaxStorage(): Promise<boolean> {
     loadStats();
     return true;
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
     return false;
   }
 }
@@ -5296,7 +5434,7 @@ async function applyRateLimit(): Promise<boolean> {
     renderRateLimit();
     return true;
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
     return false;
   }
 }
@@ -5319,7 +5457,7 @@ async function applyConcurrency(): Promise<boolean> {
     renderConcurrency();
     return true;
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
     return false;
   }
 }
@@ -5347,7 +5485,7 @@ async function applyArchive(): Promise<boolean> {
     archiveHasBackup = true;
     return true;
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
     return false;
   }
 }
@@ -5368,7 +5506,7 @@ async function restoreArchive(): Promise<void> {
     archiveHasBackup = true; // the version we rolled back FROM is the new backup
     toast(t('toast.archiveRestored', { n: keys.length }), 'ok');
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     els.archiveRestore.disabled = false;
     renderSaveBar();
@@ -5625,7 +5763,10 @@ async function probePrepEntries(urls: string[]): Promise<PrepEntry[]> {
           break;
         }
       } catch (e) {
-        if (isUnauthorized(e)) throw e;
+        // A probe miss is fine to swallow (the caller gets a bare card the user
+        // can still submit), but a refused-because-offline probe is not: there
+        // is nothing to submit it to, so let the caller drop the whole stage.
+        if (isUnauthorized(e) || e instanceof OfflineError) throw e;
       } finally {
         window.clearTimeout(timeout);
       }
@@ -6073,6 +6214,12 @@ els.history.addEventListener('click', (e) => {
   // workers for those navigations, which sends `/__m/dl/...` to the backend and
   // turns its route-level 404 into the browser's vague “file not available”.
   const save = target.closest('.act-save') as HTMLAnchorElement | null;
+  // In the browser Save is a real attachment navigation, so with the link known
+  // down the only honest thing is to not start it — the browser's own "failed"
+  // download entry explains nothing. (The app's path is guarded inside
+  // saveItemsNative, so its purely-local actions — delete the device copy — keep
+  // working offline.)
+  if (save && !isAndroidApp() && isOffline()) { e.preventDefault(); reportOffline(); return; }
   if (save && isAndroidApp()) {
     e.preventDefault();
     const item = state.items.get(Number(save.dataset.id));
@@ -6139,7 +6286,7 @@ async function cancelItem(id: number): Promise<void> {
     upsertRow(data, false);
     loadStats();
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   }
 }
 
@@ -6159,7 +6306,7 @@ async function retryItem(id: number): Promise<void> {
     upsertRow(data, false);
     loadStats();
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   }
 }
 
@@ -6183,7 +6330,7 @@ async function holdItem(id: number, pause: boolean): Promise<void> {
     upsertRow(data, false);
     loadStats(); // the paused count moved — re-render the global toggle with it
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   }
 }
 
@@ -6381,7 +6528,7 @@ els.queueCancel?.addEventListener('click', async () => {
     // covered, so re-read rather than guess which rows changed.
     await Promise.all([loadStats(), softRefresh()]);
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   } finally {
     renderQueueToggle();
   }
@@ -6400,7 +6547,7 @@ els.queueToggle?.addEventListener('click', async () => {
     // its paused count is what the button's next state has to agree with.
     await Promise.all([loadStats(), softRefresh()]);
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   } finally {
     // Re-derive rather than blindly re-enable: whether this button should now be
     // live depends on what the queue looks like after the signal, and that's the
@@ -6481,6 +6628,10 @@ const savingSlugs = new Set<string>();
 async function saveItemsNative(items: Item[]): Promise<void> {
   const T = window.__TAURI__;
   if (!T?.core?.invoke) return;
+  // Every byte of this comes from the server, so the one global state decides —
+  // not a probe per tap. Refusing here beats starting a foreground service that
+  // fails minutes later in a notification.
+  if (isOffline()) { reportOffline(); return; }
   let status = await refreshAppPermissions();
   if (!status?.storage) {
     toast(t('toast.storageNeeded'), 'info');
@@ -6548,6 +6699,10 @@ function watchForSaves(slugs: string[]): void {
 function batchDownload(source?: Item[]): void {
   const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available);
   if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
+  // Same global verdict as everywhere else. In the browser these become real
+  // attachment navigations, which on a dead link land the user on the browser's
+  // own failed-download shelf with no explanation from us.
+  if (isOffline()) { reportOffline(); return; }
   if (isAndroidApp()) { saveItemsNative(items); return; }
   items.forEach((it, i) => {
     setTimeout(() => {
@@ -6623,7 +6778,7 @@ async function applyBatchShare(): Promise<void> {
     const label = days == null ? t('dur.permanently') : t('dur.days', { n: days });
     toast(ok ? t('toast.sharedN', { n: ok, dur: label }) : t('toast.shareFail'), ok ? 'ok' : 'error');
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     els.batchShareConfirm.disabled = false;
     closeModal(els.batchShare);
@@ -6667,7 +6822,7 @@ async function batchUnshare(): Promise<void> {
     }
     toast(ok ? t('toast.stoppedSharingN', { n: ok }) : t('toast.updateFail'), ok ? 'info' : 'error');
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     updateSelBar();
   }
@@ -6789,7 +6944,7 @@ async function batchDelete(ids: number[]): Promise<void> {
     if (ok) loadStats(); // removed files shrink the total-downloaded readout
     toast(ok ? t('toast.deletedN', { n: ok }) : t('toast.deleteFail'), ok ? 'ok' : 'error');
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     updateSelBar();
   }
@@ -6834,7 +6989,7 @@ async function batchClean(): Promise<void> {
     toast(ok ? t('sel.cleanedN', { n: ok }) : t('toast.saveFail'), ok ? 'ok' : 'error');
     exitSelectMode();
   } catch (e) {
-    if (!isUnauthorized(e)) toast('Network error', 'error');
+    reportRequestError(e);
   } finally {
     updateSelBar();
   }
@@ -6887,7 +7042,7 @@ async function confirmDeleteLocal(item: Item): Promise<void> {
     const deleted = await deleteLocalCopies([item]);
     toast(deleted ? t('sel.deletedLocalN', { n: deleted }) : t('toast.deleteFail'), deleted ? 'ok' : 'error');
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   }
 }
 
@@ -6905,7 +7060,7 @@ async function batchDeleteLocal(): Promise<void> {
     const deleted = await deleteLocalCopies(items);
     toast(deleted ? t('sel.deletedLocalN', { n: deleted }) : t('toast.deleteFail'), deleted ? 'ok' : 'error');
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    reportRequestError(e);
   } finally {
     els.selDeleteLocal.disabled = false;
     updateSelBar();
@@ -7042,9 +7197,12 @@ function showPlayerNav(): void {
   syncPlayerNav();
   // Withdraw on idle for a still as well as a video: the chrome is temporary,
   // and a tap anywhere brings it back. A *paused* video is the one exception —
-  // Chromium keeps its own control bar up there, so ours stays to match it.
+  // Chromium keeps its own control bar up there, so ours stays to match it. A
+  // failure message is the other exception: there is no picture to keep clear,
+  // and fading Close off a screen with nothing on it but an explanation would
+  // leave the viewer looking for a way out.
   const paused = els.player.dataset.kind === 'video' && els.playerVideo.paused;
-  if (!paused) {
+  if (!paused && !mediaFailed) {
     playerNavTimer = setTimeout(() => {
       playerNavTimer = null;
       playerNavActive = false;
@@ -7205,9 +7363,70 @@ function startPlayback(v: HTMLVideoElement): void {
   });
 }
 
+// ---- Viewer failure surface (one path for video AND stills) ---------------
+// Every way the viewer can fail to paint is the same event to the person looking
+// at it — a video that errored, a still that never decoded, a native proxy that
+// couldn't fetch, a server known to be down before we even asked — so they all
+// land here. Previously they didn't: video toasted and then yanked the player
+// shut (losing the fold you were paging through), while an image opened the
+// viewer and then failed silently, leaving a black rectangle that reported
+// nothing at all.
+//
+// Non-intrusive: the message appears INSIDE the viewer the user opened, and the
+// viewer stays open. Its Retry is a read the user asked for, which is one of the
+// sanctioned ways back online.
+let mediaFailed = false;
+let openedMedia: { id: number; cloud: boolean; poster?: string; image: boolean } | null = null;
+
+function showMediaFailure(networkFailure: boolean): void {
+  if (networkFailure) reportOffline();
+  if (els.player.classList.contains('hidden')) return;
+  // Offline is the more useful of the two explanations whenever it holds: the
+  // media is probably fine, the link is not. Otherwise the source itself is at
+  // fault (an upstream that won't stream, a file the engine can't decode).
+  els.playerErrorText.textContent = t(isOffline() ? 'player.offline' : 'player.mediaFail');
+  els.playerError.classList.remove('hidden');
+  els.player.classList.add('media-error');
+  mediaFailed = true;
+  showPlayerNav(); // keep Close and the fold arrows reachable
+}
+
+function clearMediaFailure(): void {
+  mediaFailed = false;
+  els.playerError.classList.add('hidden');
+  els.player.classList.remove('media-error');
+}
+
+function reopenCurrentMedia(): void {
+  const m = openedMedia;
+  if (!m) return;
+  if (m.image) openImage(m.id, m.cloud);
+  else openPlayer(m.id, m.cloud, m.poster);
+}
+
+/// The link came back on its own (heartbeat / SSE) while the viewer was sitting
+/// on an offline message — pick the media back up rather than making the user
+/// close and re-tap it.
+function retryPlayerAfterRecovery(): void {
+  if (!mediaFailed || els.player.classList.contains('hidden')) return;
+  clearMediaFailure();
+  reopenCurrentMedia();
+}
+
+/// Retry button: a user-initiated read first (the sanctioned way back online),
+/// then re-open. Clearing up front takes ownership, so the recovery hook above
+/// doesn't re-open it a second time when that read succeeds.
+async function retryMediaNow(): Promise<void> {
+  clearMediaFailure();
+  await loadStats();
+  reopenCurrentMedia();
+}
+
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
   resetSwipe();
   resetZoom();
+  clearMediaFailure();
+  openedMedia = { id, cloud, poster, image: false };
   const v = els.playerVideo;
   els.player.dataset.kind = 'video';
   imageToken++;  // drop any still that is still decoding for the previous item
@@ -7240,6 +7459,10 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   // and works with the server unreachable. Everything below is the fallback for
   // when there is no local file.
   if (!playLocal(id, v, play)) {
+    // No copy on this device, so this needs the server — and the client already
+    // knows whether it has one. Say so instead of handing <video> a URL that
+    // cannot resolve and waiting for its error event to say the same thing later.
+    if (isOffline()) { showMediaFailure(false); return; }
     if (cloud) {
       // Online mode: play through the backend proxy, keyed by the item's slug (not
       // its id). It resolves the upstream URL with cookies and streams the bytes
@@ -7247,7 +7470,7 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
       // happens server-side (capped at 25s); the poster holds until the first bytes
       // arrive, and the <video> 'error' handler surfaces a failed resolve.
       const slug = state.items.get(id)?.slug;
-      if (!slug) { toast(t('toast.streamFail'), 'error'); closePlayer(true); return; }
+      if (!slug) { showMediaFailure(false); return; }
       if (nativeMediaFallback()) {
         playNativeProxy(v, slug, 'stream', play);
       } else {
@@ -7277,7 +7500,7 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
 // result as a normal image rather than navigating to an upstream post.
 function showNativeImage(slug: string, kind: 'stream' | 'file', alt: string, token: number): void {
   const invoke = window.__TAURI__?.core?.invoke;
-  if (!invoke) { toast(t('toast.streamFail'), 'error'); return; }
+  if (!invoke) { showMediaFailure(false); return; }
   void (invoke('stream_url', { slug, kind, height: 0 }) as Promise<string>)
     .then((url) => {
       if (!url) throw new Error('no proxy url');
@@ -7285,8 +7508,9 @@ function showNativeImage(slug: string, kind: 'stream' | 'file', alt: string, tok
     })
     .catch(() => {
       if (token !== imageToken) return;  // a later swipe already moved on
-      toast(t('toast.streamFail'), 'error');
-      closePlayer(true);
+      // The native proxy fetches over the same E2EE channel as everything else,
+      // so its failure is the client's failure to reach the backend.
+      showMediaFailure(true);
     });
 }
 
@@ -7302,20 +7526,27 @@ let imageToken = 0;
 // itself in the top-left corner on the way past. Decoding first means the
 // element never holds nothing: the old frame stays until the new one replaces
 // it in a single paint.
-function setPlayerImage(url: string, alt: string, token: number): void {
+function setPlayerImage(url: string, alt: string, token: number, local = false): void {
   if (token !== imageToken) return;
   const swap = (): void => {
     if (token !== imageToken) return;
+    clearMediaFailure(); // a retry that landed
     els.playerImage.alt = alt;
     els.playerImage.src = url;
+  };
+  // A still that never arrives is the case that used to fail silently: the <img>
+  // sat empty (or showed its alt text) and nothing said why. Report it through
+  // the same surface a failed video uses. `local` marks a copy read off this
+  // device — its failure says nothing about the server, so it must not.
+  const fail = (): void => {
+    if (token !== imageToken) return;
+    showMediaFailure(!local);
   };
   const pre = new Image();
   pre.src = url;
   // The bytes are in cache by the time we assign, so the swap costs no refetch.
-  // A failure swaps too: that is the path where the <img> error state (and the
-  // alt text with it) is the honest thing to show.
-  if (pre.decode) void pre.decode().then(swap, swap);
-  else { pre.onload = swap; pre.onerror = swap; }
+  if (pre.decode) void pre.decode().then(swap, fail);
+  else { pre.onload = swap; pre.onerror = fail; }
 }
 
 function openImage(id: number, cloud: boolean): void {
@@ -7323,6 +7554,8 @@ function openImage(id: number, cloud: boolean): void {
   if (!item?.slug) return;
   resetSwipe();
   resetZoom();  // a new picture opens at 1:1, never inheriting the last one's zoom
+  clearMediaFailure();
+  openedMedia = { id, cloud, image: true };
   const token = ++imageToken;
   const opening = els.player.classList.contains('hidden');
   // Only a still can be held over while the next one decodes. Coming from a
@@ -7353,7 +7586,11 @@ function openImage(id: number, cloud: boolean): void {
   // as video. Neither branch opens the source-post URL.
   const alt = item.title || 'Image';
   const local = localFileFor(item.slug);
-  if (local) setPlayerImage(local.url, alt, token);
+  if (local) setPlayerImage(local.url, alt, token, true);
+  // Same rule as video: with no device copy this needs the server, and the one
+  // global state already knows whether there is one. Stating it here is what
+  // stopped stills from opening the viewer only to fail into a black rectangle.
+  else if (isOffline()) showMediaFailure(false);
   else if (nativeMediaFallback()) showNativeImage(item.slug, cloud ? 'stream' : 'file', alt, token);
   else setPlayerImage(cloud ? streamUrl(item.slug) : fileUrl(item), alt, token);
 }
@@ -7618,6 +7855,8 @@ function closePlayer(pop: boolean): void {
   imageToken++;
   els.playerImage.removeAttribute('src');
   els.playerImage.alt = '';
+  clearMediaFailure();
+  openedMedia = null;
   delete els.player.dataset.kind;
   clearSubtitles();
   v.load();
@@ -7976,15 +8215,21 @@ window.addEventListener('keydown', (e) => {
 
 // The media itself failing to load (a cloud source the browser can't play — e.g.
 // an IP-bound upstream URL that resolved fine but won't stream) would otherwise
-// leave the player frozen on its poster. Surface it and close instead of hanging.
+// leave the player frozen on its poster. Report it in place — the player stays
+// open, which is the difference from the old toast-and-close: closing threw away
+// the fold the user was paging through to tell them about one clip.
 // Guarded on a live src attribute so closePlayer's own src teardown — which
-// clears the attribute before hiding — never trips a spurious toast.
+// clears the attribute before hiding — never trips a spurious report.
 els.playerVideo.addEventListener('error', () => {
   if (els.player.classList.contains('hidden')) return;
   if (!els.playerVideo.getAttribute('src')) return;
-  toast(t('toast.streamFail'), 'error');
-  closePlayer(true);
+  // MEDIA_ERR_NETWORK is the engine telling us the bytes stopped arriving — a
+  // link verdict. A decode/unsupported error is about the media, and must not
+  // put the whole client offline over one unplayable file.
+  const networkFailure = els.playerVideo.error?.code === MediaError.MEDIA_ERR_NETWORK;
+  showMediaFailure(networkFailure);
 });
+els.playerErrorRetry.addEventListener('click', () => { void retryMediaNow(); });
 
 // ---- Share dialog wiring --------------------------------------------------
 els.shareClose.addEventListener('click', closeShare);
@@ -8415,7 +8660,7 @@ document.addEventListener('i18n:changed', () => {
   renderSortMenu();   // ditto — labels come from t()
   renderArchiveRestore();
   renderAppPermissions();
-  setServerStatus(serverUp);
+  renderServerStatus();
   renderDlStats(); // re-localize the "N items · X GB" summary
   if (getToken()) loadItems(true);
   if (!els.websites.classList.contains('hidden')) loadWebsites();
@@ -8651,7 +8896,7 @@ renderLangSelect();
 renderFilterMenu();
 renderSortMenu();
 setSortIcon();
-setServerStatus(false);      // start red; SSE onopen flips it green when live
+renderServerStatus();        // red, but not "offline": nothing has answered yet
 const welcoming = needsWelcome();
 if (welcoming) openWelcome(); else void startApp();
 handleShareParam();
