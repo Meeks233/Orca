@@ -1,6 +1,6 @@
 {
   "name": "orca-userscript",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Orca userscript (Tampermonkey / Violentmonkey): submit videos to your self-hosted Orca over the same E2EE secure channel as the web UI, and download them straight from any video page.",
   "type": "module",
