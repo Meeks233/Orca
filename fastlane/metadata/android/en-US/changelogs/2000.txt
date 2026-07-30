@@ -1,0 +1,5 @@
+Two ways into the library, on a bottom nav: a flat Timeline of every item under day headings, and Lists, one card per collection. Cards is still there in Settings > Appearance.
+
+One offline state for the whole client, reported by a single amber bar and a failure surface inside the viewer — the player no longer closes on a dropped link. A page opened past the browser's connection limit now says so instead of sitting blank.
+
+Card actions collapse behind one overflow menu with named rows. Lifting the privacy blur is now momentary and re-arms after the app has been away. Optically centered launcher icon.
