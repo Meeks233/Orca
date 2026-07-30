@@ -3072,8 +3072,40 @@ els.blurToggle.addEventListener('click', () => {
   globalUnblur = !globalUnblur;
   syncBlurToggle();
   applyBlurToRows();
+  cancelPointerAway(); // a fresh decision restarts the pointer grace period
 });
 syncBlurToggle();
+
+// Desktop web: re-arm the blur once the mouse pointer has been off the page for
+// the grace period, not only when the tab goes hidden — another window on top (or
+// simply reading something else on the same screen) leaves the page visible, and
+// a lifted blur sitting there on a shared desktop is exactly what the toggle's
+// "the reveal is momentary" contract is meant to prevent. A plain timer is fine
+// here (unlike the background case) because the page keeps running.
+let pointerAwayTimer = 0;
+function cancelPointerAway(): void {
+  if (!pointerAwayTimer) return;
+  clearTimeout(pointerAwayTimer);
+  pointerAwayTimer = 0;
+}
+function armPointerAway(): void {
+  cancelPointerAway();
+  const secs = reblurAfter();
+  if (!globalUnblur || secs === Infinity) return;
+  pointerAwayTimer = window.setTimeout(() => {
+    pointerAwayTimer = 0;
+    if (!globalUnblur) return;
+    globalUnblur = false;
+    syncBlurToggle();
+    applyBlurToRows();
+  }, secs * 1000);
+}
+// Only where there's a real pointer to leave with: on touch the pointer is gone
+// after every tap, which would re-blur mid-use.
+if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+  document.documentElement.addEventListener('mouseleave', armPointerAway);
+  document.documentElement.addEventListener('mouseenter', cancelPointerAway);
+}
 // Re-arm the blur on the way back in. Stamped on the way OUT and measured on
 // return rather than run off a timer, because a backgrounded WebView is frozen —
 // a timer set before leaving may not fire until long after you're back.
@@ -3082,6 +3114,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { hiddenSince = Date.now(); return; }
   const away = hiddenSince ? (Date.now() - hiddenSince) / 1000 : 0;
   hiddenSince = 0;
+  cancelPointerAway(); // back on the page; the pointer countdown starts over
   if (!globalUnblur || away < reblurAfter()) return;
   globalUnblur = false;
   syncBlurToggle();
