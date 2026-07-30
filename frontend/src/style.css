@@ -2550,3 +2550,250 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-lg);
   box-shadow: 0 -4px 20px rgba(0,0,0,.2);
 }
+
+/* ==== Timeline layout, Lists route, bottom navigation ====================== */
+
+/* ---- Bottom navigation ----
+   Two DESTINATIONS, not two filters of one list, which is what earns them a bar
+   of their own rather than a segmented control in the toolbar. Docked at the
+   bottom because that is where a thumb is, and edge-to-edge because a floating
+   pill would compete with the two floating controls that already live down here
+   (.select-bar, .to-top).
+   It yields the slot to the batch bar: multi-select is modal to the rows on
+   screen, so navigating away mid-selection is not a thing to offer. */
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+body.selecting .bottom-nav { display: none; }
+.nav-btn {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px 0 7px;
+  min-height: 52px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color .15s ease;
+}
+.nav-btn svg { display: block; }
+.nav-btn.nav-on { color: var(--accent); }
+@media (hover: hover) { .nav-btn:hover { color: var(--text); } }
+.nav-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
+/* The nav occupies the bottom of the viewport, so everything that used to sit
+   there moves up by its height. One value, declared once. */
+:root { --nav-h: 52px; }
+body { padding-bottom: calc(24px + var(--nav-h) + env(safe-area-inset-bottom)); }
+.to-top { bottom: calc(14px + var(--nav-h) + env(safe-area-inset-bottom)); }
+/* The card layout has no second destination to navigate to — its playlists fold
+   inline, which is what the Lists route exists to replace. So the bar goes, and
+   with it the reserved strip at the bottom of the page: a permanent nav with one
+   reachable stop is just a band of wasted screen. */
+body[data-layout="card"] .bottom-nav { display: none; }
+body[data-layout="card"] { --nav-h: 0px; }
+
+/* On the collection index the controls row is the SEARCH row and nothing else:
+   filter, sort and multi-select are all questions about items, and there are no
+   items here — a lifecycle filter over a set of playlists narrows nothing. The
+   search field flexes into the space they leave. */
+body[data-route="lists"]:not(.in-collection) .controls .filter-group { display: none; }
+
+/* ---- The open list's header ----
+   Sits above the member grid rather than in the topbar: it belongs to this view,
+   and it leaves with it. */
+.collection-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.collection-meta { flex: 1 1 auto; min-width: 0; }
+.collection-title {
+  font-weight: 600;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.collection-sub { color: var(--muted); font-size: 12px; margin-top: 1px; }
+
+/* ---- Lists route: one card per collection ----
+   Deliberately the SAME cover the inline folds draw — stacked thumbnails, count
+   pill, play button — so a list looks like itself wherever it appears. Nothing
+   new is styled here beyond making the whole card a target. */
+.lists { gap: 10px; }
+.list-card { cursor: pointer; }
+@media (hover: hover) { .list-card:hover { border-color: var(--accent); } }
+
+/* ---- Timeline: the tiled grid ----
+   A dense square grid, because a library is browsed by SCANNING it: at 120px a
+   thumbnail is still recognisable, and the row that held one card now holds five.
+   Everything a card said in text (title, uploader, size, resolution, the action
+   row) is one tap away in the player, or one setting away in the card layout —
+   crushing it into a tile would make it unreadable in both. */
+.history.timeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(98px, 1fr));
+  gap: 3px;
+}
+@media (min-width: 560px) {
+  .history.timeline { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); }
+}
+
+/* Day headings. NOT sticky: the topbar already owns the one pinned row this
+   layout has (see the .topbar comment), and a second pinned strip on a phone
+   costs more than it explains. */
+.history.timeline .tl-day {
+  grid-column: 1 / -1;
+  list-style: none;
+  padding: 15px 2px 5px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  color: var(--text);
+}
+.history.timeline .tl-day:first-child { padding-top: 2px; }
+
+.item.tile {
+  position: relative;
+  display: block;
+  aspect-ratio: 1;
+  padding: 0;
+  gap: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+  animation: tile-in .24s ease both;
+}
+/* A tile arrives rather than appearing: with pages of ten loading as you scroll,
+   an instant swap of five new squares reads as a flicker. */
+@keyframes tile-in {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .item.tile { animation: none; }
+}
+/* The thumbnail block is the tile. It is the same markup a card uses (so play,
+   image zoom, the pending blur and the duration pill all still work) — only its
+   box changes: fill the cell instead of a fixed 120px landscape frame, and drop
+   the portrait special-case, since a square cell crops both the same way. */
+.item.tile .thumb-wrap,
+.item.tile .thumb-wrap.portrait {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  align-self: stretch;
+}
+.item.tile .thumb,
+.item.tile .thumb-wrap.portrait .thumb {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+/* Fade the image in over the skeleton once it has actually decoded. `.loaded` is
+   set by a delegated `load` listener — CSS cannot see an image's readiness, and
+   the alternative (no fade) means the skeleton and the photo swap in one frame,
+   which is the flicker the skeleton exists to prevent. Only <img> is targeted:
+   .thumb-empty is a div with no load event, and would stay invisible forever. */
+.item.tile img.thumb { background: transparent; opacity: 0; transition: opacity .22s ease; }
+.item.tile img.thumb.loaded { opacity: 1; }
+.tile-skel {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--text);
+}
+/* The badge and the bar are the elements the progress tick patches by class, so
+   they exist on a tile too — they just aren't what a tile reports WITH. */
+.item.tile > .badge,
+.item.tile > .progress { display: none; }
+.item.tile .dur { font-size: 10px; }
+.item.tile .play-badge { width: 22px; height: 22px; }
+
+/* ---- Blur bleed ----
+   `filter: blur()` samples what is OUTSIDE the element too, and outside an image
+   is transparent — so a blurred thumbnail fades out towards its own edges. On a
+   120px card thumb that is a soft corner nobody notices; on a full-bleed tile it
+   is a pale rim framing every square, which is what the loading blur looked like.
+   Overscale so the faded edge lands outside the tile, which already clips
+   (overflow: hidden). Covers both blurs a tile can carry — the privacy blur and
+   the while-it-loads pending blur — because the artefact is the filter's, not
+   either feature's. */
+.item.tile.blurred .thumb,
+.item.tile .thumb-wrap.media-pending .thumb { transform: scale(1.15); }
+/* …and nothing to scale once it is sharp again, so the peeked/revealed states go
+   back to the real framing rather than a silently cropped image. */
+.item.tile.blurred.peek .thumb,
+.item.tile.blurred.revealed .thumb { transform: none; }
+
+/* Selection: the accent ring goes on the tile and the image shrinks inside it,
+   the Photos gesture — a tinted background is invisible under a full-bleed
+   photo, which is what the card rule relies on. */
+.item.tile.selected { box-shadow: 0 0 0 3px var(--accent) inset; }
+.item.tile.selected .thumb-wrap { transform: scale(.88); transition: transform .12s ease; }
+
+/* ---- A tile's live overlay ----
+   Progress · cancel · failed · retry, and nothing else. A finished download needs
+   no tick (the thumbnail is the report), and an item that has not started needs no
+   start button (submitting it WAS the start), so no glyph here reports a state you
+   cannot act on. */
+.tile-live { position: absolute; top: 4px; right: 4px; z-index: 4; line-height: 0; }
+.tile-act {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: #fff;
+  background: rgba(0,0,0,.55);
+  border: none;
+  border-radius: var(--r-full);
+  cursor: pointer;
+}
+.tile-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The ring IS the button's frame — the progress-ring-that-stops-the-download
+   gesture, so one control both reports and cancels. */
+.tile-act .dl-ring { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* The shared ring is authored for the 14px storage gauge, where stroke-width 5 of
+   a 24 viewBox is a hairline. Blown up to 28px it becomes a doughnut, so the tile
+   thins it back to the same optical weight. */
+.tile-act .dl-ring circle { stroke-width: 2.6; }
+.tile-act .dl-ring-fill { stroke: var(--run); }
+.tile-act-glyph { display: inline-flex; }
+.tile-act-glyph svg { width: 12px; height: 12px; }
+/* Before the first percent arrives there is no arc to draw, and an empty circle
+   reads as a stalled download. A short arc sweeping round says "working" without
+   claiming a number it doesn't have. The dasharray is a presentation attribute,
+   so this overrides whatever the last paint stamped on it. */
+.tile-act.tile-indeterminate .dl-ring { animation: spin 1.1s linear infinite; }
+.tile-act.tile-indeterminate .dl-ring-fill { stroke-dasharray: 14 44; }
+.tile-retry { color: var(--accent); background: rgba(0,0,0,.62); }
+.tile-retry svg { width: 15px; height: 15px; }

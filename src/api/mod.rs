@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
     // clients may submit, but cannot read history or administer the server.
     let protected = Router::new()
         .route("/api/items", get(items::list))
+        .route("/api/collections", get(items::collections))
         .route("/api/items/:slug", get(items::get).delete(items::delete))
         .route("/api/items/:slug/retry", post(items::retry))
         .route("/api/items/:slug/pause", post(items::pause))

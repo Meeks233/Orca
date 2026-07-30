@@ -4,6 +4,11 @@
 import './i18n';
 import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, fetchMediaBytes, pushSessionToWorker, refreshSessionForWorker, TransportError } from './e2ee';
 import { getCachedThumb, putCachedThumb } from './thumbcache';
+// The userscript's download-progress maths, imported rather than reimplemented:
+// mapping yt-dlp's per-stream percent onto ONE monotonic ring is subtle (see the
+// "stuck at 95%" comment at its definition), and a second copy of that reasoning
+// living in the web UI is exactly how the two drift apart. One file, two clients.
+import { ringPercentForPhase } from '../../extension/src/lib/progress';
 
 type Params = Record<string, string | number>;
 
@@ -45,7 +50,21 @@ interface Item {
   playlist_key?: string | null;
   playlist_title?: string | null;
   playlist_pos?: number | null;
+  /// Unix seconds the item was submitted. What the timeline groups its days by.
+  created_at?: number;
   [k: string]: unknown;
+}
+
+/// One collection as GET /api/collections summarises it: a playlist, or a post
+/// whose media arrived as several entries. `key` is the same namespaced string
+/// `groupKeyOf` folds rows under, so the two views agree on identity.
+interface Collection {
+  key: string;
+  title?: string | null;
+  count: number;
+  total_filesize?: number | null;
+  latest_at?: number;
+  cover: Item;
 }
 
 // A single SSE progress tick.
@@ -369,6 +388,17 @@ const els = {
   history: byId('history'),
   empty: byId('empty'),
   loader: byId('infinite-loader'),
+  controls: byId('controls'),
+  submitBox: byId('submit-box'),
+  lists: byId('lists'),
+  listsEmpty: byId('lists-empty'),
+  collectionBar: byId('collection-bar'),
+  collectionBack: byId<HTMLButtonElement>('collection-back'),
+  collectionTitle: byId('collection-title'),
+  collectionSub: byId('collection-sub'),
+  collectionPlay: byId<HTMLButtonElement>('collection-play'),
+  navTimeline: byId<HTMLButtonElement>('nav-timeline'),
+  navLists: byId<HTMLButtonElement>('nav-lists'),
   welcome: byId('welcome'),
   welcomeServer: byId<HTMLInputElement>('welcome-server'),
   welcomeToken: byId<HTMLInputElement>('welcome-token'),
@@ -468,11 +498,62 @@ const state = {
   // The last tick per row. `phase`/`eta` ride along not for the fold aggregate but
   // because rowHtml can't reproduce them: they exist only in the statusline spans
   // SSE paints, so a row rebuilt mid-download needs them to repaint itself.
-  progress: new Map<number, { percent: number | null; speed: string; eta: string; phase: string; status: string; shown: number }>(),
+  // `ring`/`sawVideo` are the timeline tile's own progress read of the same tick:
+  // `shown` is the raw monotonic percent a linear bar wants, while the ring maps
+  // the video and audio passes onto contiguous bands so a two-stream download
+  // doesn't freeze the circle at the video pass's end (see ringPercentForPhase).
+  progress: new Map<number, { percent: number | null; speed: string; eta: string; phase: string; status: string; shown: number; ring: number; sawVideo: boolean }>(),
   // Folds the user has expanded, by key. Survives list resets (manual / 5-min
   // auto refresh) so a re-render restores the open/closed state.
   expandedGroups: new Set<string>(),
+  // The collection whose members the list is currently showing (a key from
+  // groupKeyOf / GET /api/collections), or null for the whole library. Set by the
+  // Lists route when a list is opened; narrows the query server-side.
+  collection: null as string | null,
 };
+
+// ---- Routes and layout ----------------------------------------------------
+// TWO views of the same library, and one stylistic choice inside the first:
+//
+//   • Timeline — every item, flat, newest first, grouped under a day heading.
+//     This is where playlists are DELIBERATELY not folded: a photo timeline that
+//     hides four of a post's five images behind a card isn't a timeline. Folds
+//     didn't disappear, they moved to their own route.
+//   • Lists — one card per collection (playlist, or a post whose media arrived as
+//     several entries), opening into that collection's members.
+//
+// The layout preference applies to the Timeline route only, and only changes how
+// a row is DRAWN: `timeline` is the tiled grid, `card` is the original full-width
+// card list (which keeps its folds — it is the view that always had them).
+//
+// The route rides in the hash so back/forward work, no server route is needed,
+// and the Android shell's back button (dismissTopLayer) needs no special case.
+type Route = 'timeline' | 'lists';
+type Layout = 'timeline' | 'card';
+
+const LAYOUT_KEY = 'orca.layout';
+function layoutPref(): Layout { return localStorage.getItem(LAYOUT_KEY) === 'card' ? 'card' : 'timeline'; }
+function setLayoutPref(v: Layout): void { localStorage.setItem(LAYOUT_KEY, v); }
+
+let route: Route = 'timeline';
+
+/// True when rows should render as timeline tiles rather than full cards: the
+/// Timeline route under the timeline layout, and any open collection (a list's
+/// contents are a grid whichever layout the library is browsed in).
+function tiled(): boolean {
+  return !!state.collection || (route === 'timeline' && layoutPref() === 'timeline');
+}
+
+/// Whether folds are drawn at all. A tiled view is flat by definition; the Lists
+/// route replaces folds with its own cards, so only the card layout keeps them.
+function foldsShown(): boolean { return !tiled() && !state.collection; }
+
+/// How much one lazy page is. Still "a little at a time" in both layouts — but a
+/// card is one row and a tile is a fifth of one, so ten tiles is two rows of grid
+/// and the top-up backstop would immediately ask for four more pages to fill the
+/// screen. Sizing the page to the layout keeps a first screenful at one request
+/// instead of five.
+function pageSize(): number { return tiled() ? 24 : PAGE_SIZE; }
 
 // The fold an item belongs to, or null for a standalone one. TWO things fold:
 //
@@ -1746,7 +1827,107 @@ function thumbHtml(item: Item, thumb: string, dur: string): string {
   return `<a class="thumb-wrap${pending}" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${overlays}</a>`;
 }
 
+// ---- Timeline tiles -------------------------------------------------------
+// The tiled row: the SAME thumbnail block a card uses (thumbHtml — so play, image
+// zoom, the pending blur, the duration pill and the privacy blur all keep working
+// with no second implementation), sized by CSS into a grid cell, plus the one
+// overlay a card can't carry in a corner.
+//
+// What a tile deliberately does NOT show is any glyph for a state you can't act
+// on. A finished download needs no tick — the thumbnail IS the report that it
+// worked — and a fresh item needs no "start" button, because it started when it
+// was submitted. So the overlay is exactly the four things that are live or
+// actionable: progress, cancel, failed, retry. Everything else about the item
+// (title, size, resolution, share, save) lives one tap away in the player and in
+// the card layout, rather than being crushed into a 120px square.
+
+// Hold the ring just under full while bytes are still moving: a closed circle is
+// the one shape that means "done", and a download that sits at 100% for the whole
+// merge/postprocess pass spends that time looking finished and stuck. Same reason
+// (and same value) as the userscript's cap.
+const TILE_RING_CAP = 97;
+
+// A skeleton for the tile whose thumbnail hasn't decoded yet. The pulse is a real
+// SVG <animate>, not a CSS keyframe, so it runs even where the tile is painted
+// before the stylesheet's animations settle — and it needs no per-tile class
+// bookkeeping to start or stop, because the loaded image simply covers it.
+const TILE_SKELETON = `<svg class="tile-skel" viewBox="0 0 8 8" preserveAspectRatio="none" aria-hidden="true">`
+  + `<rect width="8" height="8" fill="currentColor" opacity=".18">`
+  + `<animate attributeName="opacity" values=".10;.26;.10" dur="1.4s" repeatCount="indefinite"/>`
+  + `</rect></svg>`;
+
+/// The 0..1 ring fraction for an item, from the last tick we saw. A job that has
+/// started but not reported a percent yet reads 0, which the CSS renders as the
+/// indeterminate sweep rather than an empty circle.
+function tileRingFrac(id: number): number {
+  return (state.progress.get(id)?.ring || 0) / 100;
+}
+
+/// The tile's live overlay. One element, one job, and nothing when the item is at
+/// rest and succeeded.
+function tileLiveHtml(item: Item): string {
+  const live = state.progress.get(item.id)?.status || item.status;
+  // Running, queued, held, or an upgrade job against an already-finished item:
+  // the ring reports it and the whole control cancels it — the progress-ring-that-
+  // is-a-stop-button every download manager converged on.
+  if (live === 'queued' || live === 'running' || live === 'paused' || resJobLive(item)) {
+    const label = esc(t('item.cancel'));
+    const frac = tileRingFrac(item.id);
+    return `<button class="tile-act tile-cancel${frac > 0 ? '' : ' tile-indeterminate'}" data-act="cancel" data-id="${item.id}"`
+      + ` aria-label="${label}" title="${label}">${ringSvg(frac)}`
+      + `<span class="tile-act-glyph">${CANCEL_SVG}</span></button>`;
+  }
+  if (live === 'failed' || live === 'canceled') {
+    const label = esc(t('item.retry'));
+    return `<button class="tile-act tile-retry" data-act="retry" data-id="${item.id}"`
+      + ` aria-label="${label}" title="${label}">${RETRY_SVG}</button>`;
+  }
+  return '';
+}
+
+/// Repaint just the overlay of an already-rendered tile. Called on every tick, so
+/// it takes the cheap path when only the ring's fill has moved: rewriting the
+/// button's markup 30 times a download would restart its transitions and drop the
+/// focus ring mid-interaction.
+function paintTileLive(li: HTMLElement, item: Item): void {
+  const host = li.querySelector('.tile-live');
+  if (!host) return;
+  const wanted = tileLiveHtml(item);
+  const isRing = wanted.includes('tile-cancel');
+  const fill = host.querySelector<SVGCircleElement>('.tile-cancel .dl-ring-fill');
+  if (isRing && fill) {
+    const frac = tileRingFrac(item.id);
+    const filled = Math.max(0, Math.min(1, frac)) * RING_C;
+    fill.setAttribute('stroke-dasharray', `${filled.toFixed(2)} ${RING_C.toFixed(2)}`);
+    // The ring only reads as progress once there is progress to read; before that
+    // the class hands it to the indeterminate sweep in CSS.
+    host.firstElementChild?.classList.toggle('tile-indeterminate', frac <= 0);
+    return;
+  }
+  if (host.innerHTML !== wanted) host.innerHTML = wanted;
+}
+
+/// A tile. `.item` is kept as a class so multi-select, the privacy blur, the
+/// selection highlight and the delegated click handler all treat it as the row it
+/// is; `.tile` is what the stylesheet keys the grid cell off.
+function tileHtml(item: Item): string {
+  const durShort = item.duration && item.duration < 60 ? ' dur-short' : '';
+  const dur = item.duration ? `<span class="dur${durShort}">${esc(fmtDuration(item.duration))}</span>` : '';
+  // The badge and the bar are invisible here (CSS), but they are the elements
+  // patchRow patches by class — keeping them means the tick path has no idea
+  // which layout it is updating, and there is one progress pipeline, not two.
+  return `${TILE_SKELETON}${thumbHtml(item, thumbMarkup(item), dur)}
+    <div class="tile-live">${tileLiveHtml(item)}</div>
+    <span class="badge badge-${esc(item.status)}">${esc(statusLabel(item.status))}</span>
+    <div class="progress hidden"><div class="progress-fill" style="width:0%"></div></div>`;
+}
+
 function rowHtml(item: Item): string {
+  if (tiled()) return tileHtml(item);
+  return cardHtml(item);
+}
+
+function cardHtml(item: Item): string {
   const thumb = thumbMarkup(item);
   const compactPostMedia = isCompactSocialMedia(item);
   // Clips under a minute are tagged so CSS can drop the pill on portrait thumbs,
@@ -1820,11 +2001,14 @@ const rowSig = new WeakMap<HTMLLIElement, string>();
 
 function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
   state.items.set(item.id, item);
-  const gkey = groupKeyOf(item);
+  // A tiled view is flat: the fold this item belongs to is either irrelevant here
+  // (the timeline shows every entry in its own right) or is the very thing the
+  // route is already standing inside (an opened collection).
+  const gkey = foldsShown() ? groupKeyOf(item) : null;
   let li = state.rows.get(item.id);
   if (!li) {
     li = document.createElement('li');
-    li.className = 'item';
+    li.className = tiled() ? 'item tile' : 'item';
     li.dataset.id = String(item.id);
     // Preserve the visual selection state across a full re-render of the row.
     if (state.selected.has(item.id)) li.classList.add('selected');
@@ -1864,12 +2048,112 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
   queueLocalScan(item);
   paintLocalMark(item);
   if (gkey) updateGroupHeader(gkey);
+  // Timeline tiles are the only rows whose day the list itself has to declare, so
+  // a fresh arrival is where a new day heading gets its chance to appear.
+  if (tiled()) queueDayHeaderSync();
   // This is the only place item statuses enter state.items, so it's where the
   // global pause/resume button learns there's now something running to pause.
   // (Whether anything is PAUSED comes from the server — see renderQueueToggle.)
   renderQueueToggle();
   els.empty.classList.add('hidden');
   return li;
+}
+
+// ---- Timeline day headings ------------------------------------------------
+// The one structural thing a timeline has that a card list doesn't: the rows are
+// broken into days, with a sticky heading over each run. That's the shape every
+// photo timeline uses, because "when" is the only axis a library this size can be
+// navigated by — and it's why the tiles are worth flattening playlists for.
+//
+// The headings are RECONCILED rather than rendered: they're derived from the rows
+// around them, so a lazily-loaded page, a prepended new download, or a deleted row
+// can't leave a stale or duplicate heading behind. One O(n) walk per batch, folded
+// into a microtask so a page of ten upserts costs one pass instead of ten.
+
+const dayKeyOfDate = (d: Date): string => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+function dayKeyOf(item: Item): string {
+  return dayKeyOfDate(new Date((item.created_at || 0) * 1000));
+}
+
+/// "Today" / "Yesterday" / a localized date — the same three-tier labelling every
+/// timeline uses, because a heading that says today's date tells you nothing.
+function dayLabelOf(item: Item): string {
+  const at = (item.created_at || 0) * 1000;
+  if (!at) return t('timeline.unknownDay');
+  const day = new Date(at);
+  const key = dayKeyOf(item);
+  const cursor = new Date();
+  if (key === dayKeyOfDate(cursor)) return t('timeline.today');
+  // Stepped by calendar day, not by 86 400 seconds: a DST boundary makes those two
+  // different, and the wrong one labels yesterday's downloads "Today".
+  cursor.setDate(cursor.getDate() - 1);
+  if (key === dayKeyOfDate(cursor)) return t('timeline.yesterday');
+  // Drop the year for days inside the current one, keep it for older history —
+  // the convention Photos/Immich follow, and it keeps the heading short.
+  const sameYear = day.getFullYear() === new Date().getFullYear();
+  try {
+    return new Intl.DateTimeFormat(window.i18n.currentLang(), {
+      month: 'long', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }),
+    }).format(day);
+  } catch (_) {
+    return day.toDateString();
+  }
+}
+
+function dayHeaderEl(item: Item): HTMLLIElement {
+  const li = document.createElement('li');
+  li.className = 'tl-day';
+  li.dataset.day = dayKeyOf(item);
+  const span = document.createElement('span');
+  span.textContent = dayLabelOf(item);
+  li.appendChild(span);
+  return li;
+}
+
+let dayHeaderSyncQueued = false;
+function queueDayHeaderSync(): void {
+  if (dayHeaderSyncQueued) return;
+  dayHeaderSyncQueued = true;
+  void Promise.resolve().then(() => { dayHeaderSyncQueued = false; syncDayHeaders(); });
+}
+
+function syncDayHeaders(): void {
+  // An opened collection is ONE thing, downloaded in one go — slicing it into days
+  // would be noise. Only the library timeline gets headings.
+  if (!tiled() || state.collection) {
+    els.history.querySelectorAll('.tl-day').forEach((h) => h.remove());
+    return;
+  }
+  let current = '';
+  let node = els.history.firstElementChild;
+  while (node) {
+    const next = node.nextElementSibling;
+    const el = node as HTMLElement;
+    if (el.classList.contains('tl-day')) {
+      // A heading is only earned by the row that follows it opening a new day.
+      const after = next as HTMLElement | null;
+      const item = after?.classList.contains('item') ? state.items.get(Number(after.dataset.id)) : undefined;
+      const key = item ? dayKeyOf(item) : '';
+      if (!key || key === current) {
+        el.remove();
+      } else {
+        current = key;
+        el.dataset.day = key;
+        const span = el.firstElementChild;
+        if (span) span.textContent = dayLabelOf(item!);
+      }
+    } else if (el.classList.contains('item')) {
+      const item = state.items.get(Number(el.dataset.id));
+      if (item) {
+        const key = dayKeyOf(item);
+        if (key !== current) {
+          current = key;
+          els.history.insertBefore(dayHeaderEl(item), el);
+        }
+      }
+    }
+    node = next;
+  }
 }
 
 // ---- Playlist folds (multi-video posts) -----------------------------------
@@ -2197,14 +2481,23 @@ function patchRow(ev: ProgressEv): void {
   const prevP = state.progress.get(ev.id);
   let shown = prevP ? prevP.shown : 0;
   const cur = ev.percent == null ? null : Math.max(0, Math.min(100, ev.percent));
-  if (ev.status === 'queued' || (ev.status === 'running' && ev.percent == null)) shown = 0;
-  else if (cur != null) shown = Math.max(shown, cur);
-  if (ev.status === 'completed') shown = 100;
+  // The tile's ring reads the same tick through the userscript's phase bands, so a
+  // `bv*+ba` job climbs across the video→audio handover instead of parking at the
+  // end of the video pass. Monotonic for the same reason `shown` is.
+  let ring = prevP ? prevP.ring : 0;
+  let sawVideo = (prevP ? prevP.sawVideo : false) || ev.phase === 'video';
+  const restart = ev.status === 'queued' || (ev.status === 'running' && ev.percent == null);
+  if (restart) { shown = 0; ring = 0; sawVideo = ev.phase === 'video'; }
+  else if (cur != null) {
+    shown = Math.max(shown, cur);
+    ring = Math.max(ring, ringPercentForPhase(cur, ev.phase, sawVideo, TILE_RING_CAP));
+  }
+  if (ev.status === 'completed') { shown = 100; ring = 100; }
   // Record the latest tick so a playlist fold can aggregate progress + speed —
   // and so a rebuilt row can restore the live spans (see paintLiveFields).
   state.progress.set(ev.id, {
     percent: ev.percent ?? null, speed: ev.speed || '', eta: ev.eta || '',
-    phase: ev.phase || '', status: ev.status, shown,
+    phase: ev.phase || '', status: ev.status, shown, ring, sawVideo,
   });
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
@@ -2301,8 +2594,12 @@ function patchRow(ev: ProgressEv): void {
   }
   // Roll this tick up into the fold header (total progress + live speed).
   const it = state.items.get(ev.id);
-  const gk = it ? groupKeyOf(it) : null;
+  const gk = it && foldsShown() ? groupKeyOf(it) : null;
   if (gk) updateGroupProgress(gk);
+  // A tile reports the same tick as a ring instead of a bar. Last, so a terminal
+  // status has already landed in state.items above and the overlay swaps straight
+  // from the cancel ring to Retry rather than waiting on the row refetch.
+  if (it && li.classList.contains('tile')) paintTileLive(li, it);
 }
 
 // ---- Status filter --------------------------------------------------------
@@ -2418,6 +2715,364 @@ function applySortParams(params: URLSearchParams): void {
   if (state.sortReverse) params.set('reverse', 'true');
 }
 
+// ---- Lists route -----------------------------------------------------------
+// A collection is a partition of the history, not a row in it, so the paged
+// item list can't answer "which lists do I have" — walking the whole library to
+// find members that belong together is exactly the work the backend does in one
+// windowed query (GET /api/collections). Each summary carries its cover member
+// verbatim, which is what lets a list card render its thumbnail through the same
+// thumbMarkup() a card and a tile use.
+
+/// Narrow an /api/items page to the open collection's members. Both kinds are
+/// answered server-side (see ListQuery::playlist / ::post), and the page is asked
+/// for in ASCENDING time — a list is downloaded front to back, so oldest-first is
+/// the closest honest stand-in for its own running order.
+function applyCollectionParams(params: URLSearchParams): void {
+  const key = state.collection;
+  if (!key) return;
+  if (key.startsWith('list:')) params.set('playlist', key.slice('list:'.length));
+  else if (key.startsWith('post:')) params.set('post', key.slice('post:'.length));
+  params.set('reverse', 'true');
+}
+
+let collectionsCache: Collection[] = [];
+
+/// One list card: the stacked-thumbnail cover the folds already use, so a list
+/// looks the same wherever it is drawn, plus what a list is actually asked about —
+/// its name, how much is in it, and Play all.
+function collectionCardHtml(c: Collection): string {
+  const cover = c.cover;
+  // A real playlist carries its own name; a multi-media post has none, so the card
+  // borrows the cover's title with the "#1" disambiguation suffix stripped — the
+  // same fallback updateGroupHeader uses.
+  const title = c.title || (cover.title || '').replace(/\s*#\d+\s*$/, '');
+  const size = c.total_filesize ? ` · ${fmtSize(c.total_filesize)}` : '';
+  const play = isPlayable(cover)
+    ? `<button class="play-badge group-play" data-act="play-collection" aria-label="${esc(t('group.playAll'))}" title="${esc(t('group.playAll'))}">${PLAY_ICON}</button>`
+    : '';
+  // The stack behind the cover says "there is more in here" without a second
+  // request for the members: one blurred copy of the cover per extra layer, capped
+  // at two, exactly as the fold header stacks real member thumbnails.
+  const layers = Math.min(c.count - 1, 2);
+  const stack = Array.from({ length: layers }, (_v, i) =>
+    `<span class="group-stack group-stack-${layers - i}">${thumbMarkup(cover)}</span>`).join('');
+  // A `.group-card` wrapping a `.group-head`, exactly like an inline fold — not an
+  // `.item` that happens to hold fold-shaped markup. That structure is the whole
+  // point: every fold rule then applies verbatim, including the PRIVACY BLUR, which
+  // the fold blurs on the `.group-visuals` WRAPPER. Blurring the layers
+  // individually (which is what `.item.blurred .thumb` did here) blurs the stack's
+  // own blur(2px) a second time — the double blur that reads as a smeared halo and
+  // that dropping the eye-off scrim already fixed once.
+  //
+  // `collapsed` is not cosmetic: without it the fold rules treat the card as an
+  // OPEN fold, which squares its bottom corners, rotates the chevron, and lifts the
+  // blur (opening a fold is consent to see it — clicking through to a list is not).
+  return `<li class="group-card list-card collapsed" data-collection="${esc(c.key)}">
+      <div class="group-head${isItemBlurred(cover) ? ' blurred' : ''}">
+        <div class="thumb-wrap group-thumb">
+          <span class="group-visuals">${stack}${thumbMarkup(cover)}</span>
+          <span class="group-count">${c.count}</span>
+          ${play}
+        </div>
+        <div class="group-info">
+          <div class="title">${sourceLogoHtml(cover)}${titleTextHtml(title)}</div>
+          <div class="group-sub">${esc(t('group.count', { n: c.count }))}${esc(size)}</div>
+        </div>
+        <div class="group-side">
+          <svg class="group-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </div>
+      </div>
+    </li>`;
+}
+
+/// The collections the search box leaves standing. Matched on the name the card
+/// actually shows (a post borrows its cover's title), so what you type is matched
+/// against what you can read.
+function filteredCollections(): Collection[] {
+  const q = state.q.toLowerCase();
+  if (!q) return collectionsCache;
+  return collectionsCache.filter((c) => {
+    const title = c.title || (c.cover.title || '').replace(/\s*#\d+\s*$/, '');
+    return title.toLowerCase().includes(q) || (c.cover.uploader || '').toLowerCase().includes(q);
+  });
+}
+
+function renderCollections(): void {
+  const shown = filteredCollections();
+  els.lists.innerHTML = shown.map(collectionCardHtml).join('');
+  hydrateThumbs(els.lists);
+  // Only the index can be empty. Guarding on the route matters because this also
+  // runs on a language change, and without it switching language while browsing
+  // the timeline would raise the Lists route's empty notice over it.
+  const onIndex = route === 'lists' && !state.collection;
+  els.listsEmpty.classList.toggle('hidden', !onIndex || shown.length > 0);
+}
+
+let collectionsLoaded = false;
+async function loadCollections(): Promise<void> {
+  try {
+    const res = await apiFetch('/api/collections');
+    if (!res.ok) { toast(t('toast.loadHistoryFail'), 'error'); return; }
+    const data = await res.json();
+    collectionsCache = (data.collections || []) as Collection[];
+    collectionsLoaded = true;
+    renderCollections();
+    // A list opened straight from a URL has no summary to name itself with until
+    // this lands.
+    renderCollectionBar();
+  } catch (e) {
+    reportRequestError(e);
+  }
+}
+
+/// Every row currently loaded in the list, in the order it is shown. In an open
+/// collection that is its membership; in the timeline it is the timeline itself.
+function loadedRows(): Item[] {
+  return [...els.history.children]
+    .filter((el) => (el as HTMLElement).classList.contains('item'))
+    .map((el) => state.items.get(Number((el as HTMLElement).dataset.id)))
+    .filter((it): it is Item => !!it);
+}
+
+/// Play the WHOLE list, not the part of it that has scrolled in. The grid is paged,
+/// so the rows on screen are a prefix of the collection — queueing those would make
+/// "Play all" mean "play the first two dozen", which is a lie a user only discovers
+/// when the queue loops early. One bounded request (the same 200-entry cap a
+/// playlist submit has) buys the honest answer.
+async function playCollection(): Promise<void> {
+  const key = state.collection;
+  if (!key) return;
+  let items = loadedRows();
+  // Already whole — the last page has been paged in — so don't spend a request.
+  if (state.cursor != null) {
+    const params = new URLSearchParams();
+    applyCollectionParams(params);
+    params.set('limit', '200');
+    try {
+      const res = await apiFetch('/api/items?' + params.toString());
+      if (res.ok) {
+        const data = await res.json();
+        const fetched = (data.items || []) as Item[];
+        // The rows may not all be rendered, so the player needs them in state.items.
+        fetched.forEach((it) => { if (!state.items.has(it.id)) state.items.set(it.id, it); });
+        if (fetched.length) items = fetched;
+      }
+    } catch (e) {
+      reportRequestError(e); // fall through and play what is loaded
+    }
+    if (state.collection !== key) return; // navigated away while fetching
+  }
+  const playable = items.filter(isPlayable);
+  if (!playable.length) { toast(t('toast.noDownloadable'), 'info'); return; }
+  startPlayQueue(playable);
+}
+
+/// The open collection's own header: its name, its size, and the one action a list
+/// exists for. Rendered from the cached summary so opening a list costs exactly the
+/// one members request.
+function renderCollectionBar(): void {
+  const key = state.collection;
+  els.collectionBar.classList.toggle('hidden', !key);
+  if (!key) return;
+  const c = collectionsCache.find((entry) => entry.key === key);
+  const cover = c?.cover;
+  const title = c?.title || (cover?.title || '').replace(/\s*#\d+\s*$/, '') || t('nav.lists');
+  els.collectionTitle.textContent = title;
+  els.collectionSub.textContent = c ? t('group.count', { n: c.count }) : '';
+}
+
+function openCollection(key: string): void { goRoute('lists', key); }
+function closeCollection(): void { if (state.collection) goRoute('lists', null); }
+
+// ---- Router ----------------------------------------------------------------
+// Two bottom-nav destinations and one nested view (an open list), addressed by
+// hash: `#/timeline`, `#/lists`, `#/lists/<key>`. A hash needs no server route,
+// survives a reload, and — because it is real history — Back means "up one level"
+// for free in the browser.
+//
+// The native shell is the exception: there, Back is delivered as a popstate that
+// the app already spends on peeling open layers (see dismissTopLayer), so a route
+// change REPLACES rather than pushes, and the router registers itself as the
+// outermost layer instead of competing with that mechanism for history entries.
+
+function hashRoute(): { route: Route; collection: string | null } {
+  const raw = location.hash.replace(/^#\/?/, '');
+  if (!raw.startsWith('lists')) return { route: 'timeline', collection: null };
+  const rest = raw.slice('lists'.length).replace(/^\//, '');
+  let key: string | null = null;
+  if (rest) {
+    try { key = decodeURIComponent(rest); } catch (_) { key = null; }
+  }
+  return { route: 'lists', collection: key };
+}
+
+function routeHash(next: Route, collection: string | null): string {
+  if (next !== 'lists') return '#/timeline';
+  return collection ? '#/lists/' + encodeURIComponent(collection) : '#/lists';
+}
+
+/// Navigate. `deferHistory` is for the one caller that is ALREADY inside a
+/// popstate — the Android Back peel.
+///
+/// Back on Android is a history entry the app spends (see the sentinel below),
+/// and writing to history from inside the popstate that consumed it loses the
+/// `pushState` that re-arms it: the app then has no entry left, so the next Back
+/// reaches the Activity and finishes it. That is a Back that quits from the list
+/// index with no warning. So the peel updates the view synchronously and lets the
+/// URL catch up on the next task, after the sentinel has been re-armed — the URL
+/// is only read on boot, so a tick of staleness costs nothing.
+function goRoute(next: Route, collection: string | null, deferHistory = false): void {
+  const hash = routeHash(next, collection);
+  const writeUrl = (): void => {
+    if (location.hash === hash) return;
+    if (isNativeApp) history.replaceState(history.state, '', hash);
+    else history.pushState(null, '', hash);
+  };
+  if (deferHistory) setTimeout(writeUrl, 0);
+  else writeUrl();
+  // Passed explicitly rather than re-read from the hash: with the write deferred
+  // the URL still names the view we are leaving.
+  applyRoute(false, { route: next, collection });
+}
+
+/// Bring the DOM in line with the hash. Idempotent, so it is safe to call from
+/// boot, from a nav tap, from popstate, and from the layout picker.
+function applyRoute(initial = false, forced?: { route: Route; collection: string | null }): void {
+  let target = forced ?? hashRoute();
+  // The card layout has no bottom nav (its folds ARE the Lists route, inline), so
+  // it has no way to reach or leave a second destination. Rather than leave the
+  // Lists route standing with no way back to it, the layout owns the route: pick
+  // Cards and you are on the timeline, whatever the hash last said.
+  if (layoutPref() === 'card' && target.route !== 'timeline') {
+    target = { route: 'timeline', collection: null };
+    history.replaceState(history.state, '', routeHash('timeline', null));
+  }
+  const changed = !initial && (target.route !== route || target.collection !== state.collection);
+  route = target.route;
+  state.collection = target.collection;
+  // The library list serves the Timeline route AND an open list; the collection
+  // index replaces it only at the top level of Lists.
+  const showItems = route === 'timeline' || !!state.collection;
+  document.body.dataset.route = route;
+  document.body.dataset.layout = layoutPref();
+  document.body.classList.toggle('in-collection', !!state.collection);
+  els.history.classList.toggle('timeline', tiled());
+  els.history.classList.toggle('hidden', !showItems);
+  els.loader.classList.toggle('hidden', !showItems || state.cursor == null);
+  els.lists.classList.toggle('hidden', showItems);
+  els.listsEmpty.classList.add('hidden'); // renderCollections decides
+  // The top of a browsing route is for FINDING things, not adding them. The
+  // submit box was pinned above every view spending a permanent block of screen
+  // on a control you touch once per download, while the thing you actually reach
+  // for while browsing — search — sat below it. Hiding the box promotes the
+  // existing controls row into that slot; nothing moves, nothing is rebuilt.
+  // (Submitting still arrives the ways it mostly already did: the share target,
+  // the clipboard watcher, and the userscript.)
+  els.submitBox.classList.add('hidden');
+  els.controls.classList.remove('hidden');
+  renderCollectionBar();
+  renderNav();
+  if (!changed) return;
+  // Selection is scoped to the view it was made in; carrying it across a route
+  // would leave a batch bar acting on rows that are no longer on screen.
+  if (state.selectMode) exitSelectMode();
+  if (showItems) void loadItems(true);
+  else { els.empty.classList.add('hidden'); void loadCollections(); }
+  // A list reached straight from a URL (a reload, a shared link) has no summary to
+  // take its name and count from until the index has been fetched once.
+  if (state.collection && !collectionsLoaded) void loadCollections();
+}
+
+function renderNav(): void {
+  const mark = (btn: HTMLElement, on: boolean): void => {
+    btn.classList.toggle('nav-on', on);
+    // `aria-current="false"` is not a value the attribute has — absent is how you
+    // say "not the current page".
+    if (on) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
+  };
+  mark(els.navTimeline, route === 'timeline');
+  mark(els.navLists, route === 'lists');
+}
+
+els.navTimeline.addEventListener('click', () => goRoute('timeline', null));
+// Tapping Lists while already inside a list goes up to the index — the same
+// "tap the active tab to pop to root" gesture every tab bar has.
+els.navLists.addEventListener('click', () => goRoute('lists', null));
+els.collectionBack.addEventListener('click', closeCollection);
+els.collectionPlay.addEventListener('click', () => void playCollection());
+
+// Set when a list was opened by its Play button: the queue starts as soon as the
+// members land, since the click that asked for it had none to start from.
+let pendingCollectionPlay = false;
+
+// The collection index's own cards: open one, or play it whole from its cover.
+els.lists.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+  const card = target.closest('.list-card') as HTMLElement | null;
+  if (!card) return;
+  const key = card.dataset.collection;
+  if (!key) return;
+  if (target.closest('[data-act="play-collection"]')) {
+    e.preventDefault();
+    // Play needs the members, which only the item query has — open the list and
+    // let its first page start the queue.
+    openCollection(key);
+    pendingCollectionPlay = true;
+    return;
+  }
+  // Same tap-to-peek contract a blurred card has: on a device without hover the
+  // first tap on the blurred cover reveals it rather than acting. Only the cover —
+  // the play button is sharp already and keeps acting on the first press.
+  if (!canHover) {
+    const head = target.closest('.group-head.blurred:not(.revealed)') as HTMLElement | null;
+    if (head && !target.closest(CARD_CONTROLS)) { e.preventDefault(); revealBlurred(head); return; }
+  }
+  openCollection(key);
+});
+
+// Back/forward in a BROWSER: the hash is the source of truth, so re-derive the
+// view from it. (`initial` stays false here — a route change from history must
+// load.)
+//
+// Deliberately not installed in the native app. There, Back is not navigation —
+// it is a single sentinel history entry the app spends on peeling one layer
+// (see dismissTopLayer), and route changes REPLACE that entry rather than adding
+// to it. So the entry a Back pops is the pre-sentinel one, whose URL predates
+// every route change ever made: deriving the view from it lands on the timeline
+// no matter which list you were in. Worse, it did so BEFORE dismissTopLayer ran,
+// which then found nothing open and armed the press-again-to-exit guard — "Back
+// inside a list quits the app". The native side peels routes in dismissTopLayer,
+// where the rest of its layers already live.
+if (!isNativeApp) window.addEventListener('popstate', () => applyRoute());
+
+/// The layout picker, applied on the spot like Theme and Language: it changes how
+/// every row is drawn, so the list is rebuilt rather than patched.
+function setLayout(next: Layout): void {
+  if (layoutPref() === next) return;
+  setLayoutPref(next);
+  document.body.dataset.layout = next;
+  // Picking Cards while inside Lists has to land somewhere reachable, and
+  // applyRoute is the one place that decides where. It reloads the list too, so
+  // don't also do it here — that would be two fetches for one choice.
+  if (next === 'card' && route !== 'timeline') { applyRoute(); return; }
+  els.history.classList.toggle('timeline', tiled());
+  if (getToken()) void loadItems(true);
+}
+
+function renderLayoutPicker(): void {
+  const pref = layoutPref();
+  document.querySelectorAll<HTMLInputElement>('input[name="layout-pref"]').forEach((r) => {
+    r.checked = r.value === pref;
+  });
+}
+
+document.querySelectorAll<HTMLInputElement>('input[name="layout-pref"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    if (radio.checked) setLayout(radio.value === 'card' ? 'card' : 'timeline');
+  });
+});
+
 // The button's icon flips with the direction, and it lights up (like the funnel)
 // whenever the order isn't the default newest-first — the at-a-glance "this list
 // isn't in its usual order".
@@ -2494,14 +3149,14 @@ const CACHE_KEY = 'orca_items_cache';
 const CACHE_VER = 1;
 
 function isDefaultView(): boolean {
-  return !state.q && !state.filter && state.sort === 'time' && !state.sortReverse;
+  return !state.q && !state.filter && !state.collection && state.sort === 'time' && !state.sortReverse;
 }
 
 function cacheFirstPage(items: Item[]): void {
   if (!isDefaultView()) return;
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify({
-      v: CACHE_VER, base: apiBase(), items: items.slice(0, PAGE_SIZE),
+      v: CACHE_VER, base: apiBase(), items: items.slice(0, pageSize()),
     }));
   } catch (_) {
     // Quota or private mode. The cache is an optimisation with a working
@@ -2556,8 +3211,9 @@ async function loadItems(reset?: boolean): Promise<void> {
   const params = new URLSearchParams();
   if (state.q) params.set('q', state.q);
   applyFilterParams(params);
-  applySortParams(params);
-  params.set('limit', String(PAGE_SIZE));
+  if (state.collection) applyCollectionParams(params);
+  else applySortParams(params);
+  params.set('limit', String(pageSize()));
   if (!reset && state.cursor != null) params.set('before_id', String(state.cursor));
   const gen = baseGeneration;
   try {
@@ -2581,6 +3237,7 @@ async function loadItems(reset?: boolean): Promise<void> {
     }
     if (firstPage) cacheFirstPage(data.items || []);
     (data.items || []).forEach((it: Item) => upsertRow(it, false));
+    syncDayHeaders();
     state.cursor = data.next_cursor;
     // Keep the spinner mounted (not display:none) while more pages exist so the
     // IntersectionObserver can see it re-enter the viewport for the next page.
@@ -2589,6 +3246,12 @@ async function loadItems(reset?: boolean): Promise<void> {
     els.empty.classList.toggle('hidden', !isEmpty);
     pageRetryBlockedUntil = 0; // a good page clears any pagination backoff
     if (reset) void maybeOpenPendingPlay();
+    // A list opened by its Play button has nothing to play until its members
+    // arrive; this is that moment.
+    if (pendingCollectionPlay && state.collection && firstPage) {
+      pendingCollectionPlay = false;
+      void playCollection();
+    }
   } catch (e) {
     reportRequestError(e);
     if (!isUnauthorized(e)) pageRetryBlockedUntil = Date.now() + PAGE_RETRY_COOLDOWN_MS;
@@ -3051,6 +3714,14 @@ function applyBlurToRows(): void {
   // sweep. Their source URL rides a data attribute purely so this can recompute.
   document.querySelectorAll<HTMLElement>('.prep-card[data-url]').forEach((card) => {
     card.classList.toggle('blurred', urlIsBlurred(card.dataset.url));
+  });
+  // List cards live outside state.rows (they stand for collections, not rows), so
+  // the sweep has to reach them too — otherwise lifting the blur cleared the
+  // timeline and left the Lists route still masked.
+  els.lists.querySelectorAll<HTMLElement>('.list-card[data-collection]').forEach((card) => {
+    const c = collectionsCache.find((entry) => entry.key === card.dataset.collection);
+    // On the .group-head, where every fold puts it — see collectionCardHtml.
+    if (c) card.querySelector('.group-head')?.classList.toggle('blurred', isItemBlurred(c.cover));
   });
 }
 
@@ -5088,7 +5759,8 @@ async function saveResolutions(): Promise<void> {
       it0.target_height = optimisticTarget;
       const prev = state.progress.get(target);
       state.progress.set(target, {
-        percent: null, speed: '', eta: '', phase: '', status: 'queued', shown: prev ? prev.shown : 0,
+        percent: null, speed: '', eta: '', phase: '', status: 'queued',
+        shown: prev ? prev.shown : 0, ring: 0, sawVideo: false,
       });
       upsertRow(it0, false);
     }
@@ -6092,6 +6764,12 @@ setupBackToTop();
 
 els.search.addEventListener('input', debounce(() => {
   state.q = els.search.value.trim();
+  // The same box, asking the same question of whatever the route is showing. On
+  // the collection index that is the loaded summaries — there is no server query
+  // for "lists whose name matches", and there needn't be: the index is one
+  // bounded fetch that is already in hand, so filtering it is a filter, not a
+  // request.
+  if (route === 'lists' && !state.collection) { renderCollections(); return; }
   loadItems(true);
 }, 300));
 
@@ -6181,19 +6859,32 @@ function armHoverPeek(item: HTMLElement): void {
   hoverPeek = { item, timer };
 }
 if (canHover) {
-  els.history.addEventListener('mouseover', (e) => {
-    const item = (e.target as HTMLElement).closest('.item.blurred, .group-head.blurred') as HTMLElement | null;
-    if (!item) { clearHoverPeek(); return; }
-    armHoverPeek(item);
-  });
-  els.history.addEventListener('mouseout', (e) => {
-    const item = (e.target as HTMLElement).closest('.item.blurred, .group-head.blurred') as HTMLElement | null;
-    if (!item) return;
-    const to = e.relatedTarget as Node | null;
-    if (to && item.contains(to)) return; // still inside the card — keep peeking
-    clearHoverPeek();
-  });
+  // Both lists get it: a list card is as blurred as a video card, and the Lists
+  // route would otherwise be the one place a blurred cover could not be peeked.
+  for (const root of [els.history, els.lists]) {
+    root.addEventListener('mouseover', (e) => {
+      const item = (e.target as HTMLElement).closest('.item.blurred, .group-head.blurred') as HTMLElement | null;
+      if (!item) { clearHoverPeek(); return; }
+      armHoverPeek(item);
+    });
+    root.addEventListener('mouseout', (e) => {
+      const item = (e.target as HTMLElement).closest('.item.blurred, .group-head.blurred') as HTMLElement | null;
+      if (!item) return;
+      const to = e.relatedTarget as Node | null;
+      if (to && item.contains(to)) return; // still inside the card — keep peeking
+      clearHoverPeek();
+    });
+  }
 }
+
+// Mark a thumbnail as decoded so a tile can cross-fade it over its skeleton (see
+// `.item.tile img.thumb`). Captured, because `load` doesn't bubble — one listener
+// for the whole list rather than a handler per image, and it survives every row
+// rebuild since the listener isn't on the images.
+els.history.addEventListener('load', (e) => {
+  const img = e.target as HTMLElement;
+  if (img instanceof HTMLImageElement && img.classList.contains('thumb')) img.classList.add('loaded');
+}, true);
 
 // Delegated actions on cards: in select mode a tap toggles the row; otherwise
 // thumbnail play / share dialog as before.
@@ -6930,6 +7621,8 @@ function removeRow(id: number): void {
     if (g && g.body.children.length === 0) { groupCard!.remove(); state.groups.delete(gkey); }
     else updateGroupHeader(gkey);
   }
+  // Deleting the last tile of a day leaves its heading standing over nothing.
+  if (tiled()) queueDayHeaderSync();
 }
 
 // Ids awaiting the confirm dialog's Yes. Deletion is destructive (DB record +
@@ -7317,6 +8010,16 @@ function startPlayQueue(items: Item[], startId = items[0]?.id): void {
 // expanded second-level image/video.
 function playItemInGroup(id: number, cloud: boolean, poster?: string): void {
   const item = state.items.get(id);
+  // In a tiled view the LIST is the queue. Inside an open collection that is its
+  // membership — tapping the fourth video walks on to the fifth, exactly as
+  // tapping a fold's child does. In the timeline it is the timeline: a flat grid
+  // has no fold to supply a queue, and swiping from one photo to the next one you
+  // could see is what opening a photo out of a grid has meant since Photos did it.
+  // Either way the rows on screen ARE the queue, so nothing extra is fetched.
+  if (tiled()) {
+    const members = loadedRows().filter(isPlayable);
+    if (members.length > 1 && members.some((m) => m.id === id)) { startPlayQueue(members, id); return; }
+  }
   const gkey = item && groupKeyOf(item);
   if (gkey) {
     const members = groupChildIds(gkey)
@@ -8346,6 +9049,13 @@ function dismissTopLayer(): boolean {
   if (!els.settings.classList.contains('hidden')) { closeModal(els.settings); return true; }
   if (!els.websites.classList.contains('hidden')) { closeModal(els.websites); return true; }
   if (state.selectMode) { exitSelectMode(); return true; }
+  // The route is the outermost layer: an open list peels back to the list index,
+  // and the index back to the timeline. Only with the app at its root does Back
+  // fall through to the press-again-to-exit guard.
+  // Deferred history: see goRoute. We are inside the popstate that consumed the
+  // Back sentinel, and touching history here would stop it being re-armed.
+  if (state.collection) { goRoute('lists', null, true); return true; }
+  if (route !== 'timeline') { goRoute('timeline', null, true); return true; }
   return false;
 }
 
@@ -8739,7 +9449,9 @@ document.addEventListener('i18n:changed', () => {
   renderAppPermissions();
   renderServerStatus();
   renderDlStats(); // re-localize the "N items · X GB" summary
-  if (getToken()) loadItems(true);
+  renderCollectionBar();
+  renderCollections(); // list cards' counts and sizes are built from t()
+  if (getToken() && (route === 'timeline' || state.collection)) loadItems(true);
   if (!els.websites.classList.contains('hidden')) loadWebsites();
 });
 
@@ -8806,6 +9518,12 @@ async function runHeartbeat(): Promise<void> {
 // hidden, and the list dead-ends at the cached page with no way to scroll further.
 async function softRefresh(establishPaging = false): Promise<void> {
   if (state.loading) return;
+  // The poll's whole shape — ask for the newest page, prepend it, then reconcile
+  // deletions within its window — assumes a newest-first library. An open list is
+  // neither: it is a fixed set shown in its own running order, so prepending the
+  // page would reverse it. It has nothing to poll for anyway; SSE keeps its rows
+  // live, and leaving it reloads it.
+  if (state.collection) return;
   state.loading = true;
   const gen = baseGeneration;
   try {
@@ -8815,7 +9533,8 @@ async function softRefresh(establishPaging = false): Promise<void> {
     // undoing the active view.
     applyFilterParams(params);
     applySortParams(params);
-    params.set('limit', String(PAGE_SIZE));
+    const limit = pageSize();
+    params.set('limit', String(limit));
     const res = await apiFetch('/api/items?' + params.toString());
     // Superseded by a server change — see loadItems.
     if (gen !== baseGeneration) return;
@@ -8829,11 +9548,12 @@ async function softRefresh(establishPaging = false): Promise<void> {
     // its window (id >= the oldest returned) so scroll-loaded older rows are spared.
     // When a partial page came back the whole history fits here, so reconcile all.
     const present = new Set(items.map((it) => it.id));
-    const floor = items.length >= PAGE_SIZE ? items[items.length - 1]!.id : -Infinity;
+    const floor = items.length >= limit ? items[items.length - 1]!.id : -Infinity;
     for (const id of [...state.rows.keys()]) {
       if (id >= floor && !present.has(id)) removeRow(id);
     }
     els.empty.classList.toggle('hidden', state.rows.size !== 0);
+    syncDayHeaders(); // prepended rows may have opened a new day
     // Honour an extension `#orca-play=` deep-link on the cache-hydrated boot path
     // too (this fresh fetch is what actually holds a just-downloaded item). Single
     // -shot, so the later poll ticks are no-ops.
@@ -8955,9 +9675,14 @@ async function startApp(): Promise<void> {
   // wait in practice.
   await loadServerConfig();
   connectEvents();
+  // Which view the hash asked for decides what the first fetch is. Only the plain
+  // library timeline has a first-paint cache: a narrowed view (an open list) is a
+  // question, not the page you'd expect to return to.
+  if (route === 'lists' && !state.collection) void loadCollections();
   // Paint the last known page before the network answers, then reconcile it
   // (see hydrateFromCache). Only a cold client rebuilds the list outright.
-  if (hydrateFromCache()) void softRefresh(true); else void loadItems(true);
+  else if (!state.collection && hydrateFromCache()) void softRefresh(true);
+  else void loadItems(true);
   loadStats();
   if (getToken()) {
     loadWebsites();  // per-site privacy-blur state for the home list
@@ -8968,6 +9693,10 @@ async function startApp(): Promise<void> {
 applyTheme();                // resolve theme before first paint work
 window.i18n.apply(document); // localize the static markup before anything shows
 renderThemePicker();
+renderLayoutPicker();
+// Settle the route (and therefore whether rows are tiles or cards) before the
+// first row is built, so nothing renders twice.
+applyRoute(true);
 renderShareBehaviorPicker();
 renderLangSelect();
 renderFilterMenu();

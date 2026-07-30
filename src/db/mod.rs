@@ -49,6 +49,11 @@ pub struct ListQuery {
     /// its own membership directly instead of hoping the whole list happens to
     /// fall inside the page the history is currently showing.
     pub playlist: Option<String>,
+    /// Restrict to one multi-media POST's attachments: the entries that share a
+    /// `webpage_url` and were disambiguated by `playlist_index`. The other half of
+    /// `playlist` — a collection is keyed either by a real playlist id or, for a
+    /// tweet with four clips, by the post URL itself.
+    pub post: Option<String>,
     /// Column the page is ordered by. Defaults to `Time` (newest first).
     pub sort: SortKey,
     /// Flip the sort direction (ascending instead of the default descending).
@@ -60,6 +65,25 @@ pub struct ListQuery {
 pub struct ListPage {
     pub items: Vec<Item>,
     pub next_cursor: Option<i64>,
+}
+
+/// One collection — a real playlist, or a post whose media arrived as several
+/// entries — summarised for the Lists route: what it is, how big it is, and the
+/// one member that stands for it on a card.
+#[derive(Debug, Clone)]
+pub struct Collection {
+    /// `list:<playlist_key>` or `post:<webpage_url>`, matching the key the web UI
+    /// folds rows under (see `groupKeyOf` in app.ts).
+    pub key: String,
+    pub title: Option<String>,
+    pub count: i64,
+    /// Combined size of every member that holds a file.
+    pub total_filesize: i64,
+    /// Newest member's `created_at` — what the list is ordered by.
+    pub latest_at: i64,
+    /// First member by playlist position: the cover, and the row the card reuses
+    /// to render its thumbnail.
+    pub cover: Item,
 }
 
 #[derive(Clone)]
@@ -299,6 +323,10 @@ impl Db {
 
     pub async fn list(&self, q: ListQuery) -> anyhow::Result<ListPage> {
         queries::list(self, q).await
+    }
+
+    pub async fn collections(&self, limit: i64) -> anyhow::Result<Vec<Collection>> {
+        queries::collections(self, limit).await
     }
 
     pub async fn delete(&self, id: i64) -> anyhow::Result<Option<Item>> {

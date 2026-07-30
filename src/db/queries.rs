@@ -1069,6 +1069,11 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
     if q.playlist.is_some() {
         sql.push_str(" AND playlist_key = ?");
     }
+    // A post collection is "these rows share a URL and were indexed apart", which
+    // is exactly the pair of columns groupKeyOf reads on the client.
+    if q.post.is_some() {
+        sql.push_str(" AND webpage_url = ? AND playlist_index IS NOT NULL");
+    }
     for c in &search_clauses {
         sql.push_str(" AND ");
         sql.push_str(c);
@@ -1094,6 +1099,9 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
     if let Some(key) = q.playlist.clone() {
         query = query.bind(key);
     }
+    if let Some(url) = q.post.clone() {
+        query = query.bind(url);
+    }
     for b in search_binds {
         query = match b {
             Bind::Text(t) => query.bind(t),
@@ -1118,6 +1126,53 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
     };
 
     Ok(ListPage { items, next_cursor })
+}
+
+/// Every collection, newest first, one row each.
+///
+/// The Lists route asks "what collections exist", which the paged item history
+/// cannot answer: a playlist's members are scattered through it by download time,
+/// so finding all of them client-side means walking the entire history. One
+/// windowed query answers it instead — partition the collection members by their
+/// group key, keep the first member of each partition as the cover, and carry the
+/// count / size / recency of the whole partition on that same row.
+///
+/// `COUNT`/`SUM`/`MAX` are window functions rather than a `GROUP BY` precisely so
+/// the cover survives as a full row: an aggregate query would collapse it, and
+/// SQLite's bare-column-with-`MIN` shortcut is only defined for a single
+/// min/max — this needs three.
+pub(super) async fn collections(db: &Db, limit: i64) -> anyhow::Result<Vec<super::Collection>> {
+    // Namespaced exactly like the client's groupKeyOf, so a list id can never
+    // collide with a post URL.
+    const GKEY: &str = "CASE WHEN playlist_key IS NOT NULL THEN 'list:' || playlist_key \
+                        ELSE 'post:' || webpage_url END";
+    let sql = format!(
+        "WITH members AS (SELECT {SELECT_COLS}, {GKEY} AS gkey, \
+              COALESCE(playlist_pos, playlist_index, 0) AS gpos \
+            FROM items WHERE playlist_key IS NOT NULL OR playlist_index IS NOT NULL), \
+          ranked AS (SELECT *, \
+              ROW_NUMBER() OVER (PARTITION BY gkey ORDER BY gpos ASC, id ASC) AS rn, \
+              COUNT(*) OVER (PARTITION BY gkey) AS gcount, \
+              SUM(COALESCE(total_filesize, 0)) OVER (PARTITION BY gkey) AS gbytes, \
+              MAX(created_at) OVER (PARTITION BY gkey) AS glatest \
+            FROM members) \
+         SELECT * FROM ranked WHERE rn = 1 ORDER BY glatest DESC, id DESC LIMIT ?"
+    );
+    let rows = sqlx::query(&sql).bind(limit).fetch_all(&db.pool).await?;
+    rows.iter()
+        .map(|row| {
+            Ok(super::Collection {
+                key: row.try_get("gkey")?,
+                // A post has no playlist title; the cover's own title stands in on
+                // the client, which already knows how to render one.
+                title: row.try_get("playlist_title")?,
+                count: row.try_get("gcount")?,
+                total_filesize: row.try_get("gbytes")?,
+                latest_at: row.try_get("glatest")?,
+                cover: row_to_item(row)?,
+            })
+        })
+        .collect()
 }
 
 pub(super) async fn delete(db: &Db, id: i64) -> anyhow::Result<Option<Item>> {
@@ -1779,6 +1834,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all.items.len(), 3);
+    }
+
+    // The Lists route asks "what collections exist" — both kinds — and gets one
+    // row per collection carrying its own count and its cover, never the loose
+    // items around them.
+    #[tokio::test]
+    async fn collections_summarize_both_kinds() {
+        let (db, _dir) = temp_db().await;
+        let pl = crate::types::PlaylistRef {
+            key: "youtube:PL1".into(),
+            title: Some("Mine".into()),
+            pos: None,
+        };
+        // Two playlist members, out of position order so the cover has to be the
+        // one at pos 0 rather than merely the first inserted.
+        for (id, pos) in [("a", 1), ("b", 0)] {
+            let item = db
+                .insert_probe(&probe("youtube", id, id), Source::Download)
+                .await
+                .unwrap();
+            db.set_playlist(
+                item.id,
+                &crate::types::PlaylistRef {
+                    pos: Some(pos),
+                    ..pl.clone()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // A two-clip post: same webpage_url, disambiguated by playlist_index.
+        for i in 1..=2 {
+            let mut p = probe("twitter", &format!("post-{i}"), "clip");
+            p.webpage_url = "https://example.com/status/1".into();
+            p.playlist_index = Some(i);
+            db.insert_probe(&p, Source::Download).await.unwrap();
+        }
+        // A loose item, which belongs to no collection at all.
+        db.insert_probe(&probe("youtube", "loose", "loose"), Source::Download)
+            .await
+            .unwrap();
+
+        let cols = db.collections(50).await.unwrap();
+        assert_eq!(cols.len(), 2);
+        let list = cols.iter().find(|c| c.key == "list:youtube:PL1").unwrap();
+        assert_eq!(list.count, 2);
+        assert_eq!(list.title.as_deref(), Some("Mine"));
+        assert_eq!(list.cover.title, "b"); // pos 0, not the first inserted
+        let post = cols
+            .iter()
+            .find(|c| c.key == "post:https://example.com/status/1")
+            .unwrap();
+        assert_eq!(post.count, 2);
+        assert_eq!(post.title, None);
+    }
+
+    // A post's attachments are fetchable as a unit, the same way a playlist's
+    // members are — the `post=` filter must not sweep in a same-URL row that was
+    // never indexed as part of a multi-media post.
+    #[tokio::test]
+    async fn list_filters_to_one_post() {
+        let (db, _dir) = temp_db().await;
+        for i in 1..=2 {
+            let mut p = probe("twitter", &format!("post-{i}"), "clip");
+            p.webpage_url = "https://example.com/status/1".into();
+            p.playlist_index = Some(i);
+            db.insert_probe(&p, Source::Download).await.unwrap();
+        }
+        let mut solo = probe("twitter", "solo", "solo");
+        solo.webpage_url = "https://example.com/status/1".into();
+        db.insert_probe(&solo, Source::Download).await.unwrap();
+
+        let page = db
+            .list(ListQuery {
+                limit: 50,
+                post: Some("https://example.com/status/1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|i| i.playlist_index.is_some()));
     }
 
     #[tokio::test]

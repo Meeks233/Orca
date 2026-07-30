@@ -517,6 +517,10 @@ pub struct ListParams {
     /// is one card standing for many rows, so it fetches its own membership in
     /// one go rather than waiting for the paged history to walk down to it.
     pub playlist: Option<String>,
+    /// `post=<webpage_url>` → only that post's attachments. The other kind of
+    /// collection (see `ListQuery::post`), asked for the same way and for the same
+    /// reason as `playlist`.
+    pub post: Option<String>,
     /// Column to order by: `time` (default), `size`, `duration`, `resolution`.
     pub sort: Option<String>,
     /// `reverse=true` flips the default descending order to ascending.
@@ -544,6 +548,7 @@ pub async fn list(
             before_id: params.before_id,
             local: params.local,
             playlist: params.playlist.filter(|p| !p.is_empty()),
+            post: params.post.filter(|p| !p.is_empty()),
             sort: params
                 .sort
                 .as_deref()
@@ -559,6 +564,36 @@ pub async fn list(
         .map(|item| decorate_item(item, &sites))
         .collect::<Vec<_>>();
     Ok(Json(json!({ "items": items, "next_cursor": page.next_cursor })).into_response())
+}
+
+/// GET /api/collections — every collection (playlist or multi-media post), newest
+/// first, as one summary row each.
+///
+/// The web UI's Lists route is a page of collections, and a collection is not a
+/// row in `items` — it is a partition of them. Deriving it client-side would mean
+/// paging the whole history to find which rows belong together, so the grouping is
+/// answered in SQL (see `queries::collections`) and each summary carries the cover
+/// member verbatim, so the client renders its thumbnail with the same code a card
+/// uses.
+pub async fn collections(State(state): State<AppState>) -> AppResult<Response> {
+    let sites = state.db.list_websites().await.unwrap_or_default();
+    let collections = state
+        .db
+        .collections(200)
+        .await?
+        .iter()
+        .map(|c| {
+            json!({
+                "key": c.key,
+                "title": c.title,
+                "count": c.count,
+                "total_filesize": c.total_filesize,
+                "latest_at": c.latest_at,
+                "cover": decorate_item(&c.cover, &sites),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "collections": collections })).into_response())
 }
 
 /// GET /api/items/:slug — one item. Carries a computed `blur` flag (its site's
