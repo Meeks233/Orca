@@ -131,7 +131,7 @@
     </div>
     <div class="field">
       <input id="search" type="search"
-             placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
+             placeholder="Search…"
              data-i18n-ph="ph.search" data-i18n-title="title.search"
              title="e621-style syntax: id: user:/uploader: title: platform:/site: status: — prefix a term with - to exclude. Bare words match title, uploader OR platform; a bare status word (queued/running/completed/failed) filters by status.">
     </div>
@@ -207,6 +207,18 @@
           <button id="sel-delete-local" class="site-menu-item sel-menu-danger hidden" role="menuitem" data-i18n="sel.deleteLocal">Delete from device</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Too many pages open. The server serves a fixed number of terminals at once
+       (src/terminals.rs) and told this one, on its heartbeat, that it is the one
+       over the line. No close button and no backdrop dismiss: the page genuinely
+       cannot be used, and it puts itself away as soon as a slot frees. -->
+  <div id="terminal-limit" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="terminal-limit-title">
+    <div class="modal-card modal-card-narrow">
+      <h2 id="terminal-limit-title" class="modal-heading" data-i18n="terminalLimit.title">Too many pages open</h2>
+      <p class="hint-muted" data-i18n="terminalLimit.body">Orca is already serving as many pages as it can at once. Close this tab (or the app) and use one of the others.</p>
+      <p class="hint-muted" data-i18n="terminalLimit.hint">If you close another one instead, this page picks up on its own.</p>
     </div>
   </div>
 

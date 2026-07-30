@@ -397,6 +397,7 @@ const els = {
   selCancel: byId<HTMLButtonElement>('sel-cancel'),
   selMore: byId<HTMLButtonElement>('sel-more'),
   selMenu: byId('sel-menu'),
+  terminalLimit: byId('terminal-limit'),
   confirmBox: byId('confirm'),
   confirmTitle: byId('confirm-title'),
   confirmSub: byId('confirm-sub'),
@@ -697,6 +698,7 @@ function renderOfflineBar(): void {
 /// Mark the client offline and report it once. Called from every path that fails
 /// to get a normal response — request, media element, native media proxy.
 function reportOffline(): void {
+  if (terminalLimited) return; // not an outage — the terminal-limit modal is the report
   const known = isOffline();
   if (!known) setServerStatus(false); // the bar appearing IS the report
   else flashOfflineBar();             // already stated — acknowledge, don't restate
@@ -710,6 +712,39 @@ function flashOfflineBar(): void {
   bar.classList.add('flash');
   if (offlineFlashTimer != null) clearTimeout(offlineFlashTimer);
   offlineFlashTimer = window.setTimeout(() => bar.classList.remove('flash'), 900);
+}
+
+// ---- Too many pages open ---------------------------------------------------
+// Each open page holds an SSE stream, and a browser gives an origin only six
+// connections: once enough tabs are open, a newly opened one has none left, so
+// every request it makes queues forever and it just sits there blank — the silent
+// failure this replaces. The server caps how many terminals it serves (see
+// src/terminals.rs) and answers this page's heartbeat with 429 when it is the one
+// over the line, which is a thing we can actually say out loud.
+//
+// The id is per page load: a reload is a new terminal, and the one it replaces
+// frees its slot when its stream drops.
+const TERMINAL_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+let terminalLimited = false;
+
+/// The server won't serve this page. Say so, and stop competing for a connection
+/// it isn't going to get; the heartbeat keeps running, so closing another page
+/// brings this one back on its own.
+function reportTerminalLimit(): void {
+  if (terminalLimited) return;
+  terminalLimited = true;
+  if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (es) { es.close(); es = null; }
+  setServerUnknown(); // drop any offline bar the refused stream raised — it lied
+  openModal(els.terminalLimit);
+}
+
+/// A slot came free (the heartbeat got a real answer again).
+function clearTerminalLimit(): void {
+  if (!terminalLimited) return;
+  terminalLimited = false;
+  closeModal(els.terminalLimit);
+  void connectEvents();
 }
 
 // ---- Storage readout (beside the heartbeat) -------------------------------
@@ -810,8 +845,12 @@ function renderDlStats(): void {
 async function loadStats(): Promise<void> {
   if (!getToken()) return;
   try {
-    const res = await apiFetch('/api/stats');
+    // The heartbeat doubles as this page's "still here" ping, so it carries the
+    // terminal id — and is where being over the limit is reported back.
+    const res = await apiFetch('/api/stats', { headers: { 'X-Orca-Term': TERMINAL_ID } });
+    if (res.status === 429) { reportTerminalLimit(); return; }
     if (!res.ok) return;
+    clearTerminalLimit();
     dlStatsCache = await res.json() as Stats;
     renderDlStats();
     // Same payload carries the server-wide paused count, so the global
@@ -2783,11 +2822,16 @@ async function connectEvents(): Promise<void> {
   // light stays in its unknown state and the offline bar keeps quiet — the
   // welcome window is the thing explaining this state.
   if (!token) { setServerUnknown(); return; }
+  // Refused for being over the terminal limit: don't re-take the connection the
+  // heartbeat needs. clearTerminalLimit reconnects once a slot frees.
+  if (terminalLimited) return;
   if (es) { es.close(); es = null; }
   const generation = ++eventGeneration;
   const encrypted = await encryptedEventSourceUrl(apiUrl('/api/events'), '/api/events', token);
   if (generation !== eventGeneration) return;
-  es = new EventSource(encrypted.url);
+  // Appended after the fact: the sid/auth query is built against the bare path
+  // (the authenticator is bound to it), so the terminal id rides along behind it.
+  es = new EventSource(`${encrypted.url}&term=${encodeURIComponent(TERMINAL_ID)}`);
   // Stream established → server is reachable (green status light).
   es.onopen = () => { setServerStatus(true); reconnectDelay = RECONNECT_MIN_MS; };
   // Events have to be APPLIED in the order they arrived. Each one is decrypted

@@ -33,6 +33,7 @@ pub struct AppState {
     pub stream_urls: crate::ytdlp::StreamUrlCache,
     pub subtitle_urls: crate::ytdlp::SubtitleCache,
     pub sessions: crate::session::SessionStore,
+    pub terminals: crate::terminals::Terminals,
 }
 
 pub fn router(state: AppState) -> Router {

@@ -5,7 +5,7 @@ use crate::db::{ListQuery, SortKey};
 use crate::error::{AppError, AppResult};
 use crate::types::{Item, Status, SubmitRequest, SubmitResponse};
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -847,7 +847,21 @@ pub async fn delete(
 /// button keys off what the *backend* is holding, not off whichever page of items
 /// this client happens to have fetched, so it stays correct when the paused work
 /// is further down the list than the client has scrolled.
-pub async fn stats(State(state): State<AppState>) -> AppResult<Response> {
+///
+/// The heartbeat is also where a terminal (one open page/app) announces that it
+/// is still there — and the one channel an over-limit terminal has left, since
+/// its stream was refused. `429 terminal_limit` is that answer; see
+/// `crate::terminals`.
+pub async fn stats(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Response> {
+    if let Some(terminal) = headers
+        .get(crate::terminals::HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|id| !id.is_empty())
+    {
+        if !state.terminals.touch(terminal) {
+            return Err(AppError::TooManyTerminals);
+        }
+    }
     let (count, total_bytes) = state.db.download_stats().await?;
     let limit_bytes = crate::queue::resolve_max_storage(&state.cfg, &state.db).await;
     let paused = state.db.paused_count().await?;

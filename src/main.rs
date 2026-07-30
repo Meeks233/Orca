@@ -21,6 +21,7 @@ mod resolution;
 mod safepath;
 mod seal_import;
 mod session;
+mod terminals;
 mod types;
 mod url_normalize;
 mod web;
@@ -155,6 +156,7 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         stream_urls: Default::default(),
         subtitle_urls: Default::default(),
         sessions: Default::default(),
+        terminals: Default::default(),
     };
 
     let bind = cfg.bind;

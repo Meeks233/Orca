@@ -50,18 +50,34 @@ pub async fn events(
         None
     };
 
+    // One terminal (open page/app) holds this stream for as long as it lives, and
+    // a browser only has six connections per origin to give out. Refuse the
+    // over-limit terminal's stream outright — holding it would spend the very
+    // connection it needs to hear the 429 its heartbeat is about to get. See
+    // `crate::terminals`.
+    let guard = match super::auth::query_param(&q, "term") {
+        Some(term) => match state.terminals.open_stream(&term) {
+            Some(guard) => Some(guard),
+            None => return AppError::TooManyTerminals.into_response(),
+        },
+        None => None,
+    };
+
     let rx = state.queue.subscribe();
-    let stream = progress_stream(rx, encryption_key);
+    let stream = progress_stream(rx, encryption_key, guard);
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
 }
 
+/// `guard` is carried purely so the terminal's slot is held for exactly as long
+/// as this stream lives, and released when the page closes and it is dropped.
 fn progress_stream(
     rx: broadcast::Receiver<crate::types::ProgressEvent>,
     encryption_key: Option<[u8; 32]>,
+    guard: Option<crate::terminals::StreamGuard>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
-    futures::stream::unfold(rx, move |mut rx| async move {
+    futures::stream::unfold((rx, guard), move |(mut rx, guard)| async move {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
@@ -78,7 +94,7 @@ fn progress_stream(
                             .json_data(&ev)
                             .unwrap_or_else(|_| Event::default().comment("serialize error"))
                     };
-                    return Some((Ok(event), rx));
+                    return Some((Ok(event), (rx, guard)));
                 }
                 // Dropped some messages under load — keep going.
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,

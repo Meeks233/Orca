@@ -19,6 +19,11 @@ pub enum AppError {
     #[error("probe failed: {0}")]
     ProbeFailed(String),
 
+    /// Already serving as many open pages/apps as it will at once — see
+    /// `crate::terminals`. The client turns this into "close this tab".
+    #[error("too many terminals")]
+    TooManyTerminals,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -40,6 +45,11 @@ impl AppError {
             AppError::ProbeFailed(m) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "probe_failed", m.clone())
             }
+            AppError::TooManyTerminals => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "terminal_limit",
+                "too many pages open".to_string(),
+            ),
             AppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
