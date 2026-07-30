@@ -333,7 +333,7 @@ body {
    full 20×20 circle — so at an identical size the eye read a size smaller than
    its neighbours. Two extra pixels equalise the perceived mass; the negative
    margin keeps the button's own box (and the topbar's height) unchanged. */
-#blur-toggle svg { width: 24px; height: 24px; margin: -1px; }
+#blur-toggle svg { width: 22px; height: 22px; margin: -1px; }
 
 /* ---- Topbar popover menu (language picker) ----
    A small dropdown anchored under its trigger, the standard header-menu pattern:
@@ -815,8 +815,8 @@ html.app-native .permission-item[data-permission="autoplay"] { display: none; }
    a bar that is mostly information, so they're sized to be reachable without
    claiming the corner. Glyph a step down from 24, padding trimmed with it. */
 .topbar-actions { display: flex; gap: 0; }
-.topbar-actions .icon-btn { padding: 4px 6px; }
-.topbar-actions .icon-btn svg { width: 22px; height: 22px; }
+.topbar-actions .icon-btn { padding: 4px 5px; }
+.topbar-actions .icon-btn svg { width: 20px; height: 20px; }
 /* The last action's own right padding insets its glyph from the bar edge, so the
    settings gear sat a step left of the Download button below it. Drop that trailing
    pad so the icon group's right edge lines up with the Download button. */
@@ -966,11 +966,11 @@ html.app-native .permission-item[data-permission="autoplay"] { display: none; }
 
 .item {
   display: flex;
-  gap: 12px;
+  gap: 9px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  padding: 10px;
+  padding: 8px;
 }
 
 /* Arrived here from a download notification tap: pulse the row so the item the
@@ -1068,8 +1068,8 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   display: flex;
   align-items: stretch; /* let the info column fill the thumb height so the
                            bottom-right actions align with the card bottom */
-  gap: 12px;
-  padding: 10px;
+  gap: 9px;
+  padding: 8px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   /* Match the card's rounding so the selection highlight (a filled background)
@@ -1466,14 +1466,14 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
 .body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .title {
   font-weight: 600;
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.35;
   display: flex;
   align-items: flex-start;
   gap: 6px;
   /* A first-level list header and a regular video deliberately share this
      title primitive. Disable Android WebView's per-block font boosting here so
-     both always render at the declared 16px scale. */
+     both always render at the declared 15px scale. */
   -webkit-text-size-adjust: none;
   text-size-adjust: none;
 }
@@ -1510,8 +1510,8 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
    brand, so a plate can't shrink one either. */
 .src-logo {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   box-sizing: border-box;
   object-fit: contain;
   margin-top: 1px;
@@ -1551,7 +1551,7 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
 
 /* A harvested favicon is a full-bleed raster, so at the same box it would out-
    measure every bundled mark. Inset it to the size a square bundled mark lands
-   at once normalized (~14px of the 20px box) so a scraped site sits at brand
+   at once normalized (~13px of the 18px box) so a scraped site sits at brand
    size rather than a size of its own. */
 .src-logo.src-logo-harvested { padding: 3px; }
 /* Indented to clear the source logo the title line carries, so the creator's name
@@ -1566,9 +1566,9 @@ body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
   color: var(--muted);
   font-size: 13px;
   margin-top: 2px;
-  margin-left: 26px;
+  margin-left: 24px;
   align-self: flex-start;
-  max-width: calc(100% - 26px); /* the inset is outside the box, so 100% would overhang */
+  max-width: calc(100% - 24px); /* the inset is outside the box, so 100% would overhang */
 }
 /* When the uploader name is a link to their page, it stays as quiet as the plain
    text until hovered — a jump-off point, not a call to action. */
@@ -2204,7 +2204,7 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
   .thumb-wrap, .thumb, .group-stack { width: 96px; }
   .thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 60px; }
   .item { gap: 8px; }
-  .title { font-size: 16px; }
+  .title { font-size: 15px; }
   .uploader { font-size: 13px; }
 }
 
